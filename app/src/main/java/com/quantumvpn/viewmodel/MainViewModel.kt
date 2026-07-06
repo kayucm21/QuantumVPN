@@ -6,8 +6,8 @@ import android.content.SharedPreferences
 import android.net.VpnService
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.quantumvpn.core.SingBoxCore
 import com.quantumvpn.core.SubscriptionParser
+import com.quantumvpn.core.VPNCore
 import com.quantumvpn.data.*
 import com.quantumvpn.service.VPNService
 import kotlinx.coroutines.*
@@ -17,7 +17,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.io.File
 import java.util.concurrent.TimeUnit
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -54,23 +53,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         loadSavedData()
-        checkVPNPermission()
     }
 
     private fun loadSavedData() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val serversFile = File(context.filesDir, "servers.json")
+                val serversFile = java.io.File(context.filesDir, "servers.json")
                 if (serversFile.exists()) {
                     val json = serversFile.readText()
-                    val savedServers = com.alibaba.fastjson.JSONArray.parseArray(json, VPNServer::class.java)
+                    val type = object : com.google.gson.reflect.TypeToken<List<VPNServer>>() {}.type
+                    val savedServers = com.google.gson.Gson().fromJson<List<VPNServer>>(json, type)
                     _servers.value = savedServers ?: emptyList()
                 }
 
-                val subsFile = File(context.filesDir, "subscriptions.json")
+                val subsFile = java.io.File(context.filesDir, "subscriptions.json")
                 if (subsFile.exists()) {
                     val json = subsFile.readText()
-                    val savedSubs = com.alibaba.fastjson.JSONArray.parseArray(json, Subscription::class.java)
+                    val type = object : com.google.gson.reflect.TypeToken<List<Subscription>>() {}.type
+                    val savedSubs = com.google.gson.Gson().fromJson<List<Subscription>>(json, type)
                     _subscriptions.value = savedSubs ?: emptyList()
                 }
 
@@ -86,13 +86,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun checkVPNPermission() {
-        val intent = VpnService.prepare(context)
-        if (intent != null) {
-            _error.value = "VPN permission required"
-        }
-    }
-
     fun connectVPN() {
         val server = _vpnState.value.currentServer ?: run {
             _error.value = "No server selected"
@@ -104,9 +97,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _vpnState.update { it.copy(isConnecting = true) }
 
             try {
-                val configFile = generateConfig(server)
-                VPNService.configPath = configFile.absolutePath
-
                 val intent = Intent(context, VPNService::class.java).apply {
                     action = "com.quantumvpn.START"
                 }
@@ -226,7 +216,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun testPing(server: VPNServer) {
         viewModelScope.launch(Dispatchers.IO) {
-            val ping = SingBoxCore.testConnection(server.host, server.port)
+            val ping = VPNCore.testPing(server.host, server.port)
             _servers.value = _servers.value.map {
                 if (it.id == server.id) it.copy(ping = ping) else it
             }
@@ -262,39 +252,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _showAddSubscription.value = show
     }
 
-    private fun generateConfig(server: VPNServer): File {
-        val configFile = File(context.filesDir, "config.json")
-
-        val protocol = when (server.protocol) {
-            Protocol.VLESS -> "vless"
-            Protocol.VMESS -> "vmess"
-            Protocol.TROJAN -> "trojan"
-            Protocol.SHADOWSOCKS -> "shadowsocks"
-            Protocol.WIREGUARD -> "wireguard"
-            Protocol.Hysteria2 -> "hysteria2"
-            Protocol.TUIC -> "tuic"
-        }
-
-        val config = SingBoxCore.generateConfig(
-            inboundPort = 10808,
-            outboundHost = server.host,
-            outboundPort = server.port,
-            outboundProtocol = protocol,
-            outboundSettings = server.settings
-        )
-
-        configFile.writeText(config)
-        return configFile
-    }
-
     private fun saveData() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val serversFile = File(context.filesDir, "servers.json")
-                serversFile.writeText(com.alibaba.fastjson.toJSONString(_servers.value))
+                val serversFile = java.io.File(context.filesDir, "servers.json")
+                serversFile.writeText(com.google.gson.Gson().toJson(_servers.value))
 
-                val subsFile = File(context.filesDir, "subscriptions.json")
-                subsFile.writeText(com.alibaba.fastjson.toJSONString(_subscriptions.value))
+                val subsFile = java.io.File(context.filesDir, "subscriptions.json")
+                subsFile.writeText(com.google.gson.Gson().toJson(_subscriptions.value))
             } catch (e: Exception) {
                 e.printStackTrace()
             }

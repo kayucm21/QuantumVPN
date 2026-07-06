@@ -4,7 +4,6 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
-import com.quantumvpn.core.SingBoxCore
 
 class QuantumVPNApp : Application() {
 
@@ -19,7 +18,6 @@ class QuantumVPNApp : Application() {
         super.onCreate()
         instance = this
         createNotificationChannel()
-        SingBoxCore.init(this)
     }
 
     private fun createNotificationChannel() {

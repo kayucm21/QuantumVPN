@@ -7,13 +7,12 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.quantumvpn.MainActivity
 import com.quantumvpn.QuantumVPNApp
 import com.quantumvpn.R
-import com.quantumvpn.core.SingBoxCore
+import com.quantumvpn.core.VPNCore
 import kotlinx.coroutines.*
 
 class VPNService : VpnService() {
@@ -25,12 +24,10 @@ class VPNService : VpnService() {
 
         var isRunning = false
             private set
-        var configPath: String? = null
     }
 
     private val binder = LocalBinder()
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var vpnInterface: ParcelFileDescriptor? = null
 
     inner class LocalBinder : Binder() {
         fun getService(): VPNService = this@VPNService
@@ -53,15 +50,15 @@ class VPNService : VpnService() {
 
     private suspend fun startVpn() {
         try {
-            val config = configPath ?: run {
-                stopSelf()
-                return
-            }
-
             startForeground(NOTIFICATION_ID, createNotification("Connecting..."))
 
-            val established = SingBoxCore.start(config, this@VPNService)
-            if (established) {
+            VPNCore.setVpnService(this)
+
+            val builder = Builder()
+            val tunFd = VPNCore.establishVPN(builder)
+
+            if (tunFd != null) {
+                VPNCore.startPacketForwarding(tunFd)
                 isRunning = true
                 updateNotification("Connected")
                 Log.d(TAG, "VPN connected")
@@ -79,10 +76,8 @@ class VPNService : VpnService() {
     private suspend fun stopVpn() {
         try {
             updateNotification("Disconnecting...")
-            SingBoxCore.stop()
+            VPNCore.stop()
             isRunning = false
-            vpnInterface?.close()
-            vpnInterface = null
             updateNotification("Disconnected")
             delay(500)
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -125,7 +120,7 @@ class VPNService : VpnService() {
 
     override fun onDestroy() {
         scope.cancel()
-        runBlocking { SingBoxCore.stop() }
+        VPNCore.stop()
         isRunning = false
         super.onDestroy()
     }

@@ -104,31 +104,34 @@ object SubscriptionParser {
         return try {
             val base64Content = uri.removePrefix("vmess://")
             val json = String(Base64.decode(base64Content, Base64.DEFAULT))
-            val obj = com.alibaba.fastjson.JSONObject.parseObject(json)
+            val obj = com.google.gson.JsonParser.parseString(json).asJsonObject
 
-            val host = obj.getString("add") ?: return null
-            val port = obj.getIntValue("port")
-            val name = obj.getString("ps") ?: "VMess Server"
+            val host = obj.get("add")?.asString ?: return null
+            val port = obj.get("port")?.asInt ?: 0
+            val name = obj.get("ps")?.asString ?: "VMess Server"
 
             val settings = mutableMapOf<String, Any>(
                 "server" to host,
                 "server_port" to port.toString(),
-                "uuid" to (obj.getString("id") ?: ""),
-                "alter_id" to (obj.getString("aid") ?: "0"),
-                "security" to (obj.getString("scy") ?: "auto")
+                "uuid" to (obj.get("id")?.asString ?: ""),
+                "alter_id" to (obj.get("aid")?.asString ?: "0"),
+                "security" to (obj.get("scy")?.asString ?: "auto")
             )
 
-            val net = obj.getString("net")
-            val tls = obj.getString("tls")
+            val net = obj.get("net")?.asString
+            val tls = obj.get("tls")?.asString
             if (tls == "tls") settings["tls"] = "true"
             if (net == "ws") {
                 settings["transport"] = "ws"
-                obj.getString("path")?.let { settings["path"] = it }
-                obj.getString("host")?.let { settings["host"] = it }
+                val path = obj.get("path")?.asString
+                if (path != null) settings["path"] = path
+                val hostParam = obj.get("host")?.asString
+                if (hostParam != null) settings["host"] = hostParam
             }
             if (net == "grpc") {
                 settings["transport"] = "grpc"
-                obj.getString("path")?.let { settings["service_name"] = it }
+                val serviceName = obj.get("path")?.asString
+                if (serviceName != null) settings["service_name"] = serviceName
             }
 
             VPNServer(

@@ -88,6 +88,8 @@ object UpdateChecker {
                     }
 
                     installApk(context, apkFile)
+                } else {
+                    Log.e(TAG, "Failed to download: ${response.code}")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to download update", e)

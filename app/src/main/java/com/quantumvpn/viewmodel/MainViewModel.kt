@@ -88,7 +88,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connectVPN() {
         val server = _vpnState.value.currentServer ?: run {
-            _error.value = "No server selected"
+            _error.value = "Выберите сервер"
             return
         }
 

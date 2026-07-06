@@ -49,11 +49,13 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     val context = LocalContext.current
     val vpnState by viewModel.vpnState.collectAsState()
     val servers by viewModel.servers.collectAsState()
+    val subscriptions by viewModel.subscriptions.collectAsState()
     val error by viewModel.error.collectAsState()
     val selectedProtocol by viewModel.selectedProtocol.collectAsState()
     val showAddDialog by viewModel.showAddSubscription.collectAsState()
 
     var showSettings by remember { mutableStateOf(false) }
+    var showSubscriptions by remember { mutableStateOf(false) }
     var vpnPermOk by remember { mutableStateOf(false) }
     var notifPermOk by remember { mutableStateOf(false) }
 
@@ -140,6 +142,9 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                     HappButton("Обновить конфигурацию", Icons.Outlined.Refresh, Modifier.weight(1f)) { viewModel.refreshSubscriptions() }
                     HappButton("Проверка пинга", Icons.Outlined.Speed, Modifier.weight(1f)) { viewModel.testAllPings() }
                 }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
+                    HappButton("Подписки (${subscriptions.size})", Icons.Outlined.List, Modifier.weight(1f)) { showSubscriptions = true }
+                }
             }
 
             // Protocol filter
@@ -171,6 +176,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 
     if (showAddDialog) AddSubDialog({ viewModel.showAddSubscription(false) }) { u, n -> viewModel.addSubscription(u, n) }
     if (showSettings) SettingsDlg({ showSettings = false })
+    if (showSubscriptions) SubscriptionsDlg(subscriptions, { showSubscriptions = false }, { viewModel.removeSubscription(it) })
     error?.let { Snackbar(Modifier.padding(16.dp), containerColor = Color(0xFF2D1B69), contentColor = Color.White, action = { TextButton({ viewModel.dismissError() }) { Text("OK", color = Color(0xFF7C6CFF)) } }) { Text(it) } }
 }
 
@@ -301,6 +307,34 @@ fun SettingsDlg(onDismiss: () -> Unit) {
     AlertDialog(onDismissRequest = onDismiss, containerColor = Color(0xFF1A1145), titleContentColor = Color.White, textContentColor = Color.White.copy(0.8f),
         title = { Text("Настройки", fontWeight = FontWeight.Bold) },
         text = { Text("QuantumVPN v1.2.0\n\nПротоколы: VLESS, VMess, Trojan, Shadowsocks\nHysteria2, TUIC, WireGuard", fontSize = 14.sp, lineHeight = 22.sp) },
+        confirmButton = { Button(onDismiss, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C6CFF)), shape = RoundedCornerShape(10.dp)) { Text("Закрыть") } }
+    )
+}
+
+@Composable
+fun SubscriptionsDlg(subs: List<com.quantumvpn.data.Subscription>, onDismiss: () -> Unit, onDelete: (com.quantumvpn.data.Subscription) -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, containerColor = Color(0xFF1A1145), titleContentColor = Color.White, textContentColor = Color.White.copy(0.8f),
+        title = { Text("Подписки", fontWeight = FontWeight.Bold) },
+        text = {
+            if (subs.isEmpty()) {
+                Text("Нет подписок", fontSize = 14.sp, color = Color.White.copy(0.5f))
+            } else {
+                Column {
+                    subs.forEach { sub ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(sub.name, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color.White)
+                                Text("${sub.servers.size} серверов", fontSize = 12.sp, color = Color.White.copy(0.5f))
+                            }
+                            IconButton(onClick = { onDelete(sub) }) {
+                                Icon(Icons.Outlined.Delete, "Удалить", tint = Color(0xFFFF6B6B))
+                            }
+                        }
+                        Divider(color = Color.White.copy(0.1f))
+                    }
+                }
+            }
+        },
         confirmButton = { Button(onDismiss, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C6CFF)), shape = RoundedCornerShape(10.dp)) { Text("Закрыть") } }
     )
 }

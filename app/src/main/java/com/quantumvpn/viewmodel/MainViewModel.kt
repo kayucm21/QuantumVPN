@@ -78,6 +78,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (selectedId != null) {
                     _servers.value.find { it.id == selectedId }?.let { server ->
                         _vpnState.update { it.copy(currentServer = server) }
+                        com.quantumvpn.data.CurrentServer.set(server)
                     }
                 }
             } catch (e: Exception) {
@@ -85,6 +86,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    private var trafficJob: kotlinx.coroutines.Job? = null
 
     fun connectVPN() {
         val server = _vpnState.value.currentServer ?: run {
@@ -110,15 +113,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 _connectionState.value = ConnectionState.Connected
+                startTrafficTracking()
             } catch (e: Exception) {
                 _vpnState.update { it.copy(isConnecting = false) }
-                _connectionState.value = ConnectionState.Error(e.message ?: "Connection failed")
+                _connectionState.value = ConnectionState.Error(e.message ?: "Ошибка подключения")
                 _error.value = e.message
             }
         }
     }
 
+    private fun startTrafficTracking() {
+        trafficJob?.cancel()
+        trafficJob = viewModelScope.launch {
+            while (isActive) {
+                kotlinx.coroutines.delay(1000)
+                _vpnState.update {
+                    it.copy(
+                        totalDownload = com.quantumvpn.core.VPNCore.totalDownload,
+                        totalUpload = com.quantumvpn.core.VPNCore.totalUpload
+                    )
+                }
+            }
+        }
+    }
+
     fun disconnectVPN() {
+        trafficJob?.cancel()
         viewModelScope.launch {
             _connectionState.value = ConnectionState.Disconnecting
 
@@ -157,6 +177,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(isSelected = it.id == server.id)
         }
         _vpnState.update { it.copy(currentServer = server) }
+        com.quantumvpn.data.CurrentServer.set(server)
         prefs.edit().putString("selected_server_id", server.id).apply()
     }
 

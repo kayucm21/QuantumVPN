@@ -45,19 +45,30 @@ class VPNService : VpnService() {
     private suspend fun startVpn() {
         try {
             startForeground(NOTIFICATION_ID, createNotification("Подключение..."))
-            VPNCore.setVpnService(this)
-            val builder = Builder()
-            val fd = VPNCore.establishVPN(builder)
-            if (fd != null) {
-                val server = com.quantumvpn.data.CurrentServer.get()
-                if (server != null) {
-                    VPNCore.startForwarding(fd, server)
-                }
+
+            val server = com.quantumvpn.data.CurrentServer.get()
+            if (server == null) {
+                updateNotification("Ошибка: сервер не выбран")
+                stopSelf()
+                return
+            }
+
+            VPNCore.init(this@VPNService)
+
+            val configPath = com.quantumvpn.core.ConfigGenerator.generate(this@VPNService, server)
+            if (configPath == null) {
+                updateNotification("Ошибка генерации конфига")
+                stopSelf()
+                return
+            }
+
+            val started = VPNCore.start(configPath, this@VPNService)
+            if (started) {
                 isRunning = true
                 startTrafficUpdates()
-                updateNotification("Подключено")
+                updateNotification("Подключено: ${server.name}")
             } else {
-                updateNotification("Ошибка")
+                updateNotification("Ошибка запуска sing-box")
                 stopSelf()
             }
         } catch (e: Exception) {
@@ -71,7 +82,11 @@ class VPNService : VpnService() {
         trafficJob = scope.launch {
             while (isActive) {
                 delay(1000)
-                if (isRunning) updateNotification("Подключено")
+                if (isRunning) {
+                    val dl = VPNCore.totalDownload
+                    val ul = VPNCore.totalUpload
+                    updateNotification("Подключено  ↓${formatBytes(dl)}  ↑${formatBytes(ul)}")
+                }
             }
         }
     }

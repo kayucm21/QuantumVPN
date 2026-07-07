@@ -2,45 +2,49 @@ package com.quantumvpn.ui.theme
 
 import android.app.Activity
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFF7C6CFF),
-    secondary = Color(0xFF00D9FF),
-    tertiary = Color(0xFFFF6584),
-    background = Color(0xFF0D0B2E),
-    surface = Color(0xFF1A1145),
-    surfaceVariant = Color(0xFF241B5E),
+private val LightColorScheme = lightColorScheme(
+    primary = Color(0xFF6366F1),
     onPrimary = Color.White,
+    primaryContainer = Color(0xFFE8E8FF),
+    onPrimaryContainer = Color(0xFF1A1145),
+    secondary = Color(0xFF818CF8),
     onSecondary = Color.White,
-    onBackground = Color.White,
-    onSurface = Color.White,
-    onSurfaceVariant = Color(0xFFB0B0C0),
-    primaryContainer = Color(0xFF2A2D4E),
-    error = Color(0xFFFF6B6B),
-    onError = Color.White
+    secondaryContainer = Color(0xFFE0E7FF),
+    onSecondaryContainer = Color(0xFF1E1B4B),
+    tertiary = Color(0xFF6366F1),
+    onTertiary = Color.White,
+    background = Color(0xFFF5F5F7),
+    onBackground = Color(0xFF1A1C1E),
+    surface = Color.White,
+    onSurface = Color(0xFF1A1C1E),
+    surfaceVariant = Color(0xFFE8E8EC),
+    onSurfaceVariant = Color(0xFF44474E),
+    outline = Color(0xFFC4C4CC),
+    error = Color(0xFFEF4444),
+    onError = Color.White,
+    surfaceTint = Color(0xFF6366F1)
 )
 
 @Composable
 fun QuantumVPNTheme(content: @Composable () -> Unit) {
-    val colorScheme = DarkColorScheme
+    val colorScheme = LightColorScheme
     val view = LocalView.current
 
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            window.statusBarColor = Color(0xFF0D0B2E).toArgb()
-            window.navigationBarColor = Color(0xFF0D0B2E).toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
-            WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = false
+            window.statusBarColor = Color(0xFFF5F5F7).toArgb()
+            window.navigationBarColor = Color(0xFFF5F5F7).toArgb()
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = true
+            WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = true
         }
     }
 

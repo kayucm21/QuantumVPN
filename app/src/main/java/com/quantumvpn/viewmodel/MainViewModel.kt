@@ -1,9 +1,13 @@
 package com.quantumvpn.viewmodel
 
 import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.net.VpnService
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.quantumvpn.core.SubscriptionParser
@@ -51,8 +55,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedProtocol = MutableStateFlow<Protocol?>(null)
     val selectedProtocol: StateFlow<Protocol?> = _selectedProtocol.asStateFlow()
 
+    private val vpnStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            val state = intent.getStringExtra("state") ?: return
+            when (state) {
+                "connected" -> {
+                    _vpnState.update { it.copy(isConnected = true, isConnecting = false, connectionTime = System.currentTimeMillis()) }
+                    _connectionState.value = ConnectionState.Connected
+                    startTrafficTracking()
+                }
+                "disconnected" -> {
+                    _vpnState.update { it.copy(isConnected = false, isConnecting = false, connectionTime = 0L, totalDownload = 0L, totalUpload = 0L) }
+                    _connectionState.value = ConnectionState.Disconnected
+                    trafficJob?.cancel()
+                }
+                "error" -> {
+                    val errorMsg = intent.getStringExtra("error") ?: "Ошибка"
+                    _vpnState.update { it.copy(isConnected = false, isConnecting = false) }
+                    _connectionState.value = ConnectionState.Error(errorMsg)
+                    _error.value = errorMsg
+                }
+            }
+        }
+    }
+
     init {
         loadSavedData()
+        val filter = IntentFilter("com.quantumvpn.VPN_STATE")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(vpnStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(vpnStateReceiver, filter)
+        }
     }
 
     private fun loadSavedData() {
@@ -104,16 +138,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     action = "com.quantumvpn.START"
                 }
                 context.startForegroundService(intent)
-
-                _vpnState.update {
-                    it.copy(
-                        isConnected = true,
-                        isConnecting = false,
-                        connectionTime = System.currentTimeMillis()
-                    )
-                }
-                _connectionState.value = ConnectionState.Connected
-                startTrafficTracking()
             } catch (e: Exception) {
                 _vpnState.update { it.copy(isConnecting = false) }
                 _connectionState.value = ConnectionState.Error(e.message ?: "Ошибка подключения")
@@ -138,26 +162,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnectVPN() {
-        trafficJob?.cancel()
         viewModelScope.launch {
             _connectionState.value = ConnectionState.Disconnecting
-
             try {
                 val intent = Intent(context, VPNService::class.java).apply {
                     action = "com.quantumvpn.STOP"
                 }
                 context.startService(intent)
-
-                _vpnState.update {
-                    it.copy(
-                        isConnected = false,
-                        isConnecting = false,
-                        connectionTime = 0L,
-                        downloadSpeed = 0L,
-                        uploadSpeed = 0L
-                    )
-                }
-                _connectionState.value = ConnectionState.Disconnected
             } catch (e: Exception) {
                 _connectionState.value = ConnectionState.Error(e.message ?: "Disconnect failed")
             }
@@ -246,9 +257,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun testAllPings() {
         viewModelScope.launch(Dispatchers.IO) {
-            _servers.value.forEach { server ->
-                testPing(server)
+            val currentServers = _servers.value
+            val updatedServers = currentServers.map { server ->
+                val ping = VPNCore.testPing(server.host, server.port)
+                server.copy(ping = ping)
             }
+            _servers.value = updatedServers
         }
     }
 
@@ -289,6 +303,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        try { context.unregisterReceiver(vpnStateReceiver) } catch (_: Exception) {}
         viewModelScope.cancel()
     }
 }

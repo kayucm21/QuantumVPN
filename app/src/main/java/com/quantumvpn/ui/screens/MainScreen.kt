@@ -174,7 +174,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         IconButton(onClick = { viewModel.testAllPings() }, modifier = Modifier.size(32.dp)) {
                             Icon(Icons.Outlined.Speed, "Пинг", tint = Color(0xFF6366F1), modifier = Modifier.size(18.dp))
                         }
-                        IconButton(onClick = { showSettings }, modifier = Modifier.size(32.dp)) {
+                        IconButton(onClick = { showSettings = true }, modifier = Modifier.size(32.dp)) {
                             Icon(Icons.Outlined.MoreVert, "Ещё", tint = Color(0xFF888888), modifier = Modifier.size(18.dp))
                         }
                     }

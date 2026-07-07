@@ -12,61 +12,80 @@ object VPNCore {
     private const val TAG = "VPNCore"
     private var isRunning = false
     private var process: Process? = null
-    private var vpnService: VpnService? = null
-    var totalDownload = 0L; private set
-    var totalUpload = 0L; private set
-
-    fun setVpnService(s: VpnService) { vpnService = s }
+    var totalDownload = 0L
+    var totalUpload = 0L
 
     fun init(context: Context) {
         val arch = getArch()
-        val libsDir = File(context.filesDir, "libs")
-        if (!libsDir.exists()) libsDir.mkdirs()
-        val archDir = File(libsDir, arch)
+        val archDir = File(File(context.filesDir, "libs"), arch)
         if (!archDir.exists()) archDir.mkdirs()
         val singBoxFile = File(archDir, "sing-box")
         if (!singBoxFile.exists()) {
-            Log.d(TAG, "sing-box binary not found, copying from assets...")
+            Log.d(TAG, "Copying sing-box binary for $arch...")
             try {
                 context.assets.open("libs/$arch/sing-box").use { input ->
                     singBoxFile.outputStream().use { output -> input.copyTo(output) }
                 }
-                Runtime.getRuntime().exec(arrayOf("chmod", "755", singBoxFile.absolutePath))
-                Log.d(TAG, "sing-box binary installed for $arch")
+                try {
+                    Runtime.getRuntime().exec(arrayOf("chmod", "755", singBoxFile.absolutePath)).waitFor()
+                } catch (_: Exception) {}
+                Log.d(TAG, "sing-box installed: ${singBoxFile.absolutePath} (${singBoxFile.length()} bytes)")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to copy sing-box: ${e.message}")
             }
+        } else {
+            Log.d(TAG, "sing-box exists: ${singBoxFile.absolutePath} (${singBoxFile.length()} bytes)")
         }
     }
 
-    fun start(configPath: String, context: Context): Boolean {
+    fun start(configPath: String, context: Context, vpnFd: Int = -1): Boolean {
         try {
             if (isRunning) stop()
+
             val arch = getArch()
             val singBox = File(File(context.filesDir, "libs/$arch"), "sing-box")
             if (!singBox.exists()) {
-                Log.e(TAG, "sing-box binary not found at ${singBox.absolutePath}")
+                Log.e(TAG, "sing-box not found: ${singBox.absolutePath}")
                 return false
             }
 
-            val pb = ProcessBuilder(singBox.absolutePath, "run", "-c", configPath)
-            pb.redirectErrorStream(true)
-            pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
-            process = pb.start()
+            Log.d(TAG, "Starting sing-box: ${singBox.absolutePath} run -c $configPath (fd=$vpnFd)")
 
+            val cmd = mutableListOf(singBox.absolutePath, "run", "-c", configPath)
+            val pb = ProcessBuilder(cmd)
+            pb.redirectErrorStream(true)
+            pb.directory(context.filesDir)
+
+            val env = pb.environment()
+            env["TMPDIR"] = context.cacheDir.absolutePath
+            env["HOME"] = context.filesDir.absolutePath
+            if (vpnFd >= 0) {
+                env["ANDROID_VPN_SERVICE_FD"] = vpnFd.toString()
+            }
+
+            process = pb.start()
             isRunning = true
             totalDownload = 0
             totalUpload = 0
 
             CoroutineScope(Dispatchers.IO).launch {
-                val reader = BufferedReader(InputStreamReader(process!!.inputStream))
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    Log.d(TAG, "sing-box: $line")
-                }
+                try {
+                    val reader = BufferedReader(InputStreamReader(process!!.inputStream))
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        Log.d(TAG, "sing-box: $line")
+                    }
+                } catch (_: Exception) {}
             }
 
-            Log.d(TAG, "sing-box started with config: $configPath")
+            Thread.sleep(500)
+            if (process?.isAlive != true) {
+                Log.e(TAG, "sing-box exited immediately with code: ${process?.exitValue()}")
+                isRunning = false
+                return false
+            }
+
+            Log.d(TAG, "sing-box is running (pid=${process.toString()})")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start sing-box", e)
@@ -78,6 +97,7 @@ object VPNCore {
         isRunning = false
         try {
             process?.destroy()
+            process?.waitFor()
             process = null
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop sing-box", e)

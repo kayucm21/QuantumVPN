@@ -14,7 +14,8 @@ object ConfigGenerator {
             val config = generateSingBoxConfig(server)
             val configFile = File(context.filesDir, "sing-box-config.json")
             configFile.writeText(config)
-            Log.d(TAG, "Config written to: ${configFile.absolutePath}")
+            Log.d(TAG, "Config: ${configFile.absolutePath}")
+            Log.d(TAG, "Config content: $config")
             configFile.absolutePath
         } catch (e: Exception) {
             Log.e(TAG, "Failed to generate config", e)
@@ -26,10 +27,17 @@ object ConfigGenerator {
         val outbound = generateOutbound(server)
         return """{
   "log": {
-    "level": "info",
-    "timestamp": true
+    "level": "debug",
+    "timestamp": true,
+    "output": "${File(server.javaClass.protectionDomain?.codeSource?.location?.path?.substringBeforeLast("/")?.substringBeforeLast("/"), "sing-box.log").absolutePath}"
   },
   "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 10808
+    },
     {
       "type": "tun",
       "tag": "tun-in",

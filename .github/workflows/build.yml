@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -34,9 +37,25 @@ jobs:
       - name: Build release APK
         run: ./gradlew assembleRelease --no-daemon
 
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/*.apk QuantumVPN-${{ github.ref_name }}.apk
+
       - name: Upload APK to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/release/*.apk
-          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
+          name: QuantumVPN ${{ github.ref_name }}
+          files: QuantumVPN-${{ github.ref_name }}.apk
+          body: |
+            ## QuantumVPN ${{ github.ref_name }}
+
+            ### Исправлено
+            - Устранена петля маршрутизации VPN (трафик теперь идёт через сервер)
+            - Исправлен конфиг sing-box TUN/DNS
+            - Исключён процесс приложения из туннеля
+            - MTU 1500, маршрутизация IPv6
+
+            Скачайте APK ниже.
+          draft: false
+          prerelease: false

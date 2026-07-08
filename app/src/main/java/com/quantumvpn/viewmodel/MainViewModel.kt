@@ -132,6 +132,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _connectionState.value = ConnectionState.Connecting
             _vpnState.update { it.copy(isConnecting = true) }
+            com.quantumvpn.data.CurrentServer.set(server)
 
             try {
                 val intent = Intent(context, VPNService::class.java).apply {

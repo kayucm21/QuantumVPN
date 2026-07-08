@@ -78,9 +78,10 @@ object VPNCore {
                 } catch (_: Exception) {}
             }
 
-            Thread.sleep(500)
+            Thread.sleep(1500)
             if (process?.isAlive != true) {
-                Log.e(TAG, "sing-box exited immediately with code: ${process?.exitValue()}")
+                val exitCode = try { process?.exitValue() } catch (_: Exception) { -1 }
+                Log.e(TAG, "sing-box exited immediately with code: $exitCode")
                 isRunning = false
                 return false
             }

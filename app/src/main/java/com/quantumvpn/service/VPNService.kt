@@ -53,9 +53,16 @@ class VPNService : VpnService() {
             builder.setSession("QuantumVPN")
             builder.addAddress("172.19.0.1", 30)
             builder.addRoute("0.0.0.0", 0)
+            builder.addRoute("::", 0)
             builder.addDnsServer("8.8.8.8")
             builder.addDnsServer("1.1.1.1")
-            builder.setMtu(9000)
+            builder.setMtu(1500)
+            // sing-box runs in our process — exclude it from the tunnel to avoid routing loops
+            try {
+                builder.addDisallowedApplication(packageName)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not exclude app from VPN", e)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
             }

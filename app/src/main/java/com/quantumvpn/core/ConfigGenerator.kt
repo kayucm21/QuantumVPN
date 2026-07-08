@@ -11,7 +11,7 @@ object ConfigGenerator {
 
     fun generate(context: Context, server: VPNServer): String? {
         return try {
-            val config = generateSingBoxConfig(server)
+            val config = generateSingBoxConfig(context, server)
             val configFile = File(context.filesDir, "sing-box-config.json")
             configFile.writeText(config)
             Log.d(TAG, "Config: ${configFile.absolutePath}")
@@ -23,28 +23,23 @@ object ConfigGenerator {
         }
     }
 
-    private fun generateSingBoxConfig(server: VPNServer): String {
+    private fun generateSingBoxConfig(context: Context, server: VPNServer): String {
         val outbound = generateOutbound(server)
+        val logPath = File(context.filesDir, "sing-box.log").absolutePath
         return """{
   "log": {
-    "level": "debug",
+    "level": "info",
     "timestamp": true,
-    "output": "${File(server.javaClass.protectionDomain?.codeSource?.location?.path?.substringBeforeLast("/")?.substringBeforeLast("/"), "sing-box.log").absolutePath}"
+    "output": "$logPath"
   },
   "inbounds": [
     {
-      "type": "mixed",
-      "tag": "mixed-in",
-      "listen": "127.0.0.1",
-      "listen_port": 10808
-    },
-    {
       "type": "tun",
       "tag": "tun-in",
-      "interface_name": "tun0",
       "inet4_address": "172.19.0.1/30",
-      "auto_route": true,
-      "strict_route": true,
+      "mtu": 1500,
+      "auto_route": false,
+      "strict_route": false,
       "stack": "system",
       "sniff": true,
       "sniff_override_destination": true
@@ -81,14 +76,19 @@ object ConfigGenerator {
   "dns": {
     "servers": [
       {
-        "address": "https://dns.google/dns-query",
+        "tag": "dns-remote",
+        "address": "tls://8.8.8.8",
         "detour": "proxy"
       },
       {
+        "tag": "dns-direct",
         "address": "223.5.5.5",
         "detour": "direct"
       }
-    ]
+    ],
+    "rules": [],
+    "final": "dns-remote",
+    "strategy": "prefer_ipv4"
   }
 }"""
     }

@@ -508,7 +508,7 @@ fun SettingsDlg(onDismiss: () -> Unit) {
         title = { Text("Настройки", fontWeight = FontWeight.Bold) },
         text = {
             Text(
-                "QuantumVPN v1.5.0\n\nПротоколы: VLESS, VMess, Trojan, Shadowsocks\nHysteria2, TUIC, WireGuard",
+                "QuantumVPN v1.7.0\n\nПротоколы: VLESS, VMess, Trojan, Shadowsocks\nHysteria2, TUIC, WireGuard",
                 fontSize = 14.sp, lineHeight = 22.sp
             )
         },

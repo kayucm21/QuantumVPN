@@ -113,14 +113,26 @@ object SubscriptionParser {
                 params["pbk"]?.let { settings["public_key"] = it }
                 params["sid"]?.let { settings["short_id"] = it }
             }
-            if (params["type"] == "ws" || security == "ws") {
-                settings["transport"] = "ws"
-                if (path.isNotEmpty()) settings["path"] = path
-                if (hostParam.isNotEmpty()) settings["host"] = hostParam
+            val networkType = params["type"]?.lowercase() ?: "tcp"
+            when (networkType) {
+                "ws" -> {
+                    settings["transport"] = "ws"
+                    if (path.isNotEmpty()) settings["path"] = path
+                    if (hostParam.isNotEmpty()) settings["host"] = hostParam
+                }
+                "grpc" -> {
+                    settings["transport"] = "grpc"
+                    if (serviceName.isNotEmpty()) settings["service_name"] = serviceName
+                }
+                "http", "h2" -> {
+                    settings["transport"] = "http"
+                    if (path.isNotEmpty()) settings["path"] = path
+                    if (hostParam.isNotEmpty()) settings["host"] = hostParam
+                }
             }
-            if (params["type"] == "grpc" || serviceName.isNotEmpty()) {
+            if (networkType != "grpc" && serviceName.isNotEmpty()) {
                 settings["transport"] = "grpc"
-                if (serviceName.isNotEmpty()) settings["service_name"] = serviceName
+                settings["service_name"] = serviceName
             }
 
             VPNServer(

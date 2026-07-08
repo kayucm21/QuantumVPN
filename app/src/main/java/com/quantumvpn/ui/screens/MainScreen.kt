@@ -159,7 +159,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                                     cameraLauncher.launch(Manifest.permission.CAMERA)
                                 }
                             }) {
-                                Icon(Icons.Outlined.QrCodeScanner, "QR", tint = Color(0xFF6366F1), modifier = Modifier.size(22.dp))
+                                Icon(Icons.Outlined.QrCode, "QR", tint = Color(0xFF6366F1), modifier = Modifier.size(22.dp))
                             }
                             IconButton(onClick = { viewModel.showAddSubscription(true) }) {
                                 Icon(Icons.Filled.Add, "Добавить", tint = Color(0xFF1A1C1E), modifier = Modifier.size(24.dp))
@@ -285,7 +285,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                                         Spacer(Modifier.height(16.dp))
                                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                             ImportButton("Буфер", Icons.Outlined.ContentPaste) { viewModel.importFromClipboard() }
-                                            ImportButton("QR", Icons.Outlined.QrCodeScanner) {
+                                            ImportButton("QR", Icons.Outlined.QrCode) {
                                                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                                                     launchQrScanner(qrLauncher)
                                                 } else {
@@ -516,7 +516,7 @@ fun AddSubDialog(
                         Text("Буфер", fontSize = 12.sp)
                     }
                     TextButton(onClick = onQr) {
-                        Icon(Icons.Outlined.QrCodeScanner, null, Modifier.size(16.dp))
+                        Icon(Icons.Outlined.QrCode, null, Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("QR", fontSize = 12.sp)
                     }

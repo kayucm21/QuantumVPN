@@ -1,6 +1,5 @@
 # Add project specific ProGuard rules here.
 -keep class com.quantumvpn.data.** { *; }
--keep class com.quantumvpn.data.SubscriptionMeta { *; }
 -keep class com.quantumvpn.core.** { *; }
 -keep class com.google.gson.** { *; }
 -keep class * extends com.google.gson.reflect.TypeToken

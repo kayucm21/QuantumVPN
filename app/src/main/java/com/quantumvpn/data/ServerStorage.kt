@@ -80,13 +80,15 @@ object ServerStorage {
         if (!file.exists() || file.length() == 0L) return emptyList()
 
         return try {
-            gson.fromJson<List<T>>(readTextSafe(file), typeToken.type) ?: emptyList()
+            val text = readTextSafe(file) ?: return emptyList()
+            gson.fromJson<List<T>>(text, typeToken.type) ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to read $name, trying backup", e)
             val backup = File(context.filesDir, "$name.bak")
             if (backup.exists() && backup.length() > 0) {
                 try {
-                    gson.fromJson<List<T>>(readTextSafe(backup), typeToken.type) ?: emptyList()
+                    val backupText = readTextSafe(backup) ?: return emptyList()
+                    gson.fromJson<List<T>>(backupText, typeToken.type) ?: emptyList()
                 } catch (e2: Exception) {
                     Log.e(TAG, "Backup $name also failed", e2)
                     emptyList()

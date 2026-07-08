@@ -11,8 +11,8 @@ android {
         applicationId = "com.quantumvpn"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "1.10.2"
+        versionCode = 14
+        versionName = "1.10.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -61,9 +61,6 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        }
-        jniLibs {
-            useLegacyPackaging = true
         }
     }
 }

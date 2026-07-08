@@ -9,7 +9,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -43,6 +45,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import com.quantumvpn.BuildConfig
 import com.quantumvpn.data.*
 import com.quantumvpn.viewmodel.MainViewModel
 import kotlin.math.cos
@@ -63,6 +66,14 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     val showAddDialog by viewModel.showAddSubscription.collectAsState()
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val isPinging by viewModel.isPinging.collectAsState()
+    val autoConnect by viewModel.autoConnect.collectAsState()
+    val selectedProtocol by viewModel.selectedProtocol.collectAsState()
+    val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
+    val updateRelease by viewModel.updateRelease.collectAsState()
+
+    val displayServers = remember(servers, selectedProtocol) {
+        if (selectedProtocol == null) servers else servers.filter { it.protocol == selectedProtocol }
+    }
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -295,11 +306,31 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                                         }
                                     }
                                 } else {
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState())
+                                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        FilterChip(
+                                            selected = selectedProtocol == null,
+                                            onClick = { viewModel.filterByProtocol(null) },
+                                            label = { Text("Все", fontSize = 11.sp) }
+                                        )
+                                        Protocol.entries.forEach { proto ->
+                                            FilterChip(
+                                                selected = selectedProtocol == proto,
+                                                onClick = { viewModel.filterByProtocol(if (selectedProtocol == proto) null else proto) },
+                                                label = { Text(proto.displayName, fontSize = 11.sp) }
+                                            )
+                                        }
+                                    }
                                     LazyColumn(
                                         Modifier.fillMaxWidth().heightIn(max = 280.dp),
                                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)
                                     ) {
-                                        items(servers, key = { it.id }) { server ->
+                                        items(displayServers, key = { it.id }) { server ->
                                             HappServerCard(
                                                 server = server,
                                                 selected = server.id == vpnState.currentServer?.id,
@@ -331,7 +362,30 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             }
         )
     }
-    if (showSettings) SettingsDlg({ showSettings = false })
+    if (showSettings) {
+        SettingsDlg(
+            onDismiss = { showSettings = false },
+            autoConnect = autoConnect,
+            onAutoConnect = { viewModel.setAutoConnect(it) },
+            subscriptions = subscriptions,
+            onRemoveSub = { viewModel.removeSubscription(it) },
+            isCheckingUpdate = isCheckingUpdate,
+            onCheckUpdate = { viewModel.checkForAppUpdate() }
+        )
+    }
+    updateRelease?.let { release ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissUpdate() },
+            title = { Text("Доступно обновление") },
+            text = { Text("${release.name}\n\n${release.body.take(300)}") },
+            confirmButton = {
+                Button({ viewModel.downloadUpdate() }) { Text("Скачать") }
+            },
+            dismissButton = {
+                TextButton({ viewModel.dismissUpdate() }) { Text("Позже") }
+            }
+        )
+    }
 }
 
 private fun launchQrScanner(launcher: androidx.activity.result.ActivityResultLauncher<ScanOptions>) {
@@ -544,16 +598,63 @@ private fun fieldColors() = OutlinedTextFieldDefaults.colors(
 )
 
 @Composable
-fun SettingsDlg(onDismiss: () -> Unit) {
+fun SettingsDlg(
+    onDismiss: () -> Unit,
+    autoConnect: Boolean,
+    onAutoConnect: (Boolean) -> Unit,
+    subscriptions: List<Subscription>,
+    onRemoveSub: (Subscription) -> Unit,
+    isCheckingUpdate: Boolean,
+    onCheckUpdate: () -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Color.White,
         title = { Text("Настройки", fontWeight = FontWeight.Bold) },
         text = {
-            Text(
-                "QuantumVPN v1.8.0\n\nПротоколы: VLESS, VMess, Trojan, Shadowsocks\nHysteria2, TUIC",
-                fontSize = 13.sp, lineHeight = 20.sp
-            )
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("QuantumVPN v${BuildConfig.VERSION_NAME}", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Автоподключение", fontSize = 13.sp)
+                    Switch(checked = autoConnect, onCheckedChange = onAutoConnect)
+                }
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = onCheckUpdate,
+                    enabled = !isCheckingUpdate,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6366F1))
+                ) {
+                    if (isCheckingUpdate) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text("Проверить обновления")
+                }
+                if (subscriptions.isNotEmpty()) {
+                    Spacer(Modifier.height(16.dp))
+                    Text("Подписки", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF888888))
+                    subscriptions.forEach { sub ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(sub.name, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${sub.servers.size} серверов", fontSize = 11.sp, color = Color(0xFF888888))
+                            }
+                            IconButton(onClick = { onRemoveSub(sub) }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Outlined.Delete, "Удалить", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+            }
         },
         confirmButton = {
             Button(onDismiss, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6366F1))) {

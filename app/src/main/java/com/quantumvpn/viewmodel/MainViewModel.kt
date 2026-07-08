@@ -13,6 +13,8 @@ import com.quantumvpn.core.SubscriptionParser
 import com.quantumvpn.core.VPNCore
 import com.quantumvpn.data.*
 import com.quantumvpn.service.VPNService
+import com.quantumvpn.utils.UpdateChecker
+import com.quantumvpn.BuildConfig
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +30,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        .addInterceptor { chain ->
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header("User-Agent", "QuantumVPN/${BuildConfig.VERSION_NAME}")
+                    .build()
+            )
+        }
         .build()
 
     private val _vpnState = MutableStateFlow(VPNState())
@@ -56,6 +65,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isPinging = MutableStateFlow(false)
     val isPinging: StateFlow<Boolean> = _isPinging.asStateFlow()
+
+    private val _isCheckingUpdate = MutableStateFlow(false)
+    val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate.asStateFlow()
+
+    private val _updateRelease = MutableStateFlow<UpdateChecker.GitHubRelease?>(null)
+    val updateRelease: StateFlow<UpdateChecker.GitHubRelease?> = _updateRelease.asStateFlow()
 
     private val _autoConnect = MutableStateFlow(prefs.getBoolean("auto_connect", false))
     val autoConnect: StateFlow<Boolean> = _autoConnect.asStateFlow()
@@ -365,6 +380,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun removeSubscription(subscription: Subscription) {
         _subscriptions.update { current -> current.filter { it.id != subscription.id } }
         _servers.update { current -> current.filter { it !in subscription.servers } }
+        if (_vpnState.value.currentServer != null && _vpnState.value.currentServer in subscription.servers) {
+            _servers.value.firstOrNull()?.let { selectServer(it) }
+        }
         saveData()
     }
 
@@ -408,6 +426,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun filterByProtocol(protocol: Protocol?) {
         _selectedProtocol.value = protocol
+    }
+
+    fun filteredServers(): List<VPNServer> {
+        val protocol = _selectedProtocol.value
+        return if (protocol == null) _servers.value else _servers.value.filter { it.protocol == protocol }
+    }
+
+    fun checkForAppUpdate() {
+        viewModelScope.launch {
+            _isCheckingUpdate.value = true
+            try {
+                val release = UpdateChecker.checkForUpdate(BuildConfig.VERSION_NAME)
+                if (release != null) {
+                    _updateRelease.value = release
+                    _infoMessage.value = "Доступна версия ${release.tag_name}"
+                } else {
+                    _infoMessage.value = "У вас последняя версия (${BuildConfig.VERSION_NAME})"
+                }
+            } catch (e: Exception) {
+                _error.value = "Не удалось проверить обновления: ${e.message}"
+            } finally {
+                _isCheckingUpdate.value = false
+            }
+        }
+    }
+
+    fun downloadUpdate() {
+        val release = _updateRelease.value ?: return
+        val apk = release.assets.firstOrNull { it.name.endsWith(".apk") } ?: return
+        viewModelScope.launch {
+            _infoMessage.value = "Скачивание обновления..."
+            val ok = UpdateChecker.downloadAndInstall(context, apk)
+            if (!ok) _error.value = "Не удалось скачать обновление"
+        }
+    }
+
+    fun dismissUpdate() {
+        _updateRelease.value = null
     }
 
     fun showError(message: String) {

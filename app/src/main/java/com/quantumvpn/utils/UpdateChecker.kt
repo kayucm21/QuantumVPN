@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.util.Log
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -21,7 +22,7 @@ object UpdateChecker {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
     data class GitHubRelease(
@@ -44,19 +45,15 @@ object UpdateChecker {
                 val request = Request.Builder()
                     .url(url)
                     .header("Accept", "application/vnd.github.v3+json")
+                    .header("User-Agent", "QuantumVPN")
                     .build()
 
                 val response = client.newCall(request).execute()
                 if (response.isSuccessful) {
                     val json = response.body?.string()
                     val release = Gson().fromJson(json, GitHubRelease::class.java)
-
                     val latestVersion = release.tag_name.removePrefix("v")
-                    if (isNewerVersion(latestVersion, currentVersion)) {
-                        release
-                    } else {
-                        null
-                    }
+                    if (isNewerVersion(latestVersion, currentVersion)) release else null
                 } else {
                     null
                 }
@@ -67,43 +64,49 @@ object UpdateChecker {
         }
     }
 
-    suspend fun downloadAndInstall(context: Context, asset: GitHubAsset) {
-        withContext(Dispatchers.IO) {
+    suspend fun downloadAndInstall(context: Context, asset: GitHubAsset): Boolean {
+        return withContext(Dispatchers.IO) {
             try {
                 val downloadsDir = File(context.getExternalFilesDir(null), "downloads")
                 if (!downloadsDir.exists()) downloadsDir.mkdirs()
 
-                val apkFile = File(downloadsDir, "update.apk")
+                val apkFile = File(downloadsDir, asset.name.ifBlank { "update.apk" })
 
                 val request = Request.Builder()
                     .url(asset.browser_download_url)
+                    .header("User-Agent", "QuantumVPN")
                     .build()
 
                 val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    response.body?.byteStream()?.use { input ->
-                        apkFile.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-
-                    installApk(context, apkFile)
-                } else {
+                if (!response.isSuccessful) {
                     Log.e(TAG, "Failed to download: ${response.code}")
+                    return@withContext false
                 }
+
+                response.body?.byteStream()?.use { input ->
+                    apkFile.outputStream().use { output -> input.copyTo(output) }
+                }
+
+                withContext(Dispatchers.Main) {
+                    installApk(context, apkFile)
+                }
+                true
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to download update", e)
+                false
             }
         }
     }
 
     private fun installApk(context: Context, apkFile: File) {
         try {
+            val uri: Uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                apkFile
+            )
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(
-                    Uri.fromFile(apkFile),
-                    "application/vnd.android.package-archive"
-                )
+                setDataAndType(uri, "application/vnd.android.package-archive")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
@@ -116,7 +119,6 @@ object UpdateChecker {
     private fun isNewerVersion(newVersion: String, currentVersion: String): Boolean {
         val newParts = newVersion.split(".").map { it.toIntOrNull() ?: 0 }
         val currentParts = currentVersion.split(".").map { it.toIntOrNull() ?: 0 }
-
         for (i in 0 until maxOf(newParts.size, currentParts.size)) {
             val newPart = newParts.getOrElse(i) { 0 }
             val currentPart = currentParts.getOrElse(i) { 0 }

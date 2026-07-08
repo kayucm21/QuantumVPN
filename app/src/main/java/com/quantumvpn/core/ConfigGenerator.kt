@@ -9,6 +9,9 @@ import java.io.File
 object ConfigGenerator {
     private const val TAG = "ConfigGenerator"
 
+    private fun jsonEscape(value: String): String =
+        value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "")
+
     fun generate(context: Context, server: VPNServer): String? {
         return try {
             val config = generateSingBoxConfig(context, server)
@@ -113,7 +116,7 @@ object ConfigGenerator {
         sb.append("      \"tag\": \"proxy\",\n")
         sb.append("      \"server\": \"${server.host}\",\n")
         sb.append("      \"server_port\": ${server.port},\n")
-        sb.append("      \"uuid\": \"${s["uuid"] ?: ""}\"")
+        sb.append("      \"uuid\": \"${jsonEscape(s["uuid"]?.toString() ?: "")}\"")
 
         val flow = s["flow"]?.toString() ?: ""
         if (flow.isNotEmpty()) {
@@ -159,7 +162,13 @@ object ConfigGenerator {
         } else if (transport == "grpc" || serviceName.isNotEmpty()) {
             sb.append(",\n      \"transport\": {\n")
             sb.append("        \"type\": \"grpc\",\n")
-            sb.append("        \"service_name\": \"$serviceName\"\n")
+            sb.append("        \"service_name\": \"${jsonEscape(serviceName)}\"\n")
+            sb.append("      }")
+        } else if (transport == "http") {
+            sb.append(",\n      \"transport\": {\n")
+            sb.append("        \"type\": \"http\",\n")
+            sb.append("        \"path\": \"${jsonEscape(wsPath)}\",\n")
+            sb.append("        \"host\": \"${jsonEscape(wsHost.ifEmpty { server.host })}\"\n")
             sb.append("      }")
         }
 
@@ -205,7 +214,13 @@ object ConfigGenerator {
         } else if (transport == "grpc" || serviceName.isNotEmpty()) {
             sb.append(",\n      \"transport\": {\n")
             sb.append("        \"type\": \"grpc\",\n")
-            sb.append("        \"service_name\": \"$serviceName\"\n")
+            sb.append("        \"service_name\": \"${jsonEscape(serviceName)}\"\n")
+            sb.append("      }")
+        } else if (transport == "http") {
+            sb.append(",\n      \"transport\": {\n")
+            sb.append("        \"type\": \"http\",\n")
+            sb.append("        \"path\": \"${jsonEscape(wsPath)}\",\n")
+            sb.append("        \"host\": \"${jsonEscape(wsHost.ifEmpty { server.host })}\"\n")
             sb.append("      }")
         }
 

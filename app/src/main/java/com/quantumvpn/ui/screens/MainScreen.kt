@@ -41,8 +41,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.google.zxing.integration.android.ScanContract
-import com.google.zxing.integration.android.ScanOptions
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.quantumvpn.data.*
 import com.quantumvpn.viewmodel.MainViewModel
 import kotlin.math.cos

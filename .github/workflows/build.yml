@@ -27,6 +27,25 @@ jobs:
       - name: Install SDK packages
         run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
 
+      - name: Download sing-box binaries
+        run: |
+          SING_BOX_VERSION=1.13.14
+          BASE="$GITHUB_WORKSPACE/app/src/main/assets/libs"
+          mkdir -p "$BASE/arm64-v8a" "$BASE/armeabi-v7a" "$BASE/x86_64"
+          cd /tmp
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-arm64.tar.gz"
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-arm.tar.gz"
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-amd64.tar.gz"
+          mkdir -p sb-arm64 sb-arm sb-amd64
+          tar -xzf "sing-box-${SING_BOX_VERSION}-android-arm64.tar.gz" -C sb-arm64
+          tar -xzf "sing-box-${SING_BOX_VERSION}-android-arm.tar.gz" -C sb-arm
+          tar -xzf "sing-box-${SING_BOX_VERSION}-android-amd64.tar.gz" -C sb-amd64
+          cp sb-arm64/sing-box "$BASE/arm64-v8a/sing-box"
+          cp sb-arm/sing-box "$BASE/armeabi-v7a/sing-box"
+          cp sb-amd64/sing-box "$BASE/x86_64/sing-box"
+          chmod +x "$BASE/"*/sing-box
+          ls -la "$BASE/"*/sing-box
+
       - name: Generate Gradle wrapper
         run: |
           wget -q https://services.gradle.org/distributions/gradle-8.5-bin.zip
@@ -51,10 +70,10 @@ jobs:
             ## QuantumVPN ${{ github.ref_name }}
 
             ### Исправлено
-            - Настройки: автоподключение, проверка обновлений, удаление подписок
-            - Фильтр серверов по протоколу
-            - Исправлен автозапуск после перезагрузки
-            - Улучшена установка обновлений (FileProvider)
-            - Улучшена генерация конфигов (HTTP транспорт, экранирование)
+            - sing-box ядро теперь включено в APK (скачивается при сборке)
+            - Обновлён конфиг sing-box 1.13 (исправлен запуск VPN)
+            - Исправлены вылеты при пинге и обновлении подписок
+            - Надёжное сохранение серверов (атомарная запись + бэкап)
+            - Подписки и импортированные серверы больше не пропадают
           draft: false
           prerelease: false

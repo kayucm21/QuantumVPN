@@ -28,18 +28,34 @@ object ConfigGenerator {
 
     private fun generateSingBoxConfig(context: Context, server: VPNServer): String {
         val outbound = generateOutbound(server)
-        val logPath = File(context.filesDir, "sing-box.log").absolutePath
+        val logPath = jsonEscape(File(context.filesDir, "sing-box.log").absolutePath)
         return """{
   "log": {
     "level": "info",
     "timestamp": true,
     "output": "$logPath"
   },
+  "dns": {
+    "servers": [
+      {
+        "tag": "dns-direct",
+        "type": "udp",
+        "server": "223.5.5.5"
+      },
+      {
+        "tag": "dns-remote",
+        "type": "tls",
+        "server": "8.8.8.8",
+        "detour": "proxy"
+      }
+    ],
+    "strategy": "prefer_ipv4"
+  },
   "inbounds": [
     {
       "type": "tun",
       "tag": "tun-in",
-      "inet4_address": "172.19.0.1/30",
+      "address": ["172.19.0.1/30"],
       "mtu": 1500,
       "auto_route": false,
       "strict_route": false,
@@ -57,17 +73,16 @@ object ConfigGenerator {
     {
       "type": "block",
       "tag": "block"
-    },
-    {
-      "type": "dns",
-      "tag": "dns-out"
     }
   ],
   "route": {
     "rules": [
       {
+        "action": "sniff"
+      },
+      {
         "protocol": "dns",
-        "outbound": "dns-out"
+        "action": "hijack-dns"
       },
       {
         "ip_is_private": true,
@@ -75,23 +90,6 @@ object ConfigGenerator {
       }
     ],
     "final": "proxy"
-  },
-  "dns": {
-    "servers": [
-      {
-        "tag": "dns-remote",
-        "address": "tls://8.8.8.8",
-        "detour": "proxy"
-      },
-      {
-        "tag": "dns-direct",
-        "address": "223.5.5.5",
-        "detour": "direct"
-      }
-    ],
-    "rules": [],
-    "final": "dns-remote",
-    "strategy": "prefer_ipv4"
   }
 }"""
     }
@@ -108,70 +106,46 @@ object ConfigGenerator {
         }
     }
 
+    private fun setting(server: VPNServer, key: String, default: String = ""): String =
+        server.settings[key] ?: default
+
     private fun generateVlessOutbound(server: VPNServer): String {
         val s = server.settings
         val sb = StringBuilder()
         sb.append("{\n")
         sb.append("      \"type\": \"vless\",\n")
         sb.append("      \"tag\": \"proxy\",\n")
-        sb.append("      \"server\": \"${server.host}\",\n")
+        sb.append("      \"server\": \"${jsonEscape(server.host)}\",\n")
         sb.append("      \"server_port\": ${server.port},\n")
-        sb.append("      \"uuid\": \"${jsonEscape(s["uuid"]?.toString() ?: "")}\"")
+        sb.append("      \"uuid\": \"${jsonEscape(setting(server, "uuid"))}\"")
 
-        val flow = s["flow"]?.toString() ?: ""
+        val flow = setting(server, "flow")
         if (flow.isNotEmpty()) {
-            sb.append(",\n      \"flow\": \"$flow\"")
+            sb.append(",\n      \"flow\": \"${jsonEscape(flow)}\"")
         }
 
-        val security = s["security"]?.toString() ?: "none"
+        val security = setting(server, "security", "none")
         if (security == "tls" || security == "reality") {
-            val sni = s["sni"]?.toString() ?: server.host
-            val fp = s["fingerprint"]?.toString() ?: "chrome"
+            val sni = setting(server, "sni", server.host)
+            val fp = setting(server, "fingerprint", "chrome")
             sb.append(",\n      \"tls\": {\n")
             sb.append("        \"enabled\": true,\n")
-            sb.append("        \"server_name\": \"$sni\",\n")
+            sb.append("        \"server_name\": \"${jsonEscape(sni)}\",\n")
             sb.append("        \"utls\": {\n")
             sb.append("          \"enabled\": true,\n")
-            sb.append("          \"fingerprint\": \"$fp\"\n")
+            sb.append("          \"fingerprint\": \"${jsonEscape(fp)}\"\n")
             sb.append("        }")
             if (security == "reality") {
                 sb.append(",\n        \"reality\": {\n")
                 sb.append("          \"enabled\": true,\n")
-                sb.append("          \"public_key\": \"${s["public_key"] ?: ""}\",\n")
-                sb.append("          \"short_id\": \"${s["short_id"] ?: ""}\"\n")
+                sb.append("          \"public_key\": \"${jsonEscape(setting(server, "public_key"))}\",\n")
+                sb.append("          \"short_id\": \"${jsonEscape(setting(server, "short_id"))}\"\n")
                 sb.append("        }")
             }
             sb.append("\n      }")
         }
 
-        val transport = s["transport"]?.toString() ?: ""
-        val serviceName = s["service_name"]?.toString() ?: ""
-        val wsPath = s["path"]?.toString() ?: ""
-        val wsHost = s["host"]?.toString() ?: ""
-
-        if (transport == "ws" || (wsPath.isNotEmpty() && serviceName.isEmpty())) {
-            sb.append(",\n      \"transport\": {\n")
-            sb.append("        \"type\": \"ws\",\n")
-            sb.append("        \"path\": \"$wsPath\"")
-            if (wsHost.isNotEmpty()) {
-                sb.append(",\n        \"headers\": {\n")
-                sb.append("          \"Host\": \"$wsHost\"\n")
-                sb.append("        }")
-            }
-            sb.append("\n      }")
-        } else if (transport == "grpc" || serviceName.isNotEmpty()) {
-            sb.append(",\n      \"transport\": {\n")
-            sb.append("        \"type\": \"grpc\",\n")
-            sb.append("        \"service_name\": \"${jsonEscape(serviceName)}\"\n")
-            sb.append("      }")
-        } else if (transport == "http") {
-            sb.append(",\n      \"transport\": {\n")
-            sb.append("        \"type\": \"http\",\n")
-            sb.append("        \"path\": \"${jsonEscape(wsPath)}\",\n")
-            sb.append("        \"host\": \"${jsonEscape(wsHost.ifEmpty { server.host })}\"\n")
-            sb.append("      }")
-        }
-
+        appendTransport(sb, s, server.host)
         sb.append("\n    }")
         return sb.toString()
     }
@@ -182,32 +156,38 @@ object ConfigGenerator {
         sb.append("{\n")
         sb.append("      \"type\": \"vmess\",\n")
         sb.append("      \"tag\": \"proxy\",\n")
-        sb.append("      \"server\": \"${server.host}\",\n")
+        sb.append("      \"server\": \"${jsonEscape(server.host)}\",\n")
         sb.append("      \"server_port\": ${server.port},\n")
-        sb.append("      \"uuid\": \"${s["uuid"] ?: ""}\",\n")
-        sb.append("      \"alter_id\": ${s["alter_id"] ?: "0"},\n")
-        sb.append("      \"security\": \"${s["security"] ?: "auto"}\"")
+        sb.append("      \"uuid\": \"${jsonEscape(setting(server, "uuid"))}\",\n")
+        sb.append("      \"alter_id\": ${setting(server, "alter_id", "0")},\n")
+        sb.append("      \"security\": \"${jsonEscape(setting(server, "security", "auto"))}\"")
 
-        if (s["tls"]?.toString() == "true") {
-            val sni = s["sni"]?.toString() ?: server.host
+        if (setting(server, "tls") == "true") {
+            val sni = setting(server, "sni", server.host)
             sb.append(",\n      \"tls\": {\n")
             sb.append("        \"enabled\": true,\n")
-            sb.append("        \"server_name\": \"$sni\"\n")
+            sb.append("        \"server_name\": \"${jsonEscape(sni)}\"\n")
             sb.append("      }")
         }
 
-        val transport = s["transport"]?.toString() ?: ""
-        val serviceName = s["service_name"]?.toString() ?: ""
-        val wsPath = s["path"]?.toString() ?: ""
-        val wsHost = s["host"]?.toString() ?: ""
+        appendTransport(sb, s, server.host)
+        sb.append("\n    }")
+        return sb.toString()
+    }
+
+    private fun appendTransport(sb: StringBuilder, s: Map<String, String>, defaultHost: String) {
+        val transport = s["transport"] ?: ""
+        val serviceName = s["service_name"] ?: ""
+        val wsPath = s["path"] ?: ""
+        val wsHost = s["host"] ?: ""
 
         if (transport == "ws" || (wsPath.isNotEmpty() && serviceName.isEmpty())) {
             sb.append(",\n      \"transport\": {\n")
             sb.append("        \"type\": \"ws\",\n")
-            sb.append("        \"path\": \"$wsPath\"")
+            sb.append("        \"path\": \"${jsonEscape(wsPath)}\"")
             if (wsHost.isNotEmpty()) {
                 sb.append(",\n        \"headers\": {\n")
-                sb.append("          \"Host\": \"$wsHost\"\n")
+                sb.append("          \"Host\": \"${jsonEscape(wsHost)}\"\n")
                 sb.append("        }")
             }
             sb.append("\n      }")
@@ -220,69 +200,62 @@ object ConfigGenerator {
             sb.append(",\n      \"transport\": {\n")
             sb.append("        \"type\": \"http\",\n")
             sb.append("        \"path\": \"${jsonEscape(wsPath)}\",\n")
-            sb.append("        \"host\": \"${jsonEscape(wsHost.ifEmpty { server.host })}\"\n")
+            sb.append("        \"host\": \"${jsonEscape(wsHost.ifEmpty { defaultHost })}\"\n")
             sb.append("      }")
         }
-
-        sb.append("\n    }")
-        return sb.toString()
     }
 
     private fun generateTrojanOutbound(server: VPNServer): String {
-        val s = server.settings
         return """{
       "type": "trojan",
       "tag": "proxy",
-      "server": "${server.host}",
+      "server": "${jsonEscape(server.host)}",
       "server_port": ${server.port},
-      "password": "${s["password"] ?: ""}",
+      "password": "${jsonEscape(setting(server, "password"))}",
       "tls": {
         "enabled": true,
-        "server_name": "${s["sni"] ?: server.host}"
+        "server_name": "${jsonEscape(setting(server, "sni", server.host))}"
       }
     }"""
     }
 
     private fun generateShadowsocksOutbound(server: VPNServer): String {
-        val s = server.settings
         return """{
       "type": "shadowsocks",
       "tag": "proxy",
-      "server": "${server.host}",
+      "server": "${jsonEscape(server.host)}",
       "server_port": ${server.port},
-      "method": "${s["method"] ?: "aes-256-gcm"}",
-      "password": "${s["password"] ?: ""}"
+      "method": "${jsonEscape(setting(server, "method", "aes-256-gcm"))}",
+      "password": "${jsonEscape(setting(server, "password"))}"
     }"""
     }
 
     private fun generateHysteria2Outbound(server: VPNServer): String {
-        val s = server.settings
         return """{
       "type": "hysteria2",
       "tag": "proxy",
-      "server": "${server.host}",
+      "server": "${jsonEscape(server.host)}",
       "server_port": ${server.port},
-      "password": "${s["password"] ?: ""}",
+      "password": "${jsonEscape(setting(server, "password"))}",
       "tls": {
         "enabled": true,
-        "server_name": "${s["sni"] ?: server.host}"
+        "server_name": "${jsonEscape(setting(server, "sni", server.host))}"
       }
     }"""
     }
 
     private fun generateTUICOutbound(server: VPNServer): String {
-        val s = server.settings
         return """{
       "type": "tuic",
       "tag": "proxy",
-      "server": "${server.host}",
+      "server": "${jsonEscape(server.host)}",
       "server_port": ${server.port},
-      "uuid": "${s["uuid"] ?: ""}",
-      "password": "${s["password"] ?: ""}",
+      "uuid": "${jsonEscape(setting(server, "uuid"))}",
+      "password": "${jsonEscape(setting(server, "password"))}",
       "congestion_control": "bbr",
       "tls": {
         "enabled": true,
-        "server_name": "${s["sni"] ?: server.host}"
+        "server_name": "${jsonEscape(setting(server, "sni", server.host))}"
       }
     }"""
     }

@@ -11,7 +11,7 @@ data class VPNServer(
     val host: String,
     val port: Int,
     val protocol: Protocol,
-    val settings: Map<String, Any> = emptyMap(),
+    val settings: Map<String, String> = emptyMap(),
     val ping: Long = -1L,
     val isSelected: Boolean = false
 )

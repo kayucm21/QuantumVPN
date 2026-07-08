@@ -98,7 +98,7 @@ object SubscriptionParser {
             val hostParam = params["host"] ?: ""
             val serviceName = params["servicename"] ?: params["serviceName"] ?: ""
 
-            val settings = mutableMapOf<String, Any>(
+            val settings = mutableMapOf<String, String>(
                 "uuid" to uuid,
                 "server" to host,
                 "server_port" to port.toString(),
@@ -163,7 +163,7 @@ object SubscriptionParser {
             val alterId = obj.get("aid")?.asString ?: "0"
             val security = obj.get("scy")?.asString ?: "auto"
 
-            val settings = mutableMapOf<String, Any>(
+            val settings = mutableMapOf<String, String>(
                 "uuid" to uuid,
                 "server" to host,
                 "server_port" to port.toString(),
@@ -243,7 +243,7 @@ object SubscriptionParser {
                 }
             }
 
-            val settings = mutableMapOf<String, Any>(
+            val settings = mutableMapOf<String, String>(
                 "password" to password,
                 "server" to host,
                 "server_port" to port.toString(),
@@ -291,7 +291,7 @@ object SubscriptionParser {
                 val host = hostPort.substring(0, colonIndex)
                 val port = hostPort.substring(colonIndex + 1).toIntOrNull() ?: 443
 
-                val settings = mutableMapOf<String, Any>(
+                val settings = mutableMapOf<String, String>(
                     "method" to method,
                     "password" to password,
                     "server" to host,
@@ -329,7 +329,7 @@ object SubscriptionParser {
             val host = hostPort.substring(0, colonIndex)
             val port = hostPort.substring(colonIndex + 1).toIntOrNull() ?: 443
 
-            val settings = mutableMapOf<String, Any>(
+            val settings = mutableMapOf<String, String>(
                 "password" to password,
                 "server" to host,
                 "server_port" to port.toString(),
@@ -376,7 +376,7 @@ object SubscriptionParser {
                 }
             }
 
-            val settings = mutableMapOf<String, Any>(
+            val settings = mutableMapOf<String, String>(
                 "uuid" to uuid,
                 "password" to (params["password"] ?: ""),
                 "server" to host,

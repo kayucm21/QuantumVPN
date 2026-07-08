@@ -4,11 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
 import com.quantumvpn.data.CurrentServer
-import com.quantumvpn.data.VPNServer
-import java.io.File
+import com.quantumvpn.data.ServerStorage
+import kotlinx.coroutines.runBlocking
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -18,12 +16,10 @@ class BootReceiver : BroadcastReceiver() {
         if (!prefs.getBoolean("auto_connect", false)) return
 
         try {
-            val serversFile = File(context.filesDir, "servers.json")
             val selectedId = prefs.getString("selected_server_id", null)
-            if (serversFile.exists() && selectedId != null) {
-                val type = object : TypeToken<List<VPNServer>>() {}.type
-                val servers = Gson().fromJson<List<VPNServer>>(serversFile.readText(), type)
-                servers?.find { it.id == selectedId }?.let { CurrentServer.set(it) }
+            if (selectedId != null) {
+                val servers = runBlocking { ServerStorage.loadServers(context) }
+                servers.find { it.id == selectedId }?.let { CurrentServer.set(it) }
             }
         } catch (_: Exception) {}
 

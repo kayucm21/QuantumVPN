@@ -127,7 +127,7 @@ class VPNService : VpnService() {
                 sendVpnState("connected")
             } else {
                 updateNotification("Ошибка запуска ядра")
-                sendVpnState("error", "sing-box не запустился. Проверьте конфиг сервера")
+                sendVpnState("error", "sing-box не запустился. ${VPNCore.getLastError()}")
                 stopSelf()
             }
         } catch (e: Exception) {

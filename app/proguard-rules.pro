@@ -2,6 +2,7 @@
 -keep class com.quantumvpn.data.** { *; }
 -keep class com.quantumvpn.core.** { *; }
 -keep class com.google.gson.** { *; }
+-keep class * extends com.google.gson.reflect.TypeToken
 -keepattributes Signature
 -keepattributes *Annotation*
 -keepclassmembers class * {

@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.os.Build
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.quantumvpn.core.SubscriptionParser
@@ -78,6 +79,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedProtocol = MutableStateFlow<Protocol?>(null)
     val selectedProtocol: StateFlow<Protocol?> = _selectedProtocol.asStateFlow()
 
+    private val exceptionHandler = CoroutineExceptionHandler { _, e ->
+        Log.e("MainViewModel", "Error", e)
+        _error.value = "Ошибка: ${e.message ?: "неизвестная"}"
+        _isRefreshing.value = false
+        _isPinging.value = false
+        _isCheckingUpdate.value = false
+    }
+
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             val state = intent.getStringExtra("state") ?: return
@@ -114,26 +123,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadSavedData() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             try {
                 val savedServers = ServerStorage.loadServers(context)
                 val savedSubs = ServerStorage.loadSubscriptions(context)
-                _servers.value = savedServers
-                _subscriptions.value = savedSubs
+                withContext(Dispatchers.Main) {
+                    _servers.value = savedServers
+                    _subscriptions.value = savedSubs
 
-                val selectedId = prefs.getString("selected_server_id", null)
-                if (selectedId != null) {
-                    savedServers.find { it.id == selectedId }?.let { server ->
-                        _vpnState.update { it.copy(currentServer = server) }
-                        CurrentServer.set(server)
+                    val selectedId = prefs.getString("selected_server_id", null)
+                    if (selectedId != null) {
+                        savedServers.find { it.id == selectedId }?.let { server ->
+                            _vpnState.update { it.copy(currentServer = server) }
+                            CurrentServer.set(server)
+                        }
+                    } else if (savedServers.isNotEmpty()) {
+                        val first = savedServers.first()
+                        _vpnState.update { it.copy(currentServer = first) }
+                        CurrentServer.set(first)
                     }
-                } else if (savedServers.isNotEmpty()) {
-                    val first = savedServers.first()
-                    _vpnState.update { it.copy(currentServer = first) }
-                    CurrentServer.set(first)
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e("MainViewModel", "loadSavedData failed", e)
             }
         }
     }
@@ -144,14 +155,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun saveData() {
         saveJob?.cancel()
-        saveJob = viewModelScope.launch {
+        saveJob = viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             delay(300)
             try {
-                val serversSnapshot = _servers.value
-                val subsSnapshot = _subscriptions.value
-                ServerStorage.saveAll(context, serversSnapshot, subsSnapshot)
+                ServerStorage.saveAll(context, _servers.value, _subscriptions.value)
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e("MainViewModel", "saveData failed", e)
             }
         }
     }
@@ -253,7 +262,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             importFromText(trimmed, name)
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             try {
                 val body = fetchSubscriptionBody(trimmed)
                 val parsed = SubscriptionParser.parse(body)
@@ -266,14 +275,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     lastUpdate = System.currentTimeMillis()
                 )
 
-                _subscriptions.update { it + subscription }
-                _servers.update { current -> mergeServers(current, parsed) }
-                parsed.firstOrNull()?.let { selectServer(it) }
-                _showAddSubscription.value = false
-                _infoMessage.value = "Добавлено серверов: ${parsed.size}"
+                withContext(Dispatchers.Main) {
+                    _subscriptions.update { it + subscription }
+                    _servers.update { current -> mergeServers(current, parsed) }
+                    parsed.firstOrNull()?.let { selectServer(it) }
+                    _showAddSubscription.value = false
+                    _infoMessage.value = "Добавлено серверов: ${parsed.size}"
+                }
                 saveData()
             } catch (e: Exception) {
-                _error.value = "Ошибка подписки: ${e.message}"
+                withContext(Dispatchers.Main) {
+                    _error.value = "Ошибка подписки: ${e.message}"
+                }
             }
         }
     }
@@ -290,18 +303,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             try {
                 val parsed = SubscriptionParser.parse(trimmed)
                 if (parsed.isEmpty()) throw Exception("Не удалось распознать конфиг")
 
-                _servers.update { current -> mergeServers(current, parsed) }
-                parsed.firstOrNull()?.let { selectServer(it) }
-                _showAddSubscription.value = false
-                _infoMessage.value = "Импортировано серверов: ${parsed.size}"
+                withContext(Dispatchers.Main) {
+                    _servers.update { current -> mergeServers(current, parsed) }
+                    parsed.firstOrNull()?.let { selectServer(it) }
+                    _showAddSubscription.value = false
+                    _infoMessage.value = "Импортировано серверов: ${parsed.size}"
+                }
                 saveData()
             } catch (e: Exception) {
-                _error.value = "Ошибка импорта: ${e.message}"
+                withContext(Dispatchers.Main) {
+                    _error.value = "Ошибка импорта: ${e.message}"
+                }
             }
         }
     }
@@ -328,7 +345,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (_isRefreshing.value) return
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             _isRefreshing.value = true
             try {
                 val updatedSubs = mutableListOf<Subscription>()
@@ -345,37 +362,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } catch (e: Exception) {
                         errors++
                         updatedSubs.add(sub)
-                        e.printStackTrace()
+                        Log.e("MainViewModel", "Refresh failed for ${sub.url}", e)
                     }
                 }
 
-                if (updatedFromSubs.isNotEmpty()) {
-                    val subKeys = updatedFromSubs.map { serverKey(it) }.toSet()
-                    val standalone = _servers.value.filter { serverKey(it) !in subKeys }
-                    _subscriptions.value = updatedSubs
-                    _servers.value = mergeServers(standalone, updatedFromSubs)
+                withContext(Dispatchers.Main) {
+                    if (updatedFromSubs.isNotEmpty()) {
+                        val subKeys = updatedFromSubs.map { serverKey(it) }.toSet()
+                        val standalone = _servers.value.filter { serverKey(it) !in subKeys }
+                        _subscriptions.value = updatedSubs
+                        _servers.value = mergeServers(standalone, updatedFromSubs)
 
-                    val current = _vpnState.value.currentServer
-                    val newCurrent = if (current != null) {
-                        _servers.value.find { it.id == current.id }
-                            ?: _servers.value.find { serverKey(it) == serverKey(current) }
-                            ?: _servers.value.firstOrNull()
-                    } else {
-                        _servers.value.firstOrNull()
-                    }
-                    newCurrent?.let { selectServer(it) }
+                        val current = _vpnState.value.currentServer
+                        val newCurrent = if (current != null) {
+                            _servers.value.find { it.id == current.id }
+                                ?: _servers.value.find { serverKey(it) == serverKey(current) }
+                                ?: _servers.value.firstOrNull()
+                        } else {
+                            _servers.value.firstOrNull()
+                        }
+                        newCurrent?.let { selectServer(it) }
 
-                    _infoMessage.value = if (errors > 0) {
-                        "Обновлено ${updatedFromSubs.size} серверов (частично)"
+                        _infoMessage.value = if (errors > 0) {
+                            "Обновлено ${updatedFromSubs.size} серверов (частично)"
+                        } else {
+                            "Обновлено серверов: ${updatedFromSubs.size}"
+                        }
+                        saveData()
                     } else {
-                        "Обновлено серверов: ${updatedFromSubs.size}"
+                        _error.value = "Не удалось обновить подписки"
                     }
-                    saveData()
-                } else {
-                    _error.value = "Не удалось обновить подписки"
                 }
             } catch (e: Exception) {
-                _error.value = "Ошибка обновления: ${e.message}"
+                withContext(Dispatchers.Main) {
+                    _error.value = "Ошибка обновления: ${e.message}"
+                }
             } finally {
                 _isRefreshing.value = false
             }
@@ -417,12 +438,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun testPing(server: VPNServer) {
-        viewModelScope.launch {
-            _servers.update { list -> list.map { if (it.id == server.id) it.copy(ping = -2L) else it } }
-            val ping = withContext(Dispatchers.IO) {
-                VPNCore.testPing(server.host, server.port)
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
+            withContext(Dispatchers.Main) {
+                _servers.update { list -> list.map { if (it.id == server.id) it.copy(ping = -2L) else it } }
             }
-            _servers.update { list -> list.map { if (it.id == server.id) it.copy(ping = ping) else it } }
+            val ping = VPNCore.testPing(server.host, server.port)
+            withContext(Dispatchers.Main) {
+                _servers.update { list -> list.map { if (it.id == server.id) it.copy(ping = ping) else it } }
+            }
         }
     }
 
@@ -433,24 +456,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (_isPinging.value) return
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO + exceptionHandler) {
             _isPinging.value = true
             try {
                 val currentServers = _servers.value
-                _servers.update { list -> list.map { it.copy(ping = -2L) } }
-
-                val updatedServers = withContext(Dispatchers.IO) {
-                    currentServers.map { server ->
-                        val ping = VPNCore.testPing(server.host, server.port)
-                        server.copy(ping = ping)
-                    }
+                withContext(Dispatchers.Main) {
+                    _servers.update { list -> list.map { it.copy(ping = -2L) } }
                 }
 
-                _servers.value = updatedServers
-                val ok = updatedServers.count { it.ping >= 0 }
-                _infoMessage.value = "Пинг: $ok/${updatedServers.size} серверов отвечают"
+                val updatedServers = currentServers.map { server ->
+                    val ping = VPNCore.testPing(server.host, server.port)
+                    server.copy(ping = ping)
+                }
+
+                withContext(Dispatchers.Main) {
+                    _servers.value = updatedServers
+                    val ok = updatedServers.count { it.ping >= 0 }
+                    _infoMessage.value = "Пинг: $ok/${updatedServers.size} серверов отвечают"
+                }
             } catch (e: Exception) {
-                _error.value = "Ошибка пинга: ${e.message}"
+                withContext(Dispatchers.Main) {
+                    _error.value = "Ошибка пинга: ${e.message}"
+                }
             } finally {
                 _isPinging.value = false
             }
@@ -458,8 +485,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setAutoConnect(enabled: Boolean) {
-        _autoConnect.value = enabled
-        prefs.edit().putBoolean("auto_connect", enabled).apply()
+        try {
+            _autoConnect.value = enabled
+            prefs.edit().putBoolean("auto_connect", enabled).commit()
+        } catch (e: Exception) {
+            Log.e("MainViewModel", "setAutoConnect failed", e)
+            _error.value = "Не удалось сохранить настройку"
+        }
     }
 
     fun filterByProtocol(protocol: Protocol?) {

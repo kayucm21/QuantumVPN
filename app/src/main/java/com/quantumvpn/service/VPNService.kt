@@ -117,7 +117,9 @@ class VPNService : VpnService() {
             }
 
             Log.d(TAG, "Starting sing-box with config: $configPath")
-            val started = VPNCore.start(configPath, this@VPNService, vpnFd.fd)
+            val started = withContext(Dispatchers.IO) {
+                VPNCore.start(configPath, this@VPNService, vpnFd.fd)
+            }
             if (started) {
                 isRunning = true
                 lastRxBytes = TrafficStats.getTotalRxBytes()

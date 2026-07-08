@@ -647,7 +647,11 @@ fun SettingsDlg(
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Text(sub.name, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("${sub.servers.size} серверов", fontSize = 11.sp, color = Color(0xFF888888))
+                                Text(
+                                    if (sub.servers.isNotEmpty()) "${sub.servers.size} серверов"
+                                    else sub.url.take(48),
+                                    fontSize = 11.sp, color = Color(0xFF888888), maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
                             }
                             IconButton(onClick = { onRemoveSub(sub) }, modifier = Modifier.size(32.dp)) {
                                 Icon(Icons.Outlined.Delete, "Удалить", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))

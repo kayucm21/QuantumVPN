@@ -11,10 +11,17 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
+data class SubscriptionMeta(
+    val id: String,
+    val name: String,
+    val url: String,
+    val lastUpdate: Long = 0L
+)
+
 object ServerStorage {
     private const val TAG = "ServerStorage"
     private val mutex = Mutex()
-    private val gson: Gson = GsonBuilder().serializeNulls().create()
+    private val gson: Gson = GsonBuilder().create()
 
     suspend fun loadServers(context: Context): List<VPNServer> = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -24,19 +31,7 @@ object ServerStorage {
 
     suspend fun loadSubscriptions(context: Context): List<Subscription> = withContext(Dispatchers.IO) {
         mutex.withLock {
-            readList(context, "subscriptions.json", object : TypeToken<List<Subscription>>() {})
-        }
-    }
-
-    suspend fun saveServers(context: Context, servers: List<VPNServer>) = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            writeList(context, "servers.json", servers)
-        }
-    }
-
-    suspend fun saveSubscriptions(context: Context, subscriptions: List<Subscription>) = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            writeList(context, "subscriptions.json", subscriptions)
+            loadSubscriptionsLocked(context)
         }
     }
 
@@ -44,22 +39,54 @@ object ServerStorage {
         withContext(Dispatchers.IO) {
             mutex.withLock {
                 writeList(context, "servers.json", servers)
-                writeList(context, "subscriptions.json", subscriptions)
+                val metas = subscriptions.map {
+                    SubscriptionMeta(it.id, it.name, it.url, it.lastUpdate)
+                }
+                writeList(context, "subscriptions.json", metas)
             }
         }
+
+    private fun loadSubscriptionsLocked(context: Context): List<Subscription> {
+        val file = File(context.filesDir, "subscriptions.json")
+        if (!file.exists() || file.length() == 0L) return emptyList()
+        val text = readTextSafe(file) ?: return emptyList()
+
+        try {
+            val metas = gson.fromJson<List<SubscriptionMeta>>(
+                text,
+                object : TypeToken<List<SubscriptionMeta>>() {}.type
+            )
+            if (!metas.isNullOrEmpty()) {
+                return metas.map { Subscription(it.id, it.name, it.url, emptyList(), it.lastUpdate) }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Meta subscription parse failed, trying legacy", e)
+        }
+
+        return try {
+            val legacy = gson.fromJson<List<Subscription>>(
+                text,
+                object : TypeToken<List<Subscription>>() {}.type
+            ) ?: emptyList()
+            legacy.map { it.copy(servers = emptyList()) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load subscriptions", e)
+            emptyList()
+        }
+    }
 
     private fun <T> readList(context: Context, name: String, typeToken: TypeToken<List<T>>): List<T> {
         val file = File(context.filesDir, name)
         if (!file.exists() || file.length() == 0L) return emptyList()
 
         return try {
-            gson.fromJson<List<T>>(file.readText(), typeToken.type) ?: emptyList()
+            gson.fromJson<List<T>>(readTextSafe(file), typeToken.type) ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to read $name, trying backup", e)
             val backup = File(context.filesDir, "$name.bak")
             if (backup.exists() && backup.length() > 0) {
                 try {
-                    gson.fromJson<List<T>>(backup.readText(), typeToken.type) ?: emptyList()
+                    gson.fromJson<List<T>>(readTextSafe(backup), typeToken.type) ?: emptyList()
                 } catch (e2: Exception) {
                     Log.e(TAG, "Backup $name also failed", e2)
                     emptyList()
@@ -68,6 +95,13 @@ object ServerStorage {
                 emptyList()
             }
         }
+    }
+
+    private fun readTextSafe(file: File): String? = try {
+        file.readText()
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to read file ${file.name}", e)
+        null
     }
 
     private fun <T> writeList(context: Context, name: String, data: List<T>) {
@@ -88,7 +122,6 @@ object ServerStorage {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write $name", e)
             tmp.delete()
-            throw e
         }
     }
 }

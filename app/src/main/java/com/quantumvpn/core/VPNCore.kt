@@ -1,8 +1,8 @@
 package com.quantumvpn.core
 
 import android.content.Context
-import android.net.VpnService
 import android.util.Log
+import android.system.Os
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.File
@@ -27,8 +27,13 @@ object VPNCore {
                     singBoxFile.outputStream().use { output -> input.copyTo(output) }
                 }
                 try {
-                    Runtime.getRuntime().exec(arrayOf("chmod", "755", singBoxFile.absolutePath)).waitFor()
-                } catch (_: Exception) {}
+                    Os.chmod(singBoxFile.absolutePath, 493)
+                } catch (e: Exception) {
+                    try {
+                        Runtime.getRuntime().exec(arrayOf("chmod", "755", singBoxFile.absolutePath)).waitFor()
+                    } catch (_: Exception) {}
+                    Log.w(TAG, "chmod via Os failed, tried shell: ${e.message}")
+                }
                 Log.d(TAG, "sing-box installed: ${singBoxFile.absolutePath} (${singBoxFile.length()} bytes)")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to copy sing-box: ${e.message}")
@@ -44,9 +49,19 @@ object VPNCore {
 
             val arch = getArch()
             val singBox = File(File(context.filesDir, "libs/$arch"), "sing-box")
-            if (!singBox.exists()) {
+            if (!singBox.exists() || singBox.length() == 0L) {
                 Log.e(TAG, "sing-box not found: ${singBox.absolutePath}")
-                return false
+                init(context)
+                if (!singBox.exists() || singBox.length() == 0L) return false
+            }
+
+            if (!singBox.canExecute()) {
+                try {
+                    Os.chmod(singBox.absolutePath, 493)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Cannot make sing-box executable", e)
+                    return false
+                }
             }
 
             Log.d(TAG, "Starting sing-box: ${singBox.absolutePath} run -c $configPath (fd=$vpnFd)")

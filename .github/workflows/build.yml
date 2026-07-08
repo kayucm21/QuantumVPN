@@ -47,15 +47,14 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: QuantumVPN ${{ github.ref_name }}
           files: QuantumVPN-${{ github.ref_name }}.apk
-          body: |
-            ## QuantumVPN ${{ github.ref_name }}
+            body: |
+              ## QuantumVPN ${{ github.ref_name }}
 
-            ### Исправлено
-            - Устранена петля маршрутизации VPN (трафик теперь идёт через сервер)
-            - Исправлен конфиг sing-box TUN/DNS
-            - Исключён процесс приложения из туннеля
-            - MTU 1500, маршрутизация IPv6
-
-            Скачайте APK ниже.
+              ### Исправлено
+              - Пинг серверов с отображением в списке
+              - Обновление подписок с уведомлениями
+              - QR-сканер и импорт из буфера
+              - Исправлено подключение VPN (broadcast, chmod sing-box)
+              - Нормальный размер UI на телефоне
           draft: false
           prerelease: false

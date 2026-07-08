@@ -11,8 +11,8 @@ android {
         applicationId = "com.quantumvpn"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "1.7.1"
+        versionCode = 9
+        versionName = "1.8.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -94,6 +94,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.code.gson:gson:2.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // QR scanner
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     // Testing
     debugImplementation("androidx.compose.ui:ui-tooling")

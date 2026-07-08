@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
-import android.net.VpnService
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -49,6 +48,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    private val _infoMessage = MutableStateFlow<String?>(null)
+    val infoMessage: StateFlow<String?> = _infoMessage.asStateFlow()
+
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    private val _isPinging = MutableStateFlow(false)
+    val isPinging: StateFlow<Boolean> = _isPinging.asStateFlow()
+
     private val _autoConnect = MutableStateFlow(prefs.getBoolean("auto_connect", false))
     val autoConnect: StateFlow<Boolean> = _autoConnect.asStateFlow()
 
@@ -58,6 +66,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             val state = intent.getStringExtra("state") ?: return
+            connectTimeoutJob?.cancel()
             when (state) {
                 "connected" -> {
                     _vpnState.update { it.copy(isConnected = true, isConnecting = false, connectionTime = System.currentTimeMillis()) }
@@ -70,7 +79,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     trafficJob?.cancel()
                 }
                 "error" -> {
-                    val errorMsg = intent.getStringExtra("error") ?: "Ошибка"
+                    val errorMsg = intent.getStringExtra("error") ?: "Ошибка подключения"
                     _vpnState.update { it.copy(isConnected = false, isConnecting = false) }
                     _connectionState.value = ConnectionState.Error(errorMsg)
                     _error.value = errorMsg
@@ -112,8 +121,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (selectedId != null) {
                     _servers.value.find { it.id == selectedId }?.let { server ->
                         _vpnState.update { it.copy(currentServer = server) }
-                        com.quantumvpn.data.CurrentServer.set(server)
+                        CurrentServer.set(server)
                     }
+                } else if (_servers.value.isNotEmpty()) {
+                    val first = _servers.value.first()
+                    _vpnState.update { it.copy(currentServer = first) }
+                    CurrentServer.set(first)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -121,28 +134,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private var trafficJob: kotlinx.coroutines.Job? = null
+    private var trafficJob: Job? = null
+    private var connectTimeoutJob: Job? = null
 
     fun connectVPN() {
         val server = _vpnState.value.currentServer ?: run {
-            _error.value = "Выберите сервер"
+            _error.value = "Выберите сервер из списка"
             return
         }
 
         viewModelScope.launch {
             _connectionState.value = ConnectionState.Connecting
             _vpnState.update { it.copy(isConnecting = true) }
-            com.quantumvpn.data.CurrentServer.set(server)
+            CurrentServer.set(server)
+
+            connectTimeoutJob?.cancel()
+            connectTimeoutJob = viewModelScope.launch {
+                delay(30_000)
+                if (_vpnState.value.isConnecting && !_vpnState.value.isConnected) {
+                    _vpnState.update { it.copy(isConnecting = false) }
+                    _connectionState.value = ConnectionState.Error("Таймаут подключения")
+                    _error.value = "Не удалось подключиться за 30 секунд"
+                }
+            }
 
             try {
                 val intent = Intent(context, VPNService::class.java).apply {
                     action = "com.quantumvpn.START"
                 }
-                context.startForegroundService(intent)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
             } catch (e: Exception) {
+                connectTimeoutJob?.cancel()
                 _vpnState.update { it.copy(isConnecting = false) }
                 _connectionState.value = ConnectionState.Error(e.message ?: "Ошибка подключения")
-                _error.value = e.message
+                _error.value = e.message ?: "Ошибка подключения"
             }
         }
     }
@@ -151,11 +180,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         trafficJob?.cancel()
         trafficJob = viewModelScope.launch {
             while (isActive) {
-                kotlinx.coroutines.delay(1000)
+                delay(1000)
                 _vpnState.update {
                     it.copy(
-                        totalDownload = com.quantumvpn.core.VPNCore.totalDownload,
-                        totalUpload = com.quantumvpn.core.VPNCore.totalUpload
+                        totalDownload = VPNCore.totalDownload,
+                        totalUpload = VPNCore.totalUpload
                     )
                 }
             }
@@ -163,6 +192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnectVPN() {
+        connectTimeoutJob?.cancel()
         viewModelScope.launch {
             _connectionState.value = ConnectionState.Disconnecting
             try {
@@ -171,7 +201,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 context.startService(intent)
             } catch (e: Exception) {
-                _connectionState.value = ConnectionState.Error(e.message ?: "Disconnect failed")
+                _connectionState.value = ConnectionState.Error(e.message ?: "Ошибка отключения")
             }
         }
     }
@@ -189,54 +219,145 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(isSelected = it.id == server.id)
         }
         _vpnState.update { it.copy(currentServer = server) }
-        com.quantumvpn.data.CurrentServer.set(server)
+        CurrentServer.set(server)
         prefs.edit().putString("selected_server_id", server.id).apply()
     }
 
-    fun addSubscription(url: String, name: String = "Subscription") {
+    fun addSubscription(url: String, name: String = "Подписка") {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) {
+            _error.value = "Введите ссылку или конфиг"
+            return
+        }
+        if (!trimmed.startsWith("http://", true) && !trimmed.startsWith("https://", true)) {
+            importFromText(trimmed, name)
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val request = Request.Builder().url(url).build()
+                val request = Request.Builder().url(trimmed).build()
                 val response = client.newCall(request).execute()
-                val body = response.body?.string() ?: throw Exception("Empty response")
+                if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+                val body = response.body?.string() ?: throw Exception("Пустой ответ")
 
                 val servers = SubscriptionParser.parse(body)
+                if (servers.isEmpty()) throw Exception("Серверы не найдены в подписке")
+
                 val subscription = Subscription(
                     name = name,
-                    url = url,
+                    url = trimmed,
                     servers = servers,
                     lastUpdate = System.currentTimeMillis()
                 )
 
-                _subscriptions.update { current -> current + subscription }
-                _servers.update { current -> current + servers }
-
+                withContext(Dispatchers.Main) {
+                    _subscriptions.update { current -> current + subscription }
+                    _servers.update { current -> current + servers }
+                    servers.firstOrNull()?.let { selectServer(it) }
+                    _showAddSubscription.value = false
+                    _infoMessage.value = "Добавлено серверов: ${servers.size}"
+                }
                 saveData()
-                _showAddSubscription.value = false
             } catch (e: Exception) {
-                _error.value = "Failed to add subscription: ${e.message}"
+                withContext(Dispatchers.Main) {
+                    _error.value = "Ошибка подписки: ${e.message}"
+                }
             }
         }
     }
 
-    fun refreshSubscriptions() {
+    fun importFromText(text: String, name: String = "Импорт") {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) {
+            _error.value = "Пустой текст"
+            return
+        }
+
+        if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) {
+            addSubscription(trimmed, name)
+            return
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val servers = SubscriptionParser.parse(trimmed)
+                if (servers.isEmpty()) throw Exception("Не удалось распознать конфиг")
+
+                withContext(Dispatchers.Main) {
+                    _servers.update { current -> current + servers }
+                    servers.firstOrNull()?.let { selectServer(it) }
+                    _showAddSubscription.value = false
+                    _infoMessage.value = "Импортировано серверов: ${servers.size}"
+                }
+                saveData()
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _error.value = "Ошибка импорта: ${e.message}"
+                }
+            }
+        }
+    }
+
+    fun importFromClipboard() {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        val clip = cm.primaryClip
+        if (clip == null || clip.itemCount == 0) {
+            _error.value = "Буфер обмена пуст"
+            return
+        }
+        val text = clip.getItemAt(0).coerceToText(context)?.toString()?.trim() ?: ""
+        if (text.isEmpty()) {
+            _error.value = "Буфер обмена пуст"
+            return
+        }
+        importFromText(text, "Из буфера")
+    }
+
+    fun refreshSubscriptions() {
+        if (_subscriptions.value.isEmpty()) {
+            _error.value = "Нет подписок. Добавьте подписку по ссылке"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _isRefreshing.value = true
+            val updatedSubs = mutableListOf<Subscription>()
             val updatedServers = mutableListOf<VPNServer>()
+            var errors = 0
 
             _subscriptions.value.forEach { sub ->
                 try {
                     val request = Request.Builder().url(sub.url).build()
                     val response = client.newCall(request).execute()
-                    val body = response.body?.string() ?: return@forEach
-
+                    if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+                    val body = response.body?.string() ?: throw Exception("Пустой ответ")
                     val servers = SubscriptionParser.parse(body)
+                    if (servers.isEmpty()) throw Exception("Серверы не найдены")
+                    updatedSubs.add(sub.copy(servers = servers, lastUpdate = System.currentTimeMillis()))
                     updatedServers.addAll(servers)
                 } catch (e: Exception) {
+                    errors++
+                    updatedSubs.add(sub)
                     e.printStackTrace()
                 }
             }
 
-            _servers.value = updatedServers
+            withContext(Dispatchers.Main) {
+                _isRefreshing.value = false
+                if (updatedServers.isNotEmpty()) {
+                    _subscriptions.value = updatedSubs
+                    _servers.value = updatedServers
+                    val selectedId = _vpnState.value.currentServer?.id
+                    val newCurrent = updatedServers.find { it.id == selectedId } ?: updatedServers.first()
+                    selectServer(newCurrent)
+                    _infoMessage.value = if (errors > 0) {
+                        "Обновлено ${updatedServers.size} серверов (частично)"
+                    } else {
+                        "Обновлено серверов: ${updatedServers.size}"
+                    }
+                } else {
+                    _error.value = "Не удалось обновить подписки"
+                }
+            }
             saveData()
         }
     }
@@ -249,6 +370,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun testPing(server: VPNServer) {
         viewModelScope.launch(Dispatchers.IO) {
+            _servers.value = _servers.value.map {
+                if (it.id == server.id) it.copy(ping = -2L) else it
+            }
             val ping = VPNCore.testPing(server.host, server.port)
             _servers.value = _servers.value.map {
                 if (it.id == server.id) it.copy(ping = ping) else it
@@ -257,13 +381,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun testAllPings() {
+        if (_servers.value.isEmpty()) {
+            _error.value = "Нет серверов для проверки"
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
+            _isPinging.value = true
             val currentServers = _servers.value
             val updatedServers = currentServers.map { server ->
                 val ping = VPNCore.testPing(server.host, server.port)
                 server.copy(ping = ping)
             }
-            _servers.value = updatedServers
+            withContext(Dispatchers.Main) {
+                _servers.value = updatedServers
+                _isPinging.value = false
+                val ok = updatedServers.count { it.ping >= 0 }
+                _infoMessage.value = "Пинг: $ok/${updatedServers.size} серверов отвечают"
+            }
         }
     }
 
@@ -282,6 +416,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissError() {
         _error.value = null
+    }
+
+    fun dismissInfo() {
+        _infoMessage.value = null
     }
 
     fun showAddSubscription(show: Boolean) {
@@ -304,6 +442,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        connectTimeoutJob?.cancel()
         try { context.unregisterReceiver(vpnStateReceiver) } catch (_: Exception) {}
         viewModelScope.cancel()
     }

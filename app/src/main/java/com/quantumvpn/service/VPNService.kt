@@ -76,6 +76,16 @@ class VPNService : VpnService() {
         }
     }
 
+    private fun sendVpnState(state: String, error: String? = null) {
+        sendBroadcast(
+            Intent("com.quantumvpn.VPN_STATE").apply {
+                setPackage(packageName)
+                putExtra("state", state)
+                if (error != null) putExtra("error", error)
+            }
+        )
+    }
+
     private suspend fun startVpn() {
         try {
             startForeground(NOTIFICATION_ID, createNotification("Подключение..."))
@@ -83,6 +93,7 @@ class VPNService : VpnService() {
             val server = com.quantumvpn.data.CurrentServer.get()
             if (server == null) {
                 updateNotification("Ошибка: сервер не выбран")
+                sendVpnState("error", "Сервер не выбран")
                 stopSelf()
                 return
             }
@@ -90,6 +101,7 @@ class VPNService : VpnService() {
             val vpnFd = establishVPN()
             if (vpnFd == null) {
                 updateNotification("Ошибка создания VPN-интерфейса")
+                sendVpnState("error", "Не удалось создать VPN-интерфейс")
                 stopSelf()
                 return
             }
@@ -99,6 +111,7 @@ class VPNService : VpnService() {
             val configPath = com.quantumvpn.core.ConfigGenerator.generate(this@VPNService, server)
             if (configPath == null) {
                 updateNotification("Ошибка генерации конфига")
+                sendVpnState("error", "Ошибка генерации конфига")
                 stopSelf()
                 return
             }
@@ -111,15 +124,16 @@ class VPNService : VpnService() {
                 lastTxBytes = TrafficStats.getTotalTxBytes()
                 startTrafficUpdates()
                 updateNotification("Подключено: ${server.name}")
-                sendBroadcast(Intent("com.quantumvpn.VPN_STATE").putExtra("state", "connected"))
+                sendVpnState("connected")
             } else {
                 updateNotification("Ошибка запуска ядра")
-                sendBroadcast(Intent("com.quantumvpn.VPN_STATE").putExtra("state", "error").putExtra("error", "sing-box failed"))
+                sendVpnState("error", "sing-box не запустился. Проверьте конфиг сервера")
                 stopSelf()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Start failed", e)
             updateNotification("Ошибка: ${e.message}")
+            sendVpnState("error", e.message ?: "Ошибка подключения")
             stopSelf()
         }
     }
@@ -147,7 +161,7 @@ class VPNService : VpnService() {
             try { vpnInterface?.close() } catch (_: Exception) {}
             vpnInterface = null
             isRunning = false
-            sendBroadcast(Intent("com.quantumvpn.VPN_STATE").putExtra("state", "disconnected"))
+            sendVpnState("disconnected")
             delay(300)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

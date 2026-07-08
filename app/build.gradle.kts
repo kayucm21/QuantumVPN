@@ -11,8 +11,8 @@ android {
         applicationId = "com.quantumvpn"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "1.10.0"
+        versionCode = 12
+        versionName = "1.10.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

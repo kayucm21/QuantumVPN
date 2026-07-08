@@ -29,22 +29,35 @@ jobs:
 
       - name: Download sing-box binaries
         run: |
+          set -euo pipefail
           SING_BOX_VERSION=1.13.14
           BASE="$GITHUB_WORKSPACE/app/src/main/assets/libs"
           mkdir -p "$BASE/arm64-v8a" "$BASE/armeabi-v7a" "$BASE/x86_64"
-          cd /tmp
-          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-arm64.tar.gz"
-          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-arm.tar.gz"
-          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-amd64.tar.gz"
-          mkdir -p sb-arm64 sb-arm sb-amd64
-          tar -xzf "sing-box-${SING_BOX_VERSION}-android-arm64.tar.gz" -C sb-arm64
-          tar -xzf "sing-box-${SING_BOX_VERSION}-android-arm.tar.gz" -C sb-arm
-          tar -xzf "sing-box-${SING_BOX_VERSION}-android-amd64.tar.gz" -C sb-amd64
-          cp sb-arm64/sing-box "$BASE/arm64-v8a/sing-box"
-          cp sb-arm/sing-box "$BASE/armeabi-v7a/sing-box"
-          cp sb-amd64/sing-box "$BASE/x86_64/sing-box"
-          chmod +x "$BASE/"*/sing-box
-          ls -la "$BASE/"*/sing-box
+
+          download_singbox() {
+            local url="$1"
+            local dest="$2"
+            local tmpdir
+            tmpdir="$(mktemp -d)"
+            echo "Downloading $url"
+            curl -fsSL "$url" -o "$tmpdir/sing-box.tar.gz"
+            tar -xzf "$tmpdir/sing-box.tar.gz" -C "$tmpdir"
+            local bin
+            bin="$(find "$tmpdir" -type f -name 'sing-box' | head -n 1)"
+            if [ -z "$bin" ]; then
+              echo "sing-box binary not found in archive: $url"
+              find "$tmpdir" -type f
+              exit 1
+            fi
+            cp "$bin" "$dest"
+            chmod +x "$dest"
+            ls -la "$dest"
+            rm -rf "$tmpdir"
+          }
+
+          download_singbox "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-arm64.tar.gz" "$BASE/arm64-v8a/sing-box"
+          download_singbox "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-arm.tar.gz" "$BASE/armeabi-v7a/sing-box"
+          download_singbox "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-amd64.tar.gz" "$BASE/x86_64/sing-box"
 
       - name: Generate Gradle wrapper
         run: |

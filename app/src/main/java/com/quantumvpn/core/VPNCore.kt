@@ -138,11 +138,12 @@ object VPNCore {
     private fun buildCommand(singBox: File, vararg args: String): List<String> {
         val linker64 = File("/system/bin/linker64")
         val linker = File("/system/bin/linker")
+        val argList = args.toList()
         return when {
-            linker64.exists() -> listOf(linker64.absolutePath, singBox.absolutePath) + args
+            linker64.exists() -> listOf(linker64.absolutePath, singBox.absolutePath) + argList
             linker.exists() && Build.SUPPORTED_ABIS.firstOrNull()?.contains("64") != true ->
-                listOf(linker.absolutePath, singBox.absolutePath) + args
-            else -> listOf(singBox.absolutePath) + args
+                listOf(linker.absolutePath, singBox.absolutePath) + argList
+            else -> listOf(singBox.absolutePath) + argList
         }
     }
 

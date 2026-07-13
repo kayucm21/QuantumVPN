@@ -1,6 +1,7 @@
 # Add project specific ProGuard rules here.
 -keep class com.quantumvpn.data.** { *; }
 -keep class com.quantumvpn.core.** { *; }
+-keep class com.v2ray.ang.service.TProxyService { *; }
 -keep class com.google.gson.** { *; }
 -keep class * extends com.google.gson.reflect.TypeToken
 -keepattributes Signature

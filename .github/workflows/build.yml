@@ -25,7 +25,12 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install SDK packages
-        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
+
+      - name: Build hev-socks5-tunnel
+        run: |
+          chmod +x scripts/build-hev-tunnel.sh
+          ./scripts/build-hev-tunnel.sh "$GITHUB_WORKSPACE/app/src/main/jniLibs"
 
       - name: Download sing-box binaries
         run: |
@@ -84,10 +89,12 @@ jobs:
           body: |
             ## QuantumVPN ${{ github.ref_name }}
 
+            ### Новое
+            - Архитектура как у Happ/v2rayNG: sing-box (SOCKS :10808) + tun2socks (hev-socks5-tunnel)
+            - Стабильный VPN без routing loop через ANDROID_VPN_SERVICE_FD
+
             ### Исправлено
-            - sing-box запускается из nativeLibraryDir (исправлен Permission denied)
+            - sing-box запускается из nativeLibraryDir
             - Исправлены вылеты при пинге, обновлении и настройках
-            - Лёгкое сохранение подписок без дублирования серверов
-            - Запуск sing-box через linker64 на Android 10+
           draft: false
           prerelease: false

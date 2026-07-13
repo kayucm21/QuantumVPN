@@ -53,13 +53,11 @@ object ConfigGenerator {
   },
   "inbounds": [
     {
-      "type": "tun",
-      "tag": "tun-in",
-      "address": ["172.19.0.1/30"],
-      "mtu": 1500,
-      "auto_route": false,
-      "strict_route": false,
-      "stack": "system",
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "${VpnConstants.LOOPBACK}",
+      "listen_port": ${VpnConstants.SOCKS_PORT},
+      "udp_fragment": true,
       "sniff": true,
       "sniff_override_destination": true
     }

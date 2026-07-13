@@ -15,6 +15,8 @@ import com.quantumvpn.MainActivity
 import com.quantumvpn.QuantumVPNApp
 import com.quantumvpn.R
 import com.quantumvpn.core.VPNCore
+import com.quantumvpn.core.Tun2SocksBridge
+import com.quantumvpn.core.VpnConstants
 import kotlinx.coroutines.*
 
 class VPNService : VpnService() {
@@ -51,12 +53,12 @@ class VPNService : VpnService() {
         return try {
             val builder = Builder()
             builder.setSession("QuantumVPN")
-            builder.addAddress("172.19.0.1", 30)
+            builder.addAddress(VpnConstants.TUN_ADDRESS, VpnConstants.TUN_PREFIX)
             builder.addRoute("0.0.0.0", 0)
             builder.addRoute("::", 0)
             builder.addDnsServer("8.8.8.8")
             builder.addDnsServer("1.1.1.1")
-            builder.setMtu(1500)
+            builder.setMtu(VpnConstants.MTU)
             // sing-box runs in our process — exclude it from the tunnel to avoid routing loops
             try {
                 builder.addDisallowedApplication(packageName)
@@ -118,9 +120,19 @@ class VPNService : VpnService() {
 
             Log.d(TAG, "Starting sing-box with config: $configPath")
             val started = withContext(Dispatchers.IO) {
-                VPNCore.start(configPath, this@VPNService, vpnFd.fd)
+                VPNCore.start(configPath, this@VPNService)
             }
-            if (started) {
+            if (!started) {
+                updateNotification("Ошибка запуска ядра")
+                sendVpnState("error", "sing-box не запустился. ${VPNCore.getLastError()}")
+                stopSelf()
+                return
+            }
+
+            val tunStarted = withContext(Dispatchers.IO) {
+                Tun2SocksBridge.start(this@VPNService, vpnFd.fd)
+            }
+            if (tunStarted) {
                 isRunning = true
                 lastRxBytes = TrafficStats.getTotalRxBytes()
                 lastTxBytes = TrafficStats.getTotalTxBytes()
@@ -128,8 +140,9 @@ class VPNService : VpnService() {
                 updateNotification("Подключено: ${server.name}")
                 sendVpnState("connected")
             } else {
-                updateNotification("Ошибка запуска ядра")
-                sendVpnState("error", "sing-box не запустился. ${VPNCore.getLastError()}")
+                VPNCore.stop()
+                updateNotification("Ошибка запуска tun2socks")
+                sendVpnState("error", "tun2socks не запустился")
                 stopSelf()
             }
         } catch (e: Exception) {
@@ -159,6 +172,7 @@ class VPNService : VpnService() {
         try {
             trafficJob?.cancel()
             updateNotification("Отключение...")
+            Tun2SocksBridge.stop()
             VPNCore.stop()
             try { vpnInterface?.close() } catch (_: Exception) {}
             vpnInterface = null
@@ -205,6 +219,7 @@ class VPNService : VpnService() {
 
     override fun onDestroy() {
         scope.cancel()
+        Tun2SocksBridge.stop()
         VPNCore.stop()
         try { vpnInterface?.close() } catch (_: Exception) {}
         isRunning = false

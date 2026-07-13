@@ -28,7 +28,7 @@ object VPNCore {
         installSingBox(context)
     }
 
-    fun start(configPath: String, context: Context, vpnFd: Int = -1): Boolean {
+    fun start(configPath: String, context: Context): Boolean {
         try {
             if (isRunning) stop()
             logLines.clear()
@@ -40,7 +40,7 @@ object VPNCore {
                 return false
             }
 
-            Log.d(TAG, "Starting sing-box: ${singBox.absolutePath} (fd=$vpnFd)")
+            Log.d(TAG, "Starting sing-box: ${singBox.absolutePath}")
 
             val cmd = buildCommand(singBox, "run", "-c", configPath)
             val pb = ProcessBuilder(cmd)
@@ -50,9 +50,6 @@ object VPNCore {
             val env = pb.environment()
             env["TMPDIR"] = context.cacheDir.absolutePath
             env["HOME"] = context.filesDir.absolutePath
-            if (vpnFd >= 0) {
-                env["ANDROID_VPN_SERVICE_FD"] = vpnFd.toString()
-            }
 
             process = pb.start()
             isRunning = true

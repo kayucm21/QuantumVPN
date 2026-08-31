@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test Zapret Android"
+  short_description: "Проверка Android VPN и сбор ADB-диагностики"
+  default_prompt: "Use $test-zapret-android to reproduce this QuantumVPN Android issue and collect the required ADB evidence."

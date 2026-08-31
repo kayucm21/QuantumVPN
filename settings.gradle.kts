@@ -5,8 +5,8 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
+
 dependencyResolutionManagement {
-    @Suppress("UnstableApiUsage")
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
@@ -16,3 +16,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "QuantumVPN"
 include(":app")
+include(":app-updater")
+include(":network-bootstrap")
+include(":wireguard-import")

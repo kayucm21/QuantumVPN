@@ -1,0 +1,62 @@
+{
+  "dns": {
+    "servers": [
+      { "type": "local", "tag": "wireguard-bootstrap-dns" },
+      { "type": "udp", "tag": "wireguard-dns-1", "server": "10.0.0.1", "detour": "wireguard-out" }
+    ],
+    "final": "wireguard-dns-1"
+  },
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "wireguard-out",
+      "mtu": 1280,
+      "address": ["10.0.0.2/32"],
+      "private_key": "TFlmmEUC7V7VtiDYLKsbP5rySTKLIZq1yn8lMqK83wo=",
+      "peers": [
+        {
+          "address": "192.0.2.1",
+          "port": 51820,
+          "public_key": "vBN7qyUTb5lJtWYJ8LhbPio1Z4RcyBPGnqFBGn6O6Qg=",
+          "allowed_ips": ["0.0.0.0/0"],
+          "persistent_keepalive_interval": 25
+        }
+      ]
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+      "auto_route": true,
+      "mtu": 1280
+    }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "wireguard-bootstrap-dns",
+    "rules": [
+      { "port": 53, "action": "hijack-dns" },
+      {
+        "package_name": ["com.quantumvpn.debug"],
+        "network": "tcp",
+        "port": 443,
+        "action": "sniff",
+        "sniffer": ["tls"],
+        "timeout": "2s"
+      },
+      {
+        "package_name": ["com.quantumvpn.debug"],
+        "domain": ["cp.cloudflare.com", "connectivitycheck.gstatic.com", "dns.opendns.com"],
+        "action": "route",
+        "outbound": "wireguard-out"
+      },
+      { "ip_cidr": ["0.0.0.0/0"], "action": "route", "outbound": "wireguard-out" }
+    ],
+    "final": "direct"
+  }
+}

@@ -1,0 +1,190 @@
+package com.quantumvpn.diagnostics
+
+import android.content.Intent
+import android.content.pm.PackageManager
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.quantumvpn.BuildConfig
+import com.quantumvpn.QuantumVpnApplication
+import com.quantumvpn.config.DnsMode
+import com.quantumvpn.config.DnsOverride
+import com.quantumvpn.config.JsonConfig
+import com.quantumvpn.vpn.PrivateDnsMode
+import com.quantumvpn.vpn.UnderlyingNetworkState
+import com.quantumvpn.vpn.VpnConnectionState
+import com.quantumvpn.vpn.VpnSystemPolicy
+import java.io.File
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class DiagnosticExportInstrumentedTest {
+    @Test
+    fun reportIsExplicitRedactedShareableAndCleanable() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val container = (context.applicationContext as QuantumVpnApplication).container
+        val exporter = container.diagnosticExporter
+        val directory = File(context.cacheDir, DiagnosticExporter.DIRECTORY_NAME)
+        exporter.cleanupStaleFiles()
+        container.appCrashStore.clear()
+        container.uiSettingsStore.setDnsMode(DnsMode.Automatic)
+        container.uiSettingsStore.setDnsOverride(
+            DnsOverride.DEFAULT_HOSTNAME,
+            DnsOverride.DEFAULT_IPV4_ADDRESS,
+        )
+        container.uiSettingsStore.setDnsOverrideEnabled(true)
+        assertFalse("No report may exist before the explicit action", directory.exists())
+
+        val previousToken = container.vpnController.nextGeneration()
+        container.vpnController.beginConnectionDiagnostic(previousToken, "previous_test")
+        container.vpnController.startConnectionDiagnosticStage(previousToken, "profile", "Профиль")
+        container.vpnController.publish(
+            previousToken,
+            VpnConnectionState.Error("DNS через VPN не отвечает: previous test."),
+        )
+        val token = container.vpnController.nextGeneration()
+        try {
+            container.vpnController.beginConnectionDiagnostic(token, "instrumented_test")
+            container.vpnController.startConnectionDiagnosticStage(token, "profile", "Профиль")
+            container.vpnController.startConnectionDiagnosticStage(token, "dns_probe", "DNS-проверка")
+            container.vpnController.publish(token, VpnConnectionState.Starting("hidden-profile", "Тест"))
+            container.vpnController.publishDiagnosticNetwork(
+                token,
+                UnderlyingNetworkState(
+                    transport = "wifi",
+                    interfaceName = "wlan0",
+                    metered = false,
+                    validated = true,
+                    privateDnsMode = PrivateDnsMode.Automatic,
+                    privateDnsActive = true,
+                ),
+            )
+            container.vpnController.publishEffectiveOverlay(
+                token,
+                """{"dns_mode":"Automatic","uuid":"123e4567-e89b-12d3-a456-426614174000"}""",
+            )
+            container.vpnController.publishVpnSystemPolicy(
+                token,
+                VpnSystemPolicy(statusAvailable = true, alwaysOn = false, lockdown = false),
+            )
+            container.vpnController.publishCoreDiagnosticLog(
+                token,
+                3,
+                "\u001B[31mtoken=super-secret 123e4567-e89b-12d3-a456-426614174000 " +
+                    "com.example.hidden 203.0.113.7\u001B[0m",
+            )
+            container.vpnController.publish(
+                token,
+                VpnConnectionState.Connected(
+                    profileId = "hidden-profile",
+                    profileName = "Hidden profile",
+                    connectedAtEpochMillis = System.currentTimeMillis(),
+                ),
+            )
+            val stopToken = container.vpnController.nextGeneration()
+            container.vpnController.beginStopDiagnostic(stopToken, "instrumented_stop")
+            container.vpnController.startStopDiagnosticStage(
+                stopToken,
+                "close_tun",
+                "Закрытие Android TUN",
+            )
+            container.vpnController.finishStopDiagnosticStage(stopToken, "close_tun")
+            container.vpnController.startStopDiagnosticStage(
+                stopToken,
+                "close_libbox_service",
+                "Остановка сервиса libbox",
+            )
+            container.vpnController.finishStopDiagnosticStage(stopToken, "close_libbox_service")
+            container.vpnController.completeStopDiagnostic(stopToken)
+            container.appCrashStore.record(
+                threadName = "test-worker",
+                throwable = IllegalStateException("token=super-secret"),
+            )
+            val savedCrash = checkNotNull(container.appCrashStore.read())
+            assertEquals("IllegalStateException", savedCrash.exceptionType)
+            assertFalse(savedCrash.message.orEmpty().contains("super-secret"))
+            assertTrue(savedCrash.stack.size <= 16)
+            val inMemoryLogs = container.vpnController.diagnostics.value.logs
+                .joinToString("\n") { it.message }
+            assertFalse("super-secret" in inMemoryLogs)
+            assertFalse("123e4567-e89b-12d3-a456-426614174000" in inMemoryLogs)
+            assertFalse("\u001B" in inMemoryLogs)
+
+            val report = exporter.createReport()
+            JsonConfig.parse(report)
+            assertTrue("\"report_version\": 4" in report)
+            assertTrue(BuildConfig.CORE_COMMIT in report)
+            assertTrue(BuildConfig.CORE_PATCH_SHA256 in report)
+            assertTrue("\"private_dns_mode\"" in report)
+            assertTrue("\"override_active\": true" in report)
+            assertTrue("\"vpn_system_policy\"" in report)
+            assertTrue("\"supported_by_app\": false" in report)
+            assertTrue("\"effective_overlay\"" in report)
+            assertTrue("\"connection_attempt\"" in report)
+            assertTrue("\"connection_attempts\"" in report)
+            assertTrue("\"stop_attempt\"" in report)
+            assertTrue("\"close_tun\"" in report)
+            assertTrue("\"close_libbox_service\"" in report)
+            assertTrue("\"startup_core_logs\"" in report)
+            assertTrue("\"startup_core_log_stats\"" in report)
+            assertTrue("\"log_stats\"" in report)
+            assertTrue("\"previous_process_exit\"" in report)
+            assertTrue("\"runtime_resources\"" in report)
+            assertTrue("\"runtime_log_persisted\": false" in report)
+            assertTrue("\"support_code\": \"DNS-200\"" in report)
+            assertEquals(
+                2,
+                (JsonConfig.parse(report) as JsonObject)
+                    .getValue("connection_attempts")
+                    .let { it as JsonArray }
+                    .size,
+            )
+            assertTrue("\"total_duration_ms\"" in report)
+            assertTrue("\"dns_probe\"" in report)
+            assertTrue("\"previous_crash\"" in report)
+            assertTrue("\"IllegalStateException\"" in report)
+            assertFalse("hidden-profile" in report)
+            assertFalse("super-secret" in report)
+            assertFalse("123e4567-e89b-12d3-a456-426614174000" in report)
+            assertFalse("com.example.hidden" in report)
+            assertFalse("203.0.113.7" in report)
+            assertFalse(DnsOverride.DEFAULT_HOSTNAME in report)
+            assertFalse(DnsOverride.DEFAULT_IPV4_ADDRESS in report)
+            assertFalse("allowed_packages" in report)
+            assertFalse(directory.exists())
+
+            val share = exporter.createShareIntent()
+            assertEquals(Intent.ACTION_SEND, share.action)
+            assertEquals("application/json", share.type)
+            assertTrue(share.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+            val uri = share.clipData?.getItemAt(0)?.uri
+            assertNotNull(uri)
+            val sharedReport = context.contentResolver.openInputStream(checkNotNull(uri))
+                ?.bufferedReader()
+                ?.use { it.readText() }
+            assertNotNull(sharedReport)
+            assertFalse("super-secret" in checkNotNull(sharedReport))
+            assertTrue(File(directory, DiagnosticExporter.FILE_NAME).isFile)
+
+            val provider = context.packageManager.resolveContentProvider(
+                "${BuildConfig.APPLICATION_ID}.fileprovider",
+                PackageManager.GET_META_DATA,
+            )
+            assertNotNull(provider)
+            assertFalse(checkNotNull(provider).exported)
+        } finally {
+            exporter.cleanupStaleFiles()
+            container.appCrashStore.clear()
+            container.uiSettingsStore.setDnsMode(DnsMode.FromJson)
+            container.vpnController.publish(token, VpnConnectionState.Stopped)
+        }
+        assertFalse(directory.exists())
+    }
+}

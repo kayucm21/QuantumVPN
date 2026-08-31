@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QuantumVPN</string>
+    <string name="widget_description">Quick VPN toggle and traffic</string>
+    <string name="widget_title">QuantumVPN</string>
+    <string name="widget_wide_description">Traffic, toggle, and open servers</string>
+    <string name="widget_wide_title">QuantumVPN · wide</string>
+    <string name="shortcut_connect_short">Connect</string>
+    <string name="shortcut_connect_long">Connect VPN</string>
+    <string name="shortcut_disconnect_short">Disconnect</string>
+    <string name="shortcut_disconnect_long">Disconnect VPN</string>
+    <string name="shortcut_ping_short">Servers</string>
+    <string name="shortcut_ping_long">Open servers and ping</string>
+    <string name="shortcut_import_short">Import</string>
+    <string name="shortcut_import_long">Import profile</string>
+    <string name="shortcut_speedtest_short">Speedtest</string>
+    <string name="shortcut_speedtest_long">Run speed test</string>
+    <string name="status_protected">Protected</string>
+    <string name="status_unprotected">Not protected</string>
+    <string name="action_add_subscription">Add subscription</string>
+    <string name="network_map">Network map</string>
+    <string name="choose_server">Choose a server</string>
+    <string name="speed_test">Speed test</string>
+    <string name="why_slow">Why is it slow</string>
+    <string name="event_journal">Event journal</string>
+    <string name="trusted_wifi">Trusted Wi‑Fi</string>
+    <string name="family_protect">Family filter</string>
+    <string name="best_ping">Best ping</string>
+    <string name="same_region">Same region</string>
+    <string name="tab_home">Home</string>
+    <string name="tab_servers">Servers</string>
+    <string name="tab_routing">Routing</string>
+    <string name="tab_settings">Settings</string>
+    <string name="undo">Undo</string>
+    <string name="subscription_expiring">Subscription expiring</string>
+    <string name="dns_preview">DNS preview</string>
+    <string name="tips_carousel">Tips</string>
+    <string name="reliability_uptime">Uptime</string>
+    <string name="work_schedule">Work schedule connect</string>
+    <string name="skip_roaming">Skip auto-connect in roaming</string>
+    <string name="mobile_autoconnect">Auto-connect on mobile data</string>
+    <string name="time_routing">Time-based routing</string>
+    <string name="recommended_server">Recommended</string>
+    <string name="subscription_diff">Subscription changes</string>
+</resources>

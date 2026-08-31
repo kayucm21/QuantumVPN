@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!-- Runs under the test APK UID, which is intentionally outside the app allowlist. -->
+        <provider
+            android:name="com.quantumvpn.vpn.ControlTrafficProvider"
+            android:authorities="com.quantumvpn.debug.test.traffic"
+            android:exported="true" />
+
+        <!-- A second, test-APK-only VPN is used to exercise Android's real onRevoke contract. -->
+        <service
+            android:name="com.quantumvpn.vpn.RevokingTestVpnService"
+            android:exported="true"
+            android:foregroundServiceType="systemExempted"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+    </application>
+
+</manifest>

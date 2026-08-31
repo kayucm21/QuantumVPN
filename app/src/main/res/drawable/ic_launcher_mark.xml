@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- QuantumVPN brand mark: mint shield + power glyph on transparent. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Shield outline -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,20 L76,30 L76,52 C76,69 65,82 54,88 C43,82 32,69 32,52 L32,30 Z"
+        android:strokeWidth="6"
+        android:strokeColor="#2EE59D"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round" />
+    <!-- Power stem -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,42 L54,58"
+        android:strokeWidth="6"
+        android:strokeColor="#2EE59D"
+        android:strokeLineCap="round" />
+    <!-- Power ring (open at top) -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M44,48 A12,12 0 1,0 64,48"
+        android:strokeWidth="6"
+        android:strokeColor="#2EE59D"
+        android:strokeLineCap="round" />
+</vector>

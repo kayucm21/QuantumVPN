@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "remote_manifest_url": "https://raw.githubusercontent.com/youtubediscord/QuantumVPN-android/main/app/src/main/assets/rule-sets/manifest.json",
+  "generated_with_core": "e8f6936480b7fa9738911e3e7fc2ec0d8a634a88",
+  "sets": [
+    {
+      "tag": "zapret-ru-domains",
+      "file": "zapret-ru-domains.srs",
+      "sha256": "a39faeb4a4c894a2ce665b8919322cee626f61dd12c63a63736fcf8b0a433053",
+      "source": "rulesets/source/zapret-ru-domains.json",
+      "source_revision": "project-v1",
+      "license": "GPL-3.0-or-later"
+    },
+    {
+      "tag": "zapret-ru-ip",
+      "file": "zapret-ru-ip.srs",
+      "sha256": "1f4cccc9bb9510bb29d8a4b7d326b869bff94e9911d555acc0570545dabfaa7b",
+      "source": "https://github.com/SagerNet/sing-geoip/raw/5605651c12ed5b2fcf3b5de580c041eb9d8d938e/geoip-ru.srs",
+      "source_revision": "5605651c12ed5b2fcf3b5de580c041eb9d8d938e",
+      "license": "GPL-3.0-or-later"
+    }
+  ]
+}

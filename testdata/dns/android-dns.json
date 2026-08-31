@@ -1,0 +1,70 @@
+{
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "zapret-android-dns"
+      }
+    ],
+    "rules": [
+      {
+        "domain": [
+          "probe.example.net",
+          "probe.example.org",
+          "probe.example.com"
+        ],
+        "action": "route",
+        "server": "zapret-android-dns",
+        "strategy": "ipv4_only"
+      },
+      {
+        "action": "route",
+        "server": "zapret-android-dns"
+      }
+    ],
+    "final": "zapret-android-dns",
+    "cache_capacity": 4096,
+    "reverse_mapping": true
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "auto_route": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "selected-proxy"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "port": 53,
+        "action": "hijack-dns"
+      },
+      {
+        "domain": [
+          "probe.example.net",
+          "probe.example.org",
+          "probe.example.com"
+        ],
+        "action": "route",
+        "outbound": "selected-proxy"
+      }
+    ],
+    "final": "direct",
+    "default_domain_resolver": "zapret-android-dns",
+    "auto_detect_interface": true
+  }
+}

@@ -1,0 +1,152 @@
+# QuantumVPN — политика форматов импорта
+
+> Каноническая граница импортера. Документ определяет, какие входные форматы
+> допустимы, что именно они меняют и при каких условиях можно расширять MVP.
+
+| Поле | Значение |
+|---|---|
+| Статус | WireGuard/AmneziaWG `.conf` реализован; Clash YAML исследован и отложен |
+| Последний аудит | 22 июля 2026 года |
+| Ядро | `sing-box-extended` `e8f6936480b7fa9738911e3e7fc2ec0d8a634a88` |
+| Источник сетевой истины | Только итоговый sing-box JSON профиля |
+
+## Неподвижная граница
+
+Любой импорт заканчивается созданием настоящего sing-box JSON до preview и
+сохранения. YAML, URI и subscription response — только входные данные, а не
+второй формат профиля или маршрутизации.
+
+- импорт не переносит чужие DNS, route rules или proxy groups скрыто;
+- неизвестное поле или тип нельзя молча отбросить и показать импорт успешным;
+- исходный YAML не хранится и не участвует в runtime;
+- перед сохранением итог проходит native `Libbox.CheckConfig()`;
+- перед запуском сохранённый JSON может получить только явно документированные runtime overlays из DNS/Routing/VPN Hiding ADR; stored profile при этом не переписывается;
+- URL обновляется только вручную, без фонового scheduler;
+- секреты маскируются в preview, ошибках, логах и диагностике.
+
+## Форматы MVP
+
+- полный sing-box JSON;
+- нативный WireGuard и AmneziaWG 2.0 INI `.conf`;
+- JSON/raw/base64 subscription, который уже распознаёт реализованный importer;
+- VLESS, VMess, Trojan, Shadowsocks, Hysteria2 и TUIC URI;
+- URL, QR, буфер обмена и системный file picker как способы доставки тех же
+  данных.
+
+## F-IMPORT-WG — WireGuard и AmneziaWG 2.0 `.conf`
+
+Импорт является прямым преобразованием INI в единственный сохраняемый sing-box
+JSON. Отдельный WireGuard-процесс, локальный SOCKS и второй VPN не создаются.
+Поскольку закреплённый sing-box 1.13 использует новую схему, результат содержит
+`wireguard` в верхнеуровневом `endpoints`, а не deprecated outbound:
+
+- `[Interface] PrivateKey`, `Address`, `ListenPort`, `MTU` переходят в endpoint;
+- `[Peer] PublicKey`, `PresharedKey`, `Endpoint`, `AllowedIPs` и
+  `PersistentKeepalive` переходят в `peers`;
+- AWG `Jc`, `Jmin`, `Jmax`, `S1`…`S4`, `H1`…`H4` и AWG 2.0 `I1`…`I5`
+  переходят в нативный объект `amnezia`;
+- `AllowedIPs` становятся одновременно peer policy и явным sing-box route
+  rule; остальной трафик идёт в `direct`, как при split-tunnel WireGuard;
+- числовые `DNS` становятся sing-box UDP DNS; сервер направляется через endpoint
+  только если он входит в `AllowedIPs`. Для bootstrap имени `Endpoint`
+  используется системный DNS underlying-сети;
+- исходный INI после preview не хранится.
+
+Private/public/pre-shared keys принимаются только как стандартный Base64 ровно
+32 байт и записываются обратно в каноническом виде с `=` padding. Числовые
+поля AWG ограничены UInt16, а `Jmin` не может превышать `Jmax`. `H1`…`H4`
+принимают UInt32 либо диапазон `A-B`. Непустые `I1`…`I5` проверяются как цепочки
+AWG 2.0 тегов (`b`, `c`, `t`, `r`, `rc`, `rd`, `d`, `ds`, `dz`). Пустые
+`I2`…`I5` допустимы и не попадают в JSON.
+
+Неизвестные секции и параметры, повторные scalar keys, hostname/search-domain в
+`DNS`, `PostUp`/`Table`/`FwMark`, `IncludedApplications` и
+`ExcludedApplications` завершают импорт явной ошибкой: их нельзя молча потерять
+или исполнять. Per-app область настраивается только в UI QuantumVPN.
+
+Схема сверена с
+[option закреплённого core](https://github.com/shtorm-7/sing-box-extended/blob/e8f6936480b7fa9738911e3e7fc2ec0d8a634a88/option/wireguard.go),
+[примером Amnezia endpoint](https://github.com/shtorm-7/sing-box-extended/blob/e8f6936480b7fa9738911e3e7fc2ec0d8a634a88/examples/amnezia/client.json)
+и [parser AmneziaWG Android `2.0.0`](https://github.com/amnezia-vpn/amneziawg-android/blob/4116c836241f737badb99dcd4e990600d46e4c65/tunnel/src/main/java/org/amnezia/awg/config/Interface.java).
+
+## F-IMPORT-01 — Clash YAML
+
+### Что подтверждено
+
+Pinned source уже содержит общий subscription parser и вызывает парсеры
+sing-box, Clash YAML, SIP008 и raw URI именно в таком порядке. Clash parser
+читает только верхнеуровневый список `proxies` и преобразует его в sing-box
+outbounds. Он не является импортом Clash DNS, rules или proxy groups:
+
+- [общий parser точного commit](https://github.com/shtorm-7/sing-box-extended/blob/e8f6936480b7fa9738911e3e7fc2ec0d8a634a88/parser/parser.go);
+- [Clash parser точного commit](https://github.com/shtorm-7/sing-box-extended/blob/e8f6936480b7fa9738911e3e7fc2ec0d8a634a88/parser/clash/parser.go).
+
+Реальный сигнал спроса есть, но частичный импорт опасен: отдельно зафиксированы
+запрос VLESS XHTTP из Mihomo YAML и случай, когда потеря ECH-параметра делала
+импортированный сервер нерабочим:
+
+- [NekoBox: Clash YAML с VLESS XHTTP](https://github.com/qr243vbi/nekobox/issues/228);
+- [NekoBox: потеря ECH config при разборе Clash YAML](https://github.com/MatsuriDayo/NekoBoxForAndroid/pull/1173).
+
+При этом собранный из точного commit Android `libbox.aar` не экспортирует
+`ParseSubscription` или `ParseClashSubscription`. Повторять parser и его YAML
+семантику на Kotlin означало бы добавить второй конвертер, новую зависимость и
+риск расхождения с ядром.
+
+### Решение MVP
+
+Clash YAML не поддерживать. Не добавлять Kotlin YAML parser и не угадывать
+значение неподдержанных полей. Если вход похож на YAML, показывать явное
+сообщение «Clash YAML пока не поддерживается», а не общую ошибку JSON.
+
+Вернуться к реализации можно только если выполнено всё следующее:
+
+1. Parser точного ядра экспортирован через libbox, либо отдельная ADR явно
+   разрешила ровно один поддерживаемый converter boundary.
+2. Собрано минимум 10 обезличенных реальных subscriptions, включая VLESS
+   XHTTP, ECH, Hysteria2, TUIC, Shadowsocks plugin, YAML anchors/aliases и разные
+   типы scalar values.
+3. Для каждого неподдержанного proxy type или значимого поля импорт завершается
+   явной ошибкой; silent drop запрещён.
+4. Golden-тест сравнивает полученные outbounds, а итог проходит native
+   `CheckConfig()` и реальное подключение.
+5. Clash `rules`, `dns`, `proxy-groups` и `rule-providers` остаются вне импорта.
+
+## F-IMPORT-02 — дополнительные extended URI
+
+[Link parser точного commit](https://github.com/shtorm-7/sing-box-extended/blob/e8f6936480b7fa9738911e3e7fc2ec0d8a634a88/parser/link/parser.go)
+распознаёт `tuic`, `trojan`, `vless`, `hysteria`, `hy2`, `hysteria2`, `ss` и
+`vmess`. Из этого списка в приложении пока отсутствует только Hysteria v1
+(`hysteria://`). Это кандидат, а не разрешение немедленно добавить протокол.
+
+До нового протокола приоритетнее закрывать подтверждённые реальными ссылками
+пробелы уже заявленных форматов: VLESS XHTTP, Shadowsocks plugin, aliases и
+дополнительные параметры TUIC/Hysteria2. AnyTLS, SSH, ShadowTLS и другие
+outbounds ядра не считаются URI-форматами только потому, что существуют в JSON:
+без зафиксированного URI contract их синтаксис не придумывается. WireGuard/AWG
+поддерживается отдельно только в нативном INI `.conf`, а не в придуманном URI.
+
+Hysteria v1 можно включить, когда есть минимум три обезличенных реально
+неподдержанных URI от пользователей, golden-тесты всех встреченных вариантов,
+native `CheckConfig()` и device connection test. Сбор образцов — только после
+явного действия пользователя, без аналитики; credentials удаляются до
+диагностического экспорта.
+
+SIP008 рассматривается отдельно: pinned core умеет этот JSON subscription
+format, но это не extended URI. Его также нельзя объявлять поддержанным без
+реальных образцов и доступного libbox binding.
+
+## Таблица решений
+
+| Формат | Статус | Следующий gate |
+|---|---|---|
+| WireGuard / AmneziaWG 2.0 `.conf` | Реализован как sing-box endpoint | Device connection test с реальным обезличенным WG и AWG 2.0 сервером |
+| Clash YAML `proxies` | Отложен, не входит в MVP | libbox binding + 10 реальных образцов + отсутствие silent drop |
+| Hysteria v1 URI | Первый кандидат | 3 обезличенных URI + native/device tests |
+| Расширения текущих URI | Приоритет по фактическим ошибкам | Реальный образец + golden/native test на каждый вариант |
+| SIP008 | Отложен отдельно от URI | Реальные subscriptions + libbox binding |
+| Прочие extended outbounds | Не определены как URI | Публичный contract и реальные неподдержанные ссылки |
+
+Checkbox исследовательского пункта означает завершённый аудит, а не наличие
+формата в приложении. Реальная поддержка отмечается только отдельной задачей и
+после прохождения её gate.

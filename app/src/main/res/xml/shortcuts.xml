@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="connect"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_connect_short"
+        android:shortcutLongLabel="@string/shortcut_connect_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.quantumvpn"
+            android:targetClass="com.quantumvpn.MainActivity">
+            <extra
+                android:name="com.quantumvpn.shortcut"
+                android:value="connect" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="disconnect"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_disconnect_short"
+        android:shortcutLongLabel="@string/shortcut_disconnect_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.quantumvpn"
+            android:targetClass="com.quantumvpn.MainActivity">
+            <extra
+                android:name="com.quantumvpn.shortcut"
+                android:value="disconnect" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="best_ping"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_ping_short"
+        android:shortcutLongLabel="@string/shortcut_ping_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.quantumvpn"
+            android:targetClass="com.quantumvpn.MainActivity">
+            <extra
+                android:name="com.quantumvpn.shortcut"
+                android:value="servers" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="import"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_import_short"
+        android:shortcutLongLabel="@string/shortcut_import_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.quantumvpn"
+            android:targetClass="com.quantumvpn.MainActivity">
+            <extra
+                android:name="com.quantumvpn.shortcut"
+                android:value="import" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="speedtest"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_speedtest_short"
+        android:shortcutLongLabel="@string/shortcut_speedtest_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.quantumvpn"
+            android:targetClass="com.quantumvpn.MainActivity">
+            <extra
+                android:name="com.quantumvpn.shortcut"
+                android:value="speedtest" />
+        </intent>
+    </shortcut>
+</shortcuts>

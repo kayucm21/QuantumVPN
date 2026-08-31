@@ -1,0 +1,39 @@
+{
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "zapret-android-dns"
+      },
+      {
+        "type": "hosts",
+        "tag": "zapret-bootstrap-lkg",
+        "predefined": {
+          "vpn.example.com": [
+            "203.0.113.10",
+            "2001:db8::10"
+          ]
+        }
+      }
+    ],
+    "final": "zapret-android-dns"
+  },
+  "outbounds": [
+    {
+      "type": "http",
+      "tag": "selected-proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "domain_resolver": "zapret-bootstrap-lkg",
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.example.com"
+      }
+    }
+  ],
+  "route": {
+    "final": "selected-proxy",
+    "default_domain_resolver": "zapret-android-dns",
+    "auto_detect_interface": true
+  }
+}

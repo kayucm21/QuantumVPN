@@ -1,0 +1,883 @@
+package com.quantumvpn.vpn
+
+import android.content.Context
+import android.content.Intent
+import android.net.VpnService
+import android.os.SystemClock
+import androidx.core.content.ContextCompat
+import com.quantumvpn.diagnostics.DiagnosticFailure
+import com.quantumvpn.diagnostics.DiagnosticFailureClassifier
+import com.quantumvpn.diagnostics.DiagnosticAttemptOutcome
+import com.quantumvpn.diagnostics.DiagnosticConnectionAttempt
+import com.quantumvpn.diagnostics.DiagnosticLogCategory
+import com.quantumvpn.diagnostics.DiagnosticLogLine
+import com.quantumvpn.diagnostics.DiagnosticLogSource
+import com.quantumvpn.diagnostics.DiagnosticLogStats
+import com.quantumvpn.diagnostics.DiagnosticNetworkState
+import com.quantumvpn.diagnostics.DiagnosticState
+import com.quantumvpn.diagnostics.DiagnosticStageStatus
+import com.quantumvpn.diagnostics.DiagnosticStageTiming
+import com.quantumvpn.diagnostics.DiagnosticStopAttempt
+import com.quantumvpn.diagnostics.DiagnosticStopOutcome
+import com.quantumvpn.diagnostics.DiagnosticVpnPolicy
+import com.quantumvpn.diagnostics.AppCrashRecord
+import com.quantumvpn.diagnostics.AppProcessExitReader
+import com.quantumvpn.diagnostics.MAX_DIAGNOSTIC_ATTEMPTS
+import com.quantumvpn.diagnostics.MAX_DIAGNOSTIC_LOG_LINES
+import com.quantumvpn.diagnostics.MAX_DIAGNOSTIC_LOG_LINE_CHARS
+import com.quantumvpn.diagnostics.MAX_DIAGNOSTIC_STARTUP_LOG_LINES
+import com.quantumvpn.diagnostics.MAX_DIAGNOSTIC_STAGES
+import com.quantumvpn.diagnostics.CoreDiagnosticClassifier
+import com.quantumvpn.vpn.SessionPingCache
+import com.quantumvpn.diagnostics.SecretRedactor
+import com.quantumvpn.diagnostics.appendPrioritizedBounded
+import com.quantumvpn.ui.UiSettingsStore
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+private data class ServerPingMeasurement(
+    val millis: Int,
+    val measuredAtEpochSeconds: Long,
+)
+
+class VpnController(
+    private val context: Context,
+    previousCrash: AppCrashRecord? = null,
+) {
+    private val mutableState = MutableStateFlow<VpnConnectionState>(VpnConnectionState.Stopped)
+    private val mutableGroups = MutableStateFlow<List<RuntimeSelectorGroup>>(emptyList())
+    private val mutableMessage = MutableStateFlow<String?>(null)
+    private val mutableHomeVisible = MutableStateFlow(false)
+    private val mutableDiagnosticsVisible = MutableStateFlow(false)
+    private val mutableDiagnostics = MutableStateFlow(
+        DiagnosticState(
+            previousCrash = previousCrash,
+            previousProcessExit = AppProcessExitReader.read(context),
+        ),
+    )
+    private val trafficAccumulator = SessionTrafficAccumulator()
+    private val adBlockStatsTracker = AdBlockStatsTracker()
+    private val mutableSessionStats = MutableStateFlow(trafficAccumulator.value)
+    private val trafficLock = Any()
+    private val serverPingLock = Any()
+    private val serverPings = mutableMapOf<String, ServerPingMeasurement>()
+    private var serverPingGeneration = Long.MIN_VALUE
+    private val latestGeneration = AtomicLong(0)
+    private val uiSettingsStore by lazy { UiSettingsStore(context) }
+    private val persistScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Сохраняет накопительный счётчик заблокированной рекламы/трекеров между сессиями. */
+    private fun persistCumulativeBlocked() {
+        val blocked = adBlockStatsTracker.total()
+        if (blocked <= 0) return
+        persistScope.launch {
+            runCatching { uiSettingsStore.addCumulativeBlocked(blocked) }
+        }
+    }
+
+    val state: StateFlow<VpnConnectionState> = mutableState.asStateFlow()
+    val selectorGroups: StateFlow<List<RuntimeSelectorGroup>> = mutableGroups.asStateFlow()
+    val message: StateFlow<String?> = mutableMessage.asStateFlow()
+    val sessionStats: StateFlow<VpnSessionStats> = mutableSessionStats.asStateFlow()
+    val diagnostics: StateFlow<DiagnosticState> = mutableDiagnostics.asStateFlow()
+    internal val homeVisible: StateFlow<Boolean> = mutableHomeVisible.asStateFlow()
+    internal val diagnosticsVisible: StateFlow<Boolean> = mutableDiagnosticsVisible.asStateFlow()
+
+    fun permissionIntent(): Intent? = VpnService.prepare(context)
+
+    fun start(profileId: String) {
+        require(profileId.isNotBlank()) { "Профиль не выбран." }
+        ContextCompat.startForegroundService(
+            context,
+            QuantumVpnService.startIntent(context, profileId),
+        )
+    }
+
+    fun startForUpdater(profileId: String) {
+        require(profileId.isNotBlank()) { "Профиль не выбран." }
+        ContextCompat.startForegroundService(
+            context,
+            QuantumVpnService.startIntent(context, profileId, updaterRouting = true),
+        )
+    }
+
+    fun stop() {
+        SessionPingCache.clear()
+        ContextCompat.startForegroundService(context, QuantumVpnService.stopIntent(context))
+    }
+
+    fun restartIfConnected(reason: String) {
+        val connected = mutableState.value as? VpnConnectionState.Connected ?: return
+        ContextCompat.startForegroundService(
+            context,
+            QuantumVpnService.restartIntent(context, connected.profileId, reason),
+        )
+    }
+
+    fun restartUpdaterRouting(profileId: String, enabled: Boolean) {
+        require(profileId.isNotBlank()) { "Профиль не выбран." }
+        ContextCompat.startForegroundService(
+            context,
+            QuantumVpnService.restartIntent(
+                context = context,
+                profileId = profileId,
+                reason = if (enabled) "Временный маршрут updater" else "Завершение маршрута updater",
+                updaterRouting = enabled,
+            ),
+        )
+    }
+
+    fun clearDnsCache() {
+        ContextCompat.startForegroundService(context, QuantumVpnService.clearDnsCacheIntent(context))
+    }
+
+    fun selectOutbound(profileId: String, groupTag: String, outboundTag: String) {
+        ContextCompat.startForegroundService(
+            context,
+            QuantumVpnService.selectIntent(context, profileId, groupTag, outboundTag),
+        )
+    }
+
+    fun measurePing() {
+        if (mutableState.value !is VpnConnectionState.Connected) return
+        ContextCompat.startForegroundService(context, QuantumVpnService.pingIntent(context))
+    }
+
+    fun measureGroup(groupTag: String) {
+        val connected = mutableState.value as? VpnConnectionState.Connected ?: return
+        if (groupTag.isBlank()) return
+        ContextCompat.startForegroundService(
+            context,
+            QuantumVpnService.pingGroupIntent(context, connected.profileId, groupTag),
+        )
+    }
+
+    fun setHomeVisible(visible: Boolean) {
+        mutableHomeVisible.value = visible
+        if (!visible) {
+            synchronized(trafficLock) {
+                trafficAccumulator.setStatusStreamActive(currentGeneration(), false)?.let {
+                    mutableSessionStats.value = it
+                }
+            }
+        }
+    }
+
+    fun setDiagnosticsVisible(visible: Boolean) {
+        mutableDiagnosticsVisible.value = visible
+        if (!visible) publishDiagnosticLogStream(currentGeneration(), false)
+    }
+
+    internal fun publish(generation: Long, state: VpnConnectionState) {
+        while (true) {
+            val previous = latestGeneration.get()
+            if (generation < previous) return
+            if (latestGeneration.compareAndSet(previous, generation)) break
+        }
+        synchronized(serverPingLock) {
+            if (serverPingGeneration != generation) {
+                serverPings.clear()
+                serverPingGeneration = generation
+            }
+        }
+        val safeState = if (state is VpnConnectionState.Error) {
+            val message = sanitizeDiagnosticText(state.message, 360)
+            val fallbackCode = DiagnosticFailureClassifier.classify(message).supportCode
+            state.copy(
+                message = message,
+                code = sanitizeSupportCode(state.code).ifBlank { fallbackCode },
+                technicalDetail = state.technicalDetail
+                    ?.let { sanitizeDiagnosticText(it, 240) }
+                    ?.takeIf(String::isNotBlank),
+            )
+        } else {
+            state
+        }
+        mutableState.value = safeState
+        updateDiagnosticConnectionState(generation, safeState)
+        synchronized(trafficLock) {
+            when (safeState) {
+                is VpnConnectionState.Connected -> {
+                    persistCumulativeBlocked()
+                    adBlockStatsTracker.reset()
+                    mutableSessionStats.value = trafficAccumulator.start(
+                        generation = generation,
+                        profileId = safeState.profileId,
+                        connectedAtEpochMillis = safeState.connectedAtEpochMillis,
+                    )
+                }
+                is VpnConnectionState.Starting,
+                is VpnConnectionState.Stopped,
+                is VpnConnectionState.Error,
+                is VpnConnectionState.Stopping,
+                -> {
+                    persistCumulativeBlocked()
+                    adBlockStatsTracker.reset()
+                    mutableSessionStats.value = trafficAccumulator.stop()
+                }
+            }
+        }
+        runCatching {
+            com.quantumvpn.widget.VpnToggleWidget.requestUpdate(context)
+            com.quantumvpn.widget.VpnWideWidget.requestUpdate(context)
+        }
+        if (
+            safeState is VpnConnectionState.Starting ||
+            safeState is VpnConnectionState.Stopped ||
+            safeState is VpnConnectionState.Error
+        ) {
+            mutableGroups.value = emptyList()
+        }
+    }
+
+    internal fun nextGeneration(): Long = latestGeneration.incrementAndGet()
+
+    internal fun currentGeneration(): Long = latestGeneration.get()
+
+    internal fun beginConnectionDiagnostic(generation: Long, trigger: String) {
+        if (generation != currentGeneration()) return
+        val elapsed = SystemClock.elapsedRealtime()
+        val epoch = System.currentTimeMillis()
+        mutableDiagnostics.update { current ->
+            val previous = current.connectionAttempt?.finishForReplacement(elapsed)
+            val history = (current.previousConnectionAttempts + listOfNotNull(previous))
+                .takeLast(MAX_DIAGNOSTIC_ATTEMPTS - 1)
+            current.copy(
+                generation = generation,
+                lastFailure = null,
+                coreLogs = emptyList(),
+                coreLogStats = DiagnosticLogStats(),
+                logStreamActive = false,
+                network = null,
+                vpnPolicy = null,
+                effectiveOverlay = null,
+                previousConnectionAttempts = history,
+                connectionAttempt = DiagnosticConnectionAttempt(
+                    generation = generation,
+                    trigger = trigger.take(40),
+                    startedAtEpochMillis = epoch,
+                    startedAtElapsedRealtimeMillis = elapsed,
+                ),
+            )
+        }
+    }
+
+    internal fun startConnectionDiagnosticStage(
+        generation: Long,
+        key: String,
+        label: String,
+    ) {
+        val elapsed = SystemClock.elapsedRealtime()
+        val epoch = System.currentTimeMillis()
+        mutableDiagnostics.update { current ->
+            val attempt = current.connectionAttempt
+                ?.takeIf { it.generation == generation && it.outcome == DiagnosticAttemptOutcome.Running }
+                ?: return@update current
+            val completed = attempt.stages.completeRunningStage(
+                elapsed = elapsed,
+                status = DiagnosticStageStatus.Success,
+            )
+            val stage = DiagnosticStageTiming(
+                key = key.take(48),
+                label = label.take(80),
+                startedAtEpochMillis = epoch,
+                startedAtElapsedRealtimeMillis = elapsed,
+            )
+            current.copy(
+                connectionAttempt = attempt.copy(
+                    stages = (completed + stage).takeLast(MAX_DIAGNOSTIC_STAGES),
+                ),
+            )
+        }
+    }
+
+    internal fun finishConnectionDiagnosticStage(
+        generation: Long,
+        key: String,
+        status: DiagnosticStageStatus,
+        detail: String? = null,
+    ) {
+        val elapsed = SystemClock.elapsedRealtime()
+        val safeDetail = detail
+            ?.let { sanitizeDiagnosticText(it, MAX_DIAGNOSTIC_STAGE_DETAIL_CHARS) }
+            ?.takeIf(String::isNotBlank)
+        mutableDiagnostics.update { current ->
+            val attempt = current.connectionAttempt
+                ?.takeIf { it.generation == generation && it.outcome == DiagnosticAttemptOutcome.Running }
+                ?: return@update current
+            val safeKey = key.take(48)
+            current.copy(
+                connectionAttempt = attempt.copy(
+                    stages = attempt.stages.map { stage ->
+                        if (stage.key == safeKey && stage.status == DiagnosticStageStatus.Running) {
+                            stage.copy(
+                                durationMillis = (elapsed - stage.startedAtElapsedRealtimeMillis)
+                                    .coerceAtLeast(0L),
+                                status = status,
+                                detail = safeDetail,
+                            )
+                        } else {
+                            stage
+                        }
+                    },
+                ),
+            )
+        }
+    }
+
+    internal fun cancelCurrentConnectionDiagnostic() {
+        finishConnectionDiagnostic(
+            generation = null,
+            outcome = DiagnosticAttemptOutcome.Cancelled,
+            stageStatus = DiagnosticStageStatus.Cancelled,
+        )
+    }
+
+    internal fun beginStopDiagnostic(generation: Long, trigger: String) {
+        val elapsed = SystemClock.elapsedRealtime()
+        val epoch = System.currentTimeMillis()
+        mutableDiagnostics.update { current ->
+            current.copy(
+                generation = generation,
+                stopAttempt = DiagnosticStopAttempt(
+                    generation = generation,
+                    trigger = trigger.take(40),
+                    startedAtEpochMillis = epoch,
+                    startedAtElapsedRealtimeMillis = elapsed,
+                ),
+            )
+        }
+    }
+
+    internal fun startStopDiagnosticStage(
+        generation: Long,
+        key: String,
+        label: String,
+    ) {
+        val elapsed = SystemClock.elapsedRealtime()
+        val epoch = System.currentTimeMillis()
+        mutableDiagnostics.update { current ->
+            val attempt = current.stopAttempt
+                ?.takeIf { it.generation == generation && it.outcome == DiagnosticStopOutcome.Running }
+                ?: return@update current
+            val completed = attempt.stages.completeRunningStage(
+                elapsed = elapsed,
+                status = DiagnosticStageStatus.Success,
+            )
+            current.copy(
+                stopAttempt = attempt.copy(
+                    stages = (completed + DiagnosticStageTiming(
+                        key = key.take(48),
+                        label = label.take(80),
+                        startedAtEpochMillis = epoch,
+                        startedAtElapsedRealtimeMillis = elapsed,
+                    )).takeLast(MAX_DIAGNOSTIC_STAGES),
+                ),
+            )
+        }
+    }
+
+    internal fun finishStopDiagnosticStage(
+        generation: Long,
+        key: String,
+        error: Throwable? = null,
+    ) {
+        val elapsed = SystemClock.elapsedRealtime()
+        val safeKey = key.take(48)
+        val detail = error?.let {
+            sanitizeDiagnosticText(
+                generateSequence(it) { cause -> cause.cause }
+                    .mapNotNull(Throwable::message)
+                    .firstOrNull(String::isNotBlank)
+                    ?: it.javaClass.simpleName,
+                MAX_DIAGNOSTIC_STAGE_DETAIL_CHARS,
+            )
+        }
+        mutableDiagnostics.update { current ->
+            val attempt = current.stopAttempt
+                ?.takeIf { it.generation == generation && it.outcome == DiagnosticStopOutcome.Running }
+                ?: return@update current
+            current.copy(
+                stopAttempt = attempt.copy(
+                    stages = attempt.stages.map { stage ->
+                        if (stage.key == safeKey && stage.status == DiagnosticStageStatus.Running) {
+                            stage.copy(
+                                durationMillis = (elapsed - stage.startedAtElapsedRealtimeMillis)
+                                    .coerceAtLeast(0L),
+                                status = if (error == null) {
+                                    DiagnosticStageStatus.Success
+                                } else {
+                                    DiagnosticStageStatus.Failed
+                                },
+                                detail = detail,
+                            )
+                        } else {
+                            stage
+                        }
+                    },
+                ),
+            )
+        }
+    }
+
+    internal fun completeStopDiagnostic(generation: Long) {
+        val elapsed = SystemClock.elapsedRealtime()
+        mutableDiagnostics.update { current ->
+            val attempt = current.stopAttempt
+                ?.takeIf { it.generation == generation && it.outcome == DiagnosticStopOutcome.Running }
+                ?: return@update current
+            current.copy(
+                stopAttempt = attempt.copy(
+                    totalDurationMillis = (elapsed - attempt.startedAtElapsedRealtimeMillis)
+                        .coerceAtLeast(0L),
+                    outcome = DiagnosticStopOutcome.Completed,
+                    stages = attempt.stages.completeRunningStage(
+                        elapsed,
+                        DiagnosticStageStatus.Success,
+                    ),
+                ),
+            )
+        }
+    }
+
+    internal fun publishGroups(generation: Long, groups: List<RuntimeSelectorGroup>) {
+        if (generation < latestGeneration.get()) return
+        synchronized(serverPingLock) {
+            val measurements = if (serverPingGeneration == generation) serverPings else emptyMap()
+            mutableGroups.value = groups.map { group ->
+                group.copy(
+                    items = group.items.map { item ->
+                        measurements[item.tag]?.let { measurement ->
+                            item.copy(
+                                pingMillis = measurement.millis,
+                                pingMeasuredAtEpochSeconds = measurement.measuredAtEpochSeconds,
+                            )
+                        } ?: item
+                    },
+                )
+            }
+        }
+    }
+
+    internal fun publishServerPing(generation: Long, outboundTag: String, pingMillis: Long?) {
+        if (generation != currentGeneration() || outboundTag.isBlank()) return
+        val measurement = pingMillis?.let {
+            ServerPingMeasurement(
+                millis = it.coerceIn(0, Int.MAX_VALUE.toLong()).toInt(),
+                measuredAtEpochSeconds = System.currentTimeMillis() / 1_000L,
+            )
+        }
+        synchronized(serverPingLock) {
+            if (serverPingGeneration != generation) {
+                serverPings.clear()
+                serverPingGeneration = generation
+            }
+            if (measurement == null) serverPings.remove(outboundTag)
+            else serverPings[outboundTag] = measurement
+            mutableGroups.update { groups ->
+                groups.map { group ->
+                    group.copy(
+                        items = group.items.map { item ->
+                            if (item.tag != outboundTag) item else item.copy(
+                                pingMillis = measurement?.millis,
+                                pingMeasuredAtEpochSeconds = measurement?.measuredAtEpochSeconds,
+                            )
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    internal fun publishSelection(generation: Long, groupTag: String, outboundTag: String) {
+        if (generation < latestGeneration.get()) return
+        mutableGroups.update { groups ->
+            groups.map { group ->
+                if (group.tag == groupTag) group.copy(selected = outboundTag) else group
+            }
+        }
+    }
+
+    internal fun publishMessage(message: String) {
+        val safe = sanitizeDiagnosticText(message, 360)
+        mutableMessage.value = safe
+        appendApplicationDiagnosticLog(level = 5, message = safe)
+    }
+
+    internal fun publishDiagnosticWarning(message: String) {
+        val safe = sanitizeDiagnosticText(message, 360)
+        appendApplicationDiagnosticLog(level = 3, message = safe)
+    }
+
+    internal fun publishDiagnosticNetwork(generation: Long, state: UnderlyingNetworkState) {
+        if (generation < latestGeneration.get()) return
+        mutableDiagnostics.update {
+            it.copy(
+                generation = generation,
+                network = DiagnosticNetworkState(
+                    available = state.network != null,
+                    transport = state.transport,
+                    interfaceName = state.interfaceName,
+                    metered = state.metered,
+                    validated = state.validated,
+                    captivePortal = state.captivePortal,
+                    privateDnsMode = state.privateDnsMode.name.lowercase(),
+                    privateDnsActive = state.privateDnsActive,
+                ),
+            )
+        }
+    }
+
+    internal fun publishVpnSystemPolicy(generation: Long, policy: VpnSystemPolicy) {
+        if (generation < latestGeneration.get()) return
+        mutableDiagnostics.update {
+            it.copy(
+                generation = generation,
+                vpnPolicy = DiagnosticVpnPolicy(
+                    statusAvailable = policy.statusAvailable,
+                    alwaysOn = policy.alwaysOn,
+                    lockdown = policy.lockdown,
+                ),
+            )
+        }
+    }
+
+    internal fun publishEffectiveOverlay(generation: Long, overlay: String) {
+        if (generation < latestGeneration.get()) return
+        mutableDiagnostics.update { it.copy(generation = generation, effectiveOverlay = overlay) }
+    }
+
+    internal fun clearCoreDiagnosticLogs(generation: Long) {
+        if (generation != currentGeneration()) return
+        mutableDiagnostics.update {
+            it.copy(
+                coreLogs = emptyList(),
+                coreLogStats = DiagnosticLogStats(),
+            )
+        }
+    }
+
+    internal fun publishCoreDiagnosticLog(generation: Long, level: Int, message: String) {
+        publishCoreDiagnosticLogs(generation, listOf(level to message), ingressDropped = 0)
+    }
+
+    internal fun publishCoreDiagnosticLogs(
+        generation: Long,
+        entries: List<Pair<Int, String>>,
+        ingressDropped: Int,
+    ) {
+        if (generation != currentGeneration()) return
+        val lines = entries.mapNotNull { (level, message) ->
+            val safe = sanitizeDiagnosticText(message, MAX_DIAGNOSTIC_LOG_LINE_CHARS)
+            safe.takeIf(String::isNotEmpty)?.let { CoreDiagnosticClassifier.classify(level, it) }
+        }
+        if (lines.isEmpty() && ingressDropped <= 0) return
+        mutableDiagnostics.update { current ->
+            var coreLogs = current.coreLogs
+            var coreStats = current.coreLogStats
+            var startupLogs = current.connectionAttempt?.startupCoreLogs.orEmpty()
+            var startupStats = current.connectionAttempt?.startupCoreLogStats
+                ?: DiagnosticLogStats()
+            lines.forEach { line ->
+                coreLogs.appendPrioritizedBounded(line, coreStats, MAX_DIAGNOSTIC_LOG_LINES).also {
+                    coreLogs = it.lines
+                    coreStats = it.stats
+                }
+                if (current.connectionAttempt?.outcome == DiagnosticAttemptOutcome.Running) {
+                    startupLogs.appendPrioritizedBounded(
+                        line,
+                        startupStats,
+                        MAX_DIAGNOSTIC_STARTUP_LOG_LINES,
+                    ).also {
+                        startupLogs = it.lines
+                        startupStats = it.stats
+                    }
+                }
+            }
+            if (ingressDropped > 0) {
+                coreStats = coreStats.copy(
+                    receivedLines = coreStats.receivedLines + ingressDropped,
+                    droppedLines = coreStats.droppedLines + ingressDropped,
+                )
+                if (current.connectionAttempt?.outcome == DiagnosticAttemptOutcome.Running) {
+                    startupStats = startupStats.copy(
+                        receivedLines = startupStats.receivedLines + ingressDropped,
+                        droppedLines = startupStats.droppedLines + ingressDropped,
+                    )
+                }
+            }
+            val startupAttempt = current.connectionAttempt?.let { attempt ->
+                if (attempt.outcome == DiagnosticAttemptOutcome.Running) {
+                    attempt.copy(
+                        startupCoreLogs = startupLogs,
+                        startupCoreLogStats = startupStats,
+                    )
+                } else {
+                    attempt
+                }
+            }
+            current.copy(
+                coreLogs = coreLogs,
+                coreLogStats = coreStats,
+                connectionAttempt = startupAttempt,
+            )
+        }
+    }
+
+    internal fun publishDiagnosticLogStream(generation: Long, active: Boolean) {
+        if (generation < latestGeneration.get()) return
+        mutableDiagnostics.update { it.copy(logStreamActive = active) }
+    }
+
+    internal fun publishStatusStream(generation: Long, active: Boolean) {
+        synchronized(trafficLock) {
+            trafficAccumulator.setStatusStreamActive(generation, active)?.let {
+                mutableSessionStats.value = it
+            }
+        }
+    }
+
+    internal fun publishTraffic(
+        generation: Long,
+        uploadDelta: Long,
+        downloadDelta: Long,
+        uploadTotal: Long,
+        downloadTotal: Long,
+    ) {
+        synchronized(trafficLock) {
+            trafficAccumulator.updateTraffic(
+                generation,
+                uploadDelta,
+                downloadDelta,
+                uploadTotal,
+                downloadTotal,
+            )?.let { mutableSessionStats.value = it }
+        }
+    }
+
+    internal fun publishExternalIp(generation: Long, externalIp: String?) {
+        synchronized(trafficLock) {
+            trafficAccumulator.updateExternalIp(generation, externalIp)?.let {
+                mutableSessionStats.value = it
+            }
+        }
+    }
+
+    internal fun publishExitIdentity(
+        generation: Long,
+        externalIp: String?,
+        location: ExitLocation?,
+    ) {
+        synchronized(trafficLock) {
+            trafficAccumulator.updateExitIdentity(generation, externalIp, location)?.let {
+                mutableSessionStats.value = it
+            }
+        }
+    }
+
+    internal fun publishPing(generation: Long, pingMillis: Long?) {
+        synchronized(trafficLock) {
+            trafficAccumulator.updatePing(generation, pingMillis)?.let {
+                mutableSessionStats.value = it
+            }
+        }
+    }
+
+    internal fun recordAdBlockHit(generation: Long) {
+        if (generation != currentGeneration()) return
+        synchronized(trafficLock) {
+            adBlockStatsTracker.recordHit()
+            trafficAccumulator.updateAdBlockStats(
+                generation = generation,
+                perMinute = adBlockStatsTracker.perMinute(),
+                sessionTotal = adBlockStatsTracker.total(),
+            )?.let { mutableSessionStats.value = it }
+        }
+    }
+
+    internal fun clearConnectionIdentity(generation: Long) {
+        synchronized(trafficLock) {
+            trafficAccumulator.clearConnectionIdentity(generation)?.let {
+                mutableSessionStats.value = it
+            }
+        }
+    }
+
+    fun consumeMessage() {
+        mutableMessage.value = null
+    }
+
+    private fun updateDiagnosticConnectionState(
+        generation: Long,
+        state: VpnConnectionState,
+    ) {
+        when (state) {
+            is VpnConnectionState.Starting -> mutableDiagnostics.update { current ->
+                if (generation > current.generation) {
+                    current.copy(
+                        generation = generation,
+                        lastFailure = null,
+                        coreLogs = emptyList(),
+                        coreLogStats = DiagnosticLogStats(),
+                        logStreamActive = false,
+                        network = null,
+                        vpnPolicy = null,
+                        effectiveOverlay = null,
+                    )
+                } else {
+                    current
+                }
+            }
+            is VpnConnectionState.Error -> {
+                finishConnectionDiagnostic(
+                    generation = generation,
+                    outcome = DiagnosticAttemptOutcome.Failed,
+                    stageStatus = DiagnosticStageStatus.Failed,
+                )
+                val safe = sanitizeDiagnosticText(state.message, 360)
+                val now = System.currentTimeMillis()
+                val failure = DiagnosticFailure(
+                    type = DiagnosticFailureClassifier.classify(safe),
+                    supportCode = state.code,
+                    message = safe,
+                    technicalDetail = state.technicalDetail,
+                    occurredAtEpochMillis = now,
+                )
+                val line = DiagnosticLogLine(
+                    level = 2,
+                    message = safe,
+                    receivedAtEpochMillis = now,
+                    source = DiagnosticLogSource.Application,
+                    category = DiagnosticLogCategory.Lifecycle,
+                    priority = true,
+                )
+                mutableDiagnostics.update {
+                    val attempt = it.connectionAttempt
+                    val failedAttempt = if (attempt?.generation == generation) {
+                        attempt.copy(failure = failure)
+                    } else {
+                        attempt
+                    }
+                    val application = it.applicationLogs.appendPrioritizedBounded(
+                        line,
+                        it.applicationLogStats,
+                        MAX_DIAGNOSTIC_LOG_LINES,
+                    )
+                    it.copy(
+                        generation = generation,
+                        lastFailure = failure,
+                        applicationLogs = application.lines,
+                        applicationLogStats = application.stats,
+                        logStreamActive = false,
+                        connectionAttempt = failedAttempt,
+                    )
+                }
+            }
+            VpnConnectionState.Stopped,
+            is VpnConnectionState.Stopping,
+            -> publishDiagnosticLogStream(generation, false)
+            is VpnConnectionState.Connected -> finishConnectionDiagnostic(
+                generation = generation,
+                outcome = DiagnosticAttemptOutcome.Connected,
+                stageStatus = DiagnosticStageStatus.Success,
+            )
+        }
+    }
+
+    private fun finishConnectionDiagnostic(
+        generation: Long?,
+        outcome: DiagnosticAttemptOutcome,
+        stageStatus: DiagnosticStageStatus,
+    ) {
+        val elapsed = SystemClock.elapsedRealtime()
+        mutableDiagnostics.update { current ->
+            val attempt = current.connectionAttempt
+                ?.takeIf {
+                    it.outcome == DiagnosticAttemptOutcome.Running &&
+                        (generation == null || it.generation == generation)
+                }
+                ?: return@update current
+            current.copy(
+                connectionAttempt = attempt.copy(
+                    totalDurationMillis = (elapsed - attempt.startedAtElapsedRealtimeMillis)
+                        .coerceAtLeast(0L),
+                    outcome = outcome,
+                    stages = attempt.stages.completeRunningStage(elapsed, stageStatus),
+                ),
+            )
+        }
+    }
+
+    private fun List<DiagnosticStageTiming>.completeRunningStage(
+        elapsed: Long,
+        status: DiagnosticStageStatus,
+    ): List<DiagnosticStageTiming> = map { stage ->
+        if (stage.status == DiagnosticStageStatus.Running) {
+            stage.copy(
+                durationMillis = (elapsed - stage.startedAtElapsedRealtimeMillis).coerceAtLeast(0L),
+                status = status,
+            )
+        } else {
+            stage
+        }
+    }
+
+    private fun DiagnosticConnectionAttempt.finishForReplacement(
+        elapsed: Long,
+    ): DiagnosticConnectionAttempt = if (outcome == DiagnosticAttemptOutcome.Running) {
+        copy(
+            totalDurationMillis = (elapsed - startedAtElapsedRealtimeMillis).coerceAtLeast(0L),
+            outcome = DiagnosticAttemptOutcome.Cancelled,
+            stages = stages.completeRunningStage(elapsed, DiagnosticStageStatus.Cancelled),
+        )
+    } else {
+        this
+    }
+
+    private fun appendApplicationDiagnosticLog(level: Int, message: String) {
+        if (message.isEmpty()) return
+        val line = DiagnosticLogLine(
+            level = level,
+            message = message.take(MAX_DIAGNOSTIC_LOG_LINE_CHARS),
+            receivedAtEpochMillis = System.currentTimeMillis(),
+            source = DiagnosticLogSource.Application,
+            category = DiagnosticLogCategory.Lifecycle,
+            priority = level <= 3,
+        )
+        mutableDiagnostics.update {
+            val result = it.applicationLogs.appendPrioritizedBounded(
+                line,
+                it.applicationLogStats,
+                MAX_DIAGNOSTIC_LOG_LINES,
+            )
+            it.copy(applicationLogs = result.lines, applicationLogStats = result.stats)
+        }
+    }
+
+    private fun sanitizeDiagnosticText(message: String, maxLength: Int): String =
+        SecretRedactor.redactInline(message)
+            .replace(ANSI_ESCAPE, "")
+            .replace(NEW_LINES, " ")
+            .trim()
+            .take(maxLength)
+
+    private fun sanitizeSupportCode(value: String): String = value
+        .trim()
+        .uppercase()
+        .takeIf { it.matches(SUPPORT_CODE) }
+        .orEmpty()
+
+    private companion object {
+        const val MAX_DIAGNOSTIC_STAGE_DETAIL_CHARS = 160
+        val ANSI_ESCAPE = Regex("\u001B(?:\\[[0-?]*[ -/]*[@-~]|[@-_])")
+        val NEW_LINES = Regex("[\\r\\n]+")
+        val SUPPORT_CODE = Regex("[A-Z]{2,5}-\\d{3}")
+    }
+}

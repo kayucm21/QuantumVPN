@@ -1,0 +1,10 @@
+option batch abort
+option confirm off
+open ftp://user4469441:B2TGm3hEOGsn@185.117.119.3/ -passive=on
+cd /quantumvpn
+put "release-apks\QuantumVPN-v4.6.0-arm64-v8a.apk"
+put "release-apks\QuantumVPN-v4.6.0-armeabi-v7a.apk"
+put "release-apks\manifest.json"
+put "release-apks\manifest-stable.json"
+ls
+exit

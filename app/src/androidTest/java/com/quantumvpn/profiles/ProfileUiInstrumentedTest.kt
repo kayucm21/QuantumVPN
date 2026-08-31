@@ -1,0 +1,251 @@
+package com.quantumvpn.profiles
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextReplacement
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.quantumvpn.MainActivity
+import com.quantumvpn.QuantumVpnApplication
+import com.quantumvpn.config.DnsMode
+import com.quantumvpn.config.DnsOverride
+import com.quantumvpn.hardening.TunMtuMode
+import com.quantumvpn.updates.UpdateChannel
+import com.quantumvpn.vpn.VpnConnectionState
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class ProfileUiInstrumentedTest {
+    @get:Rule
+    val composeRule = createAndroidComposeRule<MainActivity>()
+
+    private val container
+        get() = (composeRule.activity.application as QuantumVpnApplication).container
+
+    @Before
+    fun clearProfiles() = runBlocking {
+        resetDiagnostics()
+        container.profileStore.initialize()
+        container.profileStore.profiles.value.forEach { container.profileStore.delete(it.id) }
+        container.uiSettingsStore.setActiveProfile(null)
+        container.uiSettingsStore.setDnsMode(DnsMode.FromJson)
+        container.uiSettingsStore.setDnsOverride(
+            DnsOverride.DEFAULT_HOSTNAME,
+            DnsOverride.DEFAULT_IPV4_ADDRESS,
+        )
+        container.uiSettingsStore.setDnsOverrideEnabled(true)
+        container.uiSettingsStore.setUpdateChannel(UpdateChannel.Stable)
+        container.uiSettingsStore.setVpnHidingBlockLocalEndpoints(true)
+        container.uiSettingsStore.setVpnHidingNeutralSessionName(false)
+        container.uiSettingsStore.setVpnHidingTunMtuMode(TunMtuMode.CoreDefault)
+        container.appSelectionStore.replaceAllowlist(setOf("com.android.settings"))
+    }
+
+    @After
+    fun cleanProfiles() = runBlocking {
+        resetDiagnostics()
+        container.profileStore.profiles.value.forEach { container.profileStore.delete(it.id) }
+        container.uiSettingsStore.setActiveProfile(null)
+        container.uiSettingsStore.setDnsMode(DnsMode.FromJson)
+        container.uiSettingsStore.setDnsOverride(
+            DnsOverride.DEFAULT_HOSTNAME,
+            DnsOverride.DEFAULT_IPV4_ADDRESS,
+        )
+        container.uiSettingsStore.setDnsOverrideEnabled(true)
+        container.uiSettingsStore.setUpdateChannel(UpdateChannel.Stable)
+        container.uiSettingsStore.setVpnHidingBlockLocalEndpoints(true)
+        container.uiSettingsStore.setVpnHidingNeutralSessionName(false)
+        container.uiSettingsStore.setVpnHidingTunMtuMode(TunMtuMode.CoreDefault)
+    }
+
+    @Test
+    fun userImportsValidatesEditsSavesAndReopensProfile() {
+        composeRule.runOnUiThread {
+            val clipboard = composeRule.activity.getSystemService(ClipboardManager::class.java)
+            clipboard.setPrimaryClip(ClipData.newPlainText("profile", VALID_DIRECT))
+        }
+
+        composeRule.onNode(hasText("Серверы") and hasClickAction()).performClick()
+        composeRule.onNodeWithText("Управление подписками").performClick()
+        composeRule.onNodeWithText("Буфер").performClick()
+        composeRule.waitUntil(timeoutMillis = UI_TIMEOUT_MILLIS) {
+            runCatching {
+                composeRule.onNodeWithText("Предпросмотр импорта").fetchSemanticsNode()
+            }.isSuccess
+        }
+        composeRule.onNodeWithText("Предпросмотр импорта").assertExists()
+        composeRule.onNodeWithText("Новый профиль").performClick()
+        composeRule.waitUntil(timeoutMillis = UI_TIMEOUT_MILLIS) {
+            container.profileStore.profiles.value.isNotEmpty()
+        }
+        composeRule.onNodeWithText("Профиль готов").assertDoesNotExist()
+        composeRule.onNodeWithText("Профиль из буфера").assertExists()
+        composeRule.onNodeWithText("Буфер обмена").assertExists()
+        composeRule.onNodeWithText("Обновлено:", substring = true).assertExists()
+        composeRule.onNodeWithText("JSON").assertDoesNotExist()
+
+        composeRule.activityRule.scenario.recreate()
+        composeRule.waitForIdle()
+        composeRule.onNode(hasText("Серверы") and hasClickAction()).performClick()
+        // Subscriptions are managed from the add-subscription flow; home keeps the profile.
+        composeRule.onNode(hasText("Главная") and hasClickAction()).performClick()
+        composeRule.onNodeWithText("Профиль из буфера", substring = true).assertExists()
+    }
+
+    @Test
+    fun settingsExposeAllFourDnsModesAndPersistSelection() {
+        composeRule.onNode(hasText("Настройки") and hasClickAction()).performClick()
+        val modes = listOf(
+            "Автоматически",
+            "DNS Android",
+            "Защищённый через VPN",
+            "Из JSON",
+        )
+        modes.forEach { label ->
+            composeRule.onNodeWithTag("settings-list").performScrollToNode(hasText(label))
+            composeRule.onNodeWithText(label).assertExists()
+        }
+
+        composeRule.onNodeWithTag("settings-list")
+            .performScrollToNode(hasText("Защищённый через VPN"))
+        composeRule.onNodeWithText("Защищённый через VPN").performClick()
+        composeRule.waitUntil(UI_TIMEOUT_MILLIS) {
+            runBlocking { container.uiSettingsStore.settings.first().dnsMode == DnsMode.Secure }
+        }
+        composeRule.onNodeWithText(
+            "Перехватывается TCP/UDP 53; встроенный DoH, DoT и mDNS не перехватываются.",
+        ).assertExists()
+
+        composeRule.onNodeWithTag("settings-list").performScrollToNode(hasText("Beta"))
+        composeRule.onNodeWithText("Beta").performClick()
+        composeRule.waitUntil(UI_TIMEOUT_MILLIS) {
+            runBlocking {
+                container.uiSettingsStore.settings.first().updateChannel == UpdateChannel.Beta
+            }
+        }
+
+        composeRule.onNodeWithTag("settings-list").performScrollToNode(hasText("Скрытие VPN"))
+        composeRule.onNodeWithText("Скрытие VPN").performClick()
+        composeRule.onNodeWithText("Возможности rootless-режима").assertExists()
+        composeRule.onNodeWithTag("vpn-hiding-session-name").performScrollTo().performClick()
+        composeRule.onNodeWithTag("vpn-hiding-mtu-Normalize1500").performScrollTo().performClick()
+        composeRule.waitUntil(UI_TIMEOUT_MILLIS) {
+            runBlocking {
+                container.uiSettingsStore.settings.first().vpnHiding.let { options ->
+                    options.blockLocalEndpoints &&
+                        options.neutralSessionName &&
+                        options.tunMtuMode == TunMtuMode.Normalize1500
+                }
+            }
+        }
+    }
+
+    @Test
+    fun settingsEditDisableAndPersistDnsOverride() {
+        runBlocking { container.uiSettingsStore.setDnsMode(DnsMode.Secure) }
+        composeRule.onNode(hasText("Настройки") and hasClickAction()).performClick()
+        composeRule.onNodeWithTag("settings-list")
+            .performScrollToNode(hasText("ntc.party → 130.255.77.28"))
+        composeRule.onNodeWithText("ntc.party → 130.255.77.28").assertExists()
+        composeRule.onNodeWithTag("dns-override-edit").performScrollTo().performClick()
+        composeRule.waitUntil(UI_TIMEOUT_MILLIS) {
+            composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().size == 2
+        }
+        composeRule.onAllNodes(hasSetTextAction())[0]
+            .performTextReplacement("Example.TEST.")
+        composeRule.onAllNodes(hasSetTextAction())[1]
+            .performTextReplacement("203.0.113.8")
+        composeRule.onNodeWithText("Сохранить").performClick()
+        composeRule.waitUntil(UI_TIMEOUT_MILLIS) {
+            runBlocking {
+                container.uiSettingsStore.settings.first().dnsOverride.let {
+                    it.hostname == "example.test" && it.ipv4Address == "203.0.113.8"
+                }
+            }
+        }
+        composeRule.onNodeWithContentDescription("DNS-переопределение включено").performClick()
+        composeRule.waitUntil(UI_TIMEOUT_MILLIS) {
+            runBlocking { !container.uiSettingsStore.settings.first().dnsOverride.enabled }
+        }
+
+        composeRule.activityRule.scenario.recreate()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("settings-list")
+            .performScrollToNode(hasText("example.test → 203.0.113.8"))
+        composeRule.onNodeWithText("example.test → 203.0.113.8").assertExists()
+    }
+
+    @Test
+    fun settingsSubpagesHaveBackNavigationAndCommunityIsIsolated() {
+        composeRule.onNode(hasText("Настройки") and hasClickAction()).performClick()
+        composeRule.onNodeWithTag("settings-list").performScrollToNode(hasText("Сообщество"))
+        composeRule.onNodeWithText("Сообщество").performClick()
+        composeRule.onNodeWithText("QuantumVPN").assertExists()
+        composeRule.onNodeWithText("VPN Discord YouTube").assertExists()
+        composeRule.onNodeWithText("Zapret VPN bot").assertExists()
+        composeRule.onNodeWithContentDescription("Назад").performClick()
+
+        composeRule.onNodeWithTag("settings-list").performScrollToNode(hasText("Диагностика"))
+        composeRule.runOnUiThread {
+            val token = container.vpnController.nextGeneration()
+            container.vpnController.publish(
+                token,
+                VpnConnectionState.Error("DNS через VPN заблокирован token=visible-secret"),
+            )
+            container.vpnController.publishCoreDiagnosticLog(token, 3, "token=visible-secret")
+        }
+        composeRule.onNodeWithText("Диагностика").performClick()
+        composeRule.onNodeWithText("Текущее состояние").assertExists()
+        composeRule.onNodeWithText("DNS-200 · DNS через VPN").assertExists()
+        composeRule.onNodeWithText("DNS через VPN заблокирован token=•••").assertExists()
+        composeRule.onNodeWithText("visible-secret", substring = true).assertDoesNotExist()
+        composeRule.waitUntil(UI_TIMEOUT_MILLIS) {
+            container.vpnController.diagnosticsVisible.value
+        }
+        composeRule.onNodeWithTag("diagnostic-logs-toggle").performScrollTo().performClick()
+        composeRule.onNodeWithText("Скрыть", substring = true).assertExists()
+        composeRule.runOnUiThread {
+            composeRule.activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeRule.waitUntil(UI_TIMEOUT_MILLIS) {
+            !container.vpnController.diagnosticsVisible.value
+        }
+
+        composeRule.onNodeWithTag("settings-list").performScrollToNode(hasText("О приложении"))
+        composeRule.onNodeWithText("О приложении").performClick()
+        composeRule.onNodeWithText("Ядро").assertExists()
+        composeRule.onNodeWithText("Известные ограничения MVP").assertExists()
+        composeRule.onNodeWithText("Clash YAML", substring = true).assertExists()
+    }
+
+    private fun resetDiagnostics() {
+        container.vpnController.setDiagnosticsVisible(false)
+        val token = container.vpnController.nextGeneration()
+        container.vpnController.publish(token, VpnConnectionState.Starting("", "Сброс теста"))
+        container.vpnController.publish(token, VpnConnectionState.Stopped)
+    }
+
+    private companion object {
+        const val UI_TIMEOUT_MILLIS = 120_000L
+        const val VALID_DIRECT =
+            """{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}"""
+        const val UPDATED_DIRECT =
+            """{"outbounds":[{"type":"direct","tag":"edited"}],"route":{"final":"edited"}}"""
+    }
+}

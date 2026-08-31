@@ -1,15 +1,16 @@
-# Add project specific ProGuard rules here.
--keep class com.quantumvpn.data.** { *; }
--keep class com.quantumvpn.core.** { *; }
--keep class com.v2ray.ang.service.TProxyService { *; }
--keep class com.google.gson.** { *; }
--keep class * extends com.google.gson.reflect.TypeToken
--keepattributes Signature
--keepattributes *Annotation*
--keepclassmembers class * {
-    @com.google.gson.annotations.SerializedName <fields>;
-}
--dontwarn com.alibaba.fastjson.**
--keep class com.alibaba.fastjson.** { *; }
--keep class com.journeyapps.barcodescanner.** { *; }
--keep class com.google.zxing.** { *; }
+# R8 full mode obfuscation for release builds (Play-compatible).
+-allowaccessmodification
+-repackageclasses ''
+-overloadaggressively
+
+# Keep Android / Compose entry points.
+-keep class com.quantumvpn.MainActivity { *; }
+-keep class com.quantumvpn.QuantumVpnApplication { *; }
+-keep class com.quantumvpn.vpn.QuantumVpnService { *; }
+
+# Libbox JNI / AAR surface.
+-keep class io.nekohasekai.libbox.** { *; }
+-dontwarn io.nekohasekai.libbox.**
+
+# Android Keystore vault
+-keepclassmembers class com.quantumvpn.security.SecureVault { *; }

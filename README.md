@@ -1,99 +1,180 @@
 # QuantumVPN
 
-VPN приложение для Android с поддержкой множества протоколов.
+<img width="1916" height="821" alt="image" src="https://github.com/user-attachments/assets/704d2998-c00e-4b0d-8cb5-0dbeb3e23ef0" />
 
-## Протоколы
+### VPN, который пропускает только необходимое
 
-- VLESS (Reality, TLS, WebSocket, gRPC)
-- VMess (TLS, WebSocket, gRPC)
-- Trojan
-- Shadowsocks
-- Hysteria2
-- TUIC
-- WireGuard
+QuantumVPN — быстрый и бережный Android-клиент для `sing-box-extended`. Это не ещё одна оболочка над VPN-ядром, а цельная архитектура, в которой приложения, маршруты, DNS и подключение работают как одна система.
 
-## Возможности
+По умолчанию выбранные приложения используют режим «Россия напрямую»: российские домены и IP, а также LAN идут через прямую сеть Android, остальное — через VPN. Так VPN-сервер не тратит ресурсы на доступные без обхода сайты.
 
-- Подключение/Отключение одним нажатием
-- Импорт подписок по URL
-- Автоматическое обновление подписок
-- Проверка пинга серверов
-- Фильтрация по протоколам
-- Автообновление приложения с GitHub
-- Автоподключение при загрузке
-- Красивый Material Design 3 интерфейс
+> **Stable `0.2.3` опубликован.** Физическая матрица слабых устройств,
+> IPv6/NAT64, операторов и энергии продолжается; целевые 1–2 секунды подключения
+> остаются целью performance-gate, а не обещанием для каждой сети и конфигурации.
 
-## Сборка
+[Скачать stable 0.2.3](https://github.com/youtubediscord/QuantumVPN-android/releases/tag/v0.2.3) · [Посмотреть архитектуру](ARCHITECTURE.md) · [Изучить маршрутизацию](ROUTING_ARCHITECTURE.md)
 
-### Требования
+## Минимализм в чистом виде
 
-- Android Studio Arctic Fox или новее
-- JDK 17
-- Android SDK 34
+- **Только нужные приложения.** Невыбранные приложения вообще не попадают в TUN: их не видят ни VPN-ядро, ни DNS приложения, ни VPN-сервер.
+- **Россия напрямую по умолчанию.** Российские домены и IP, а также LAN сразу идут напрямую. Они не занимают канал и ресурсы VPN-сервера и не получают зарубежный IP без необходимости.
+- **Только нужные сайты.** Для каждого направления можно выбрать действие: через VPN, напрямую или блокировать.
+- **Без фонового опроса.** Нет периодических health-check, бесконечного reconnect или фоновой синхронизации. В режиме «Автоматически» сначала используется DNS профиля, затем DNS Android и только после подтверждённой DNS-ошибки — защищённый DoH через VPN.
+- **Без тяжёлого фона.** Приложение не держит `WakeLock`, не запускает alarm/job/WorkManager, а статистику обновляет только пока открыт главный экран.
+- **Rootless hardening.** Localhost proxy/API закрываются до запуска ядра; защита не создаёт scanner, timer или отдельный процесс.
+- **Нативный интерфейс.** Компактный Material 3 на стандартных компонентах и анимациях, без тяжёлого dashboard.
 
-### Инструкция
+## Трафик идёт кратчайшим путём
 
-1. Откройте проект в Android Studio
-2. Дождитесь синхронизации Gradle
-3. Запустите сборку:
-   ```
-   ./gradlew assembleDebug
-   ```
-4. APK будет в `app/build/outputs/apk/debug/`
+| Трафик | Что с ним происходит |
+|---|---|
+| Невыбранное приложение | Android сразу отправляет его напрямую; QuantumVPN его не обрабатывает |
+| Выбранный трафик с правилом `direct` | Проходит локальное правило, но не обращается к VPN-серверу |
+| Выбранный трафик с правилом `proxy` | Уходит через выбранный VPN-профиль |
+| Заблокированный трафик | Отклоняется локально |
 
-### Добавление sing-box ядра
+Так сервер обрабатывает только тот трафик, ради которого он действительно нужен. Можно направить через VPN отдельные приложения или сайты, оставить Россию напрямую, отправить через VPN только российские ресурсы либо собрать собственные правила.
 
-Для работы VPN необходимо добавить бинарный файл sing-box:
+## WireGuard и WARP — с настоящим роутингом
 
-1. Скачайте sing-box с [официального сайта](https://sing-box.sagernet.org)
-2. Распакуйте бинарники для архитектур:
-   - `arm64-v8a/sing-box` (для современных телефонов)
-   - `armeabi-v7a/sing-box` (для старых телефонов)
-   - `x86_64/sing-box` (для эмуляторов)
-3. Поместите файлы в `app/src/main/assets/libs/{архитектура}/`
+QuantumVPN импортирует WireGuard и AmneziaWG `.conf`, включая совместимые конфигурации WARP. WireGuard здесь не означает режим «всё устройство целиком через один сервер»: профиль становится полноценным outbound и участвует в тех же правилах `direct` / `proxy` / `reject`.
 
-## Структура проекта
+Это позволяет, например, отправить через WARP только выбранные сайты, остальные открыть напрямую, а другой набор трафика направить через отдельный proxy-outbound в составе конфигурации. Из-за ограничений Android выбранные приложения используют один системный TUN, но решение о маршруте остаётся раздельным для каждого назначения.
 
+У WireGuard два независимых MTU: внешний Android TUN и внутренний userspace endpoint.
+Endpoint без собственного `MTU` получает Android-совместимый внутренний MTU 1280,
+как в официальном клиенте Amnezia. В стандартном режиме внешний TUN ограничивается
+меньшим из 1500 и эффективного MTU userspace WireGuard, поэтому Android не отдаёт
+внутреннему туннелю слишком крупные пакеты. Явное значение endpoint из `.conf` или
+JSON имеет приоритет; если внешний `tun.mtu` отсутствует, даже режим «По профилю»
+берёт для userspace WireGuard MTU endpoint вместо Android-default 9000. Сохранённый
+профиль не меняется.
+
+Android AAR применяет один открытый воспроизводимый patch поверх pinned commit. Только
+Android userspace WireGuard data-plane использует раздельные движки, проверенные в
+mihomo: `metacubex/wireguard-go` для обычного WireGuard и
+`metacubex/amneziawg-go` для AmneziaWG. Оба работают через один защищённый
+однопакетный `ClientBind`; второй Android TUN, локальный SOCKS и отдельный VPN service
+не создаются. До добавления peers отключается изменение endpoint после
+аутентифицированных пакетов, затем применяется IPC-конфигурация и только после неё
+поднимается внутренний TUN. Pinned версии модулей, upstream commit и SHA-256 patchset
+публикуются в build/release metadata.
+
+Runtime-копия добавляет WireGuard только внутренний MTU 1280, если профиль не задал
+свой. Искусственный `zapret-wireguard-direct` outbound больше не создаётся: Android
+движок сам использует защищённый dialer sing-box, а явный пользовательский `detour`
+сохраняет своё обычное значение. Сохранённый JSON не меняется.
+
+Нормализация внешнего Android TUN до 1500 применяется к обычным proxy-профилям.
+Для userspace WireGuard она дополнительно учитывает внутренний MTU: например,
+endpoint 1280 создаёт Android TUN 1280. Режим «По профилю» не меняет явно заданный
+пользователем TUN MTU; при отсутствии поля использует MTU endpoint.
+
+## Скрытие VPN без root
+
+В «Настройки → Скрытие VPN» находятся меры, которые реально доступны обычному
+Android-приложению: запрет дополнительных localhost inbounds, удаление внешних
+Clash/V2Ray control API, нейтральное имя VPN-сессии и безопасный MTU TUN по умолчанию
+(1500 либо меньший MTU userspace WireGuard).
+Постоянная защита включена по умолчанию, работает только при сборке runtime JSON и
+не добавляет фоновой нагрузки. Сохранённый профиль не переписывается.
+
+Android всё равно показывает системный `VpnService`, `TRANSPORT_VPN`, TUN-интерфейс
+и VPN indicator. QuantumVPN не называет rootless-режим полной невидимостью и не
+пытается подменять API других приложений. Точные границы и release-gate описаны в
+[VPN Hiding ADR](VPN_HIDING_ARCHITECTURE.md).
+
+## Быстрый и лёгкий — по архитектуре
+
+Внутри приложения один Android VPN service, один TUN и один экземпляр ядра. Здесь нет второго туннеля, дублирующих таблиц правил и постоянного опроса состояния. Конфигурация проверяется до запуска, а при ошибке соединение полностью закрывается вместо бесконечных повторов в фоне.
+
+Автоматизированные проверки уже подтвердили:
+
+- 147/147 JVM-тестов во всех модулях и 67/67 ранее выполненных instrumented-тестов на Android API 36; новый app-scoped health route instrumented-тест скомпилирован и ожидает физический прогон;
+- полные матрицы на API 26 и 29;
+- 100 циклов connect/stop и 50 переходов Wi-Fi ↔ cellular на API 29/36;
+- отсутствие собственного периодического сетевого трафика в idle-сценариях;
+- обход TUN невыбранным трафиком: в тесте 5 × 8 MiB дали 0 UID RX+TX приложения и медиану 0 TUN bytes.
+
+Физические проверки энергии, OEM-поведения, DNS/NAT64 и финальной скорости подключения ещё входят в release-gate. Подробные результаты и границы измерений опубликованы в [GATE8_RESULTS.md](GATE8_RESULTS.md).
+
+## Профиль добавляется так, как удобно
+
+Можно импортировать JSON, WireGuard/AWG `.conf`, VLESS, VMess, Trojan, Shadowsocks, Hysteria2 и TUIC из ссылки, подписки, QR-кода, буфера обмена или файла. Перед сохранением приложение показывает preview и проверяет конфигурацию встроенным ядром.
+
+Настоящий sing-box JSON остаётся единственным источником сетевой конфигурации: QuantumVPN не создаёт скрытую копию правил и не теряет незнакомые extended-поля.
+
+## Сборки
+
+Stable-сборки используют package `com.quantumvpn` и постоянный production
+key. `0.2.3` обновляет `0.2.1`, `0.2.2` и `0.2.1-beta.30` без потери app-private данных. Ручные
+debug-сборки публикуются в [GitHub Releases](https://github.com/youtubediscord/QuantumVPN-android/releases)
+как prerelease; у них отдельный package `com.quantumvpn.debug` и Android
+debug key, поэтому они устанавливаются рядом и не обновляют production-приложение.
+
+При ошибке главная сразу показывает стабильный код вида `DNS-101` или `NET-102` и понятное описание. В «Настройки → Диагностика» видны этот же код, безопасная техническая причина, длительности этапов, bounded-логи и последний Kotlin/Java crash. Кнопка «Экспортировать диагностику» вверху экрана формирует redacted-отчёт без профиля и credentials.
+
+Для объективного физического замера stable APK используйте
+[`collect-stable-gate-windows.cmd`](scripts/collect-stable-gate-windows.cmd). Скрипт
+не меняет VPN, DNS, профили или сети: он последовательно собирает idle без VPN, idle
+с VPN, воспроизведение видео и Wi-Fi ↔ mobile, сохраняя CPU, PSS, scheduler trace,
+счётчики интерфейсов, batterystats, connectivity и logcat в один ZIP на рабочем столе.
+
+## Известные ограничения MVP
+
+- Android 8+; release APK разделены на `arm64-v8a`, `armeabi-v7a` и `x86_64`, интерфейс рассчитан на телефоны.
+- Always-on/Lockdown и shared UID не поддерживаются как гарантированный per-app режим.
+- Rootless hardening не скрывает системный `TRANSPORT_VPN`, TUN и установленный APK от другого приложения.
+- Managed DNS перехватывает TCP/UDP 53, но не встроенный DoH, DoT или mDNS; FakeIP выключен.
+- Явные режимы «Из JSON», «DNS Android» и «Защищённый через VPN» не переключаются автоматически. «Из JSON» сохраняет заданную DNS-секцию буквально; только когда её вообще нет, runtime использует минимальный local DNS Android. Bounded fallback `профиль → Android → DoH` действует только в режиме «Автоматически» и закрывает предыдущий TUN/core перед следующей попыткой.
+- Domain-only block не является firewall: для гарантии нужен IP/CIDR rule-set.
+- Clash YAML и Hysteria v1 URI пока не импортируются; raw JSON остаётся ответственностью пользователя.
+- APK проверяется один раз при запуске по выбранному каналу и вручную из настроек; Beta выбирает последний опубликованный prerelease по `published_at`, а найденное обновление показывает release notes. Если GitHub недоступен напрямую, updater один раз временно повторяет только свой запрос через выбранный VPN-профиль и затем восстанавливает прежнее состояние VPN; постоянного правила для GitHub и влияния на другие приложения нет. Загрузка выполняется после подтверждения, установка — только штатным Android installer; silent install недоступен. Подписки не обновляются в фоне, core обновляется только вместе с APK.
+- При неработающем proxy/DNS VPN закрывается без бесконечного retry и plaintext DNS fallback.
+
+## Документация
+
+- [Архитектура продукта](ARCHITECTURE.md)
+- [Маршрутизация](ROUTING_ARCHITECTURE.md)
+- [DNS и Android VPN](DNS_ARCHITECTURE.md)
+- [Скрытие VPN и rootless hardening](VPN_HIDING_ARCHITECTURE.md)
+- [Поддерживаемые форматы импорта](IMPORT_FORMATS.md)
+- [План реализации](IMPLEMENTATION_PLAN.md)
+- [Результаты Gate 8](GATE8_RESULTS.md)
+- [Подпись и восстановление ключа](SIGNING.md)
+
+<details>
+<summary><strong>Сборка для разработчиков</strong></summary>
+
+### Toolchain
+
+- JDK 17;
+- Android Gradle Plugin `9.2.1` и Gradle `9.4.1`;
+- compile/target SDK `36`, min SDK `26`;
+- Compose BOM `2026.06.00`;
+- закреплённый `sing-box-extended` `v1.13.18-extended-2.6.5`, commit `e8f6936480b7fa9738911e3e7fc2ec0d8a634a88`;
+- отдельные APK для `arm64-v8a`, `armeabi-v7a` и `x86_64`, без чужих native-библиотек внутри.
+
+Укажите путь к Android SDK в `local.properties` или `ANDROID_HOME`, затем запустите локальный аналог CI:
+
+```bash
+scripts/ci-build.sh
 ```
-app/src/main/java/com/quantumvpn/
-├── core/
-│   ├── SingBoxCore.kt          # Ядро VPN
-│   └── SubscriptionParser.kt   # Парсер подписок
-├── data/
-│   └── Models.kt               # Модели данных
-├── service/
-│   ├── VPNService.kt           # VPN сервис
-│   └── BootReceiver.kt         # Автозапуск
-├── ui/
-│   ├── components/
-│   │   └── Components.kt       # UI компоненты
-│   ├── screens/
-│   │   └── MainScreen.kt       # Главный экран
-│   └── theme/
-│       ├── Theme.kt            # Тема
-│       └── Type.kt             # Типографика
-├── utils/
-│   ├── PingUtils.kt            # Утилита пинга
-│   └── UpdateChecker.kt        # Проверка обновлений
-├── viewmodel/
-│   └── MainViewModel.kt        # ViewModel
-├── MainActivity.kt
-└── QuantumVPNApp.kt
+
+Скрипт собирает закреплённые CLI/AAR, проверяет fixtures и rule-set, запускает Go/Kotlin tests и lint, собирает `x86_64` debug APK и три release APK, затем проверяет ABI, stripping, R8 mapping, native symbols и security-инварианты.
+
+Для debug APK другой архитектуры используйте, например:
+
+```bash
+./gradlew assembleDebug -PzapretAbi=arm64-v8a
 ```
 
-## Формат подписок
+Универсальный APK намеренно не создаётся. Сборка также останавливается, если `app/libs/libbox.aar` отсутствует: динамическая загрузка ядра приложением запрещена.
 
-Приложение поддерживает стандартные форматы:
+Полная Android-матрица запускается командой `./gradlew :app:connectedDebugAndroidTest`. Дополнительные device/release-проверки описаны в [плане реализации](IMPLEMENTATION_PLAN.md) и [протоколе Gate 8](GATE8_RESULTS.md).
 
-```
-vless://uuid@host:port?params#name
-vmess://base64json
-trojan://password@host:port?params#name
-ss://base64(method:password)@host:port#name
-hysteria2://password@host:port?params#name
-tuic://uuid:password@host:port?params#name
-```
+</details>
 
 ## Лицензия
 
-MIT License
+QuantumVPN распространяется по лицензии GPL-3.0-or-later. Условия сторонних компонентов перечислены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

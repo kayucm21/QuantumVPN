@@ -1,0 +1,531 @@
+diff --git a/go.mod b/go.mod
+index 3fc1451..d1d7640 100644
+--- a/go.mod
++++ b/go.mod
+@@ -30,7 +30,9 @@ require (
+ 	github.com/libdns/alidns v1.0.6
+ 	github.com/libdns/cloudflare v0.2.2
+ 	github.com/logrusorgru/aurora v2.0.3+incompatible
++	github.com/metacubex/amneziawg-go v0.0.0-20260612143004-19b4f1cdd5ec
+ 	github.com/metacubex/utls v1.8.4
++	github.com/metacubex/wireguard-go v0.0.0-20250820062549-a6cecdd7f57f
+ 	github.com/mholt/acmez/v3 v3.1.6
+ 	github.com/miekg/dns v1.1.72
+ 	github.com/openai/openai-go/v3 v3.26.0
+@@ -95,6 +97,7 @@ require (
+ 	github.com/dustin/go-humanize v1.0.1 // indirect
+ 	github.com/klauspost/reedsolomon v1.12.0 // indirect
+ 	github.com/lib/pq v1.10.9 // indirect
++	github.com/metacubex/randv2 v0.2.0 // indirect
+ 	github.com/moby/term v0.5.2 // indirect
+ 	github.com/ncruces/go-strftime v1.0.0 // indirect
+ 	github.com/opencontainers/image-spec v1.1.1 // indirect
+diff --git a/go.sum b/go.sum
+index 8538998..0b095ba 100644
+--- a/go.sum
++++ b/go.sum
+@@ -250,8 +250,14 @@ github.com/mdlayher/netlink v1.9.0 h1:G8+GLq2x3v4D4MVIqDdNUhTUC7TKiCy/6MDkmItfKc
+ github.com/mdlayher/netlink v1.9.0/go.mod h1:YBnl5BXsCoRuwBjKKlZ+aYmEoq0r12FDA/3JC+94KDg=
+ github.com/mdlayher/socket v0.5.1 h1:VZaqt6RkGkt2OE9l3GcC6nZkqD3xKeQLyfleW/uBcos=
+ github.com/mdlayher/socket v0.5.1/go.mod h1:TjPLHI1UgwEv5J1B5q0zTZq12A/6H7nKmtTanQE37IQ=
++github.com/metacubex/amneziawg-go v0.0.0-20260612143004-19b4f1cdd5ec h1:nRHevF7PmvDKjkYPjQCU7NUfVrr3Sry4QOPxpqoyo8U=
++github.com/metacubex/amneziawg-go v0.0.0-20260612143004-19b4f1cdd5ec/go.mod h1:MsM/5czONyXMJ3PRr5DbQ4O/BxzAnJWOIcJdLzW6qHY=
++github.com/metacubex/randv2 v0.2.0 h1:uP38uBvV2SxYfLj53kuvAjbND4RUDfFJjwr4UigMiLs=
++github.com/metacubex/randv2 v0.2.0/go.mod h1:kFi2SzrQ5WuneuoLLCMkABtiBu6VRrMrWFqSPyj2cxY=
+ github.com/metacubex/utls v1.8.4 h1:HmL9nUApDdWSkgUyodfwF6hSjtiwCGGdyhaSpEejKpg=
+ github.com/metacubex/utls v1.8.4/go.mod h1:kncGGVhFaoGn5M3pFe3SXhZCzsbCJayNOH4UEqTKTko=
++github.com/metacubex/wireguard-go v0.0.0-20250820062549-a6cecdd7f57f h1:FGBPRb1zUabhPhDrlKEjQ9lgIwQ6cHL4x8M9lrERhbk=
++github.com/metacubex/wireguard-go v0.0.0-20250820062549-a6cecdd7f57f/go.mod h1:oPGcV994OGJedmmxrcK9+ni7jUEMGhR+uVQAdaduIP4=
+ github.com/mholt/acmez/v3 v3.1.6 h1:eGVQNObP0pBN4sxqrXeg7MYqTOWyoiYpQqITVWlrevk=
+ github.com/mholt/acmez/v3 v3.1.6/go.mod h1:5nTPosTGosLxF3+LU4ygbgMRFDhbAVpqMI4+a4aHLBY=
+ github.com/miekg/dns v1.1.72 h1:vhmr+TF2A3tuoGNkLDFK9zi36F2LS+hKTRW0Uf8kbzI=
+diff --git a/protocol/wireguard/endpoint.go b/protocol/wireguard/endpoint.go
+index 9a4a7d9..ef5b7e0 100644
+--- a/protocol/wireguard/endpoint.go
++++ b/protocol/wireguard/endpoint.go
+@@ -307,7 +307,7 @@ func (w *Endpoint) PreferredAddress(address netip.Addr) bool {
+ 	if !w.started.Load() {
+ 		return false
+ 	}
+-	return w.endpoint.Lookup(address) != nil
++	return w.endpoint.Contains(address)
+ }
+ 
+ func (w *Endpoint) NewDirectRouteConnection(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+diff --git a/transport/wireguard/android_client_bind.go b/transport/wireguard/android_client_bind.go
+new file mode 100644
+index 0000000..6e13be2
+--- /dev/null
++++ b/transport/wireguard/android_client_bind.go
+@@ -0,0 +1,179 @@
++package wireguard
++
++import (
++	"context"
++	"net"
++	"net/netip"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	metaConn "github.com/metacubex/wireguard-go/conn"
++	"github.com/sagernet/sing/common/bufio"
++	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/sing/common/logger"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++var _ metaConn.Bind = (*AndroidClientBind)(nil)
++
++// AndroidClientBind always uses the protected sing-box dialer. It avoids the
++// platform UDP batching/GRO path while retaining one Android VpnService TUN.
++type AndroidClientBind struct {
++	ctx         context.Context
++	logger      logger.Logger
++	dialer      N.Dialer
++	bindCtx     context.Context
++	bindDone    context.CancelFunc
++	connAccess  sync.Mutex
++	conn        net.PacketConn
++	closed      atomic.Bool
++	lastLogNano atomic.Int64
++	isConnect   bool
++	connectAddr netip.AddrPort
++}
++
++func NewAndroidClientBind(ctx context.Context, logger logger.Logger, dialer N.Dialer, peers []peerConfig) *AndroidClientBind {
++	bind := &AndroidClientBind{ctx: ctx, logger: logger, dialer: dialer}
++	if len(peers) == 1 && peers[0].endpoint.IsValid() {
++		bind.isConnect = true
++		bind.connectAddr = peers[0].endpoint
++	}
++	return bind
++}
++
++func (b *AndroidClientBind) Open(uint16) ([]metaConn.ReceiveFunc, uint16, error) {
++	b.closed.Store(false)
++	b.bindCtx, b.bindDone = context.WithCancel(b.ctx)
++	return []metaConn.ReceiveFunc{b.receive}, 0, nil
++}
++
++func (b *AndroidClientBind) connect() (net.PacketConn, error) {
++	b.connAccess.Lock()
++	defer b.connAccess.Unlock()
++	if b.closed.Load() {
++		return nil, net.ErrClosed
++	}
++	if b.conn != nil {
++		return b.conn, nil
++	}
++	if b.isConnect {
++		conn, err := b.dialer.DialContext(b.bindCtx, N.NetworkUDP, M.SocksaddrFromNetIP(b.connectAddr))
++		if err != nil {
++			return nil, err
++		}
++		b.conn = bufio.NewUnbindPacketConn(conn)
++	} else {
++		conn, err := b.dialer.ListenPacket(b.bindCtx, M.Socksaddr{Addr: netip.IPv4Unspecified()})
++		if err != nil {
++			return nil, err
++		}
++		b.conn = bufio.NewPacketConn(conn)
++	}
++	return b.conn, nil
++}
++
++func (b *AndroidClientBind) receive(packets [][]byte, sizes []int, endpoints []metaConn.Endpoint) (int, error) {
++	conn, err := b.connect()
++	if err != nil {
++		if b.closed.Load() {
++			return 0, net.ErrClosed
++		}
++		b.logError(E.Cause(err, "connect to wireguard server"))
++		b.waitRetry()
++		return 0, nil
++	}
++	n, address, err := conn.ReadFrom(packets[0])
++	if err != nil {
++		b.dropConn(conn)
++		if b.closed.Load() {
++			return 0, net.ErrClosed
++		}
++		b.logError(E.Cause(err, "read wireguard packet"))
++		b.waitRetry()
++		return 0, nil
++	}
++	sizes[0] = n
++	endpoints[0] = androidEndpoint(M.SocksaddrFromNet(address).Unwrap().AddrPort())
++	return 1, nil
++}
++
++func (b *AndroidClientBind) Close() error {
++	if b.closed.Swap(true) {
++		return nil
++	}
++	if b.bindDone != nil {
++		b.bindDone()
++	}
++	b.connAccess.Lock()
++	defer b.connAccess.Unlock()
++	if b.conn != nil {
++		_ = b.conn.Close()
++		b.conn = nil
++	}
++	return nil
++}
++
++func (b *AndroidClientBind) SetMark(uint32) error { return nil }
++
++func (b *AndroidClientBind) Send(buffers [][]byte, endpoint metaConn.Endpoint) error {
++	conn, err := b.connect()
++	if err != nil {
++		return err
++	}
++	destination := netip.AddrPort(endpoint.(androidEndpoint))
++	for _, buffer := range buffers {
++		if _, err = conn.WriteTo(buffer, net.UDPAddrFromAddrPort(destination)); err != nil {
++			b.dropConn(conn)
++			return err
++		}
++	}
++	return nil
++}
++
++func (b *AndroidClientBind) ParseEndpoint(value string) (metaConn.Endpoint, error) {
++	address, err := netip.ParseAddrPort(value)
++	return androidEndpoint(address), err
++}
++
++func (b *AndroidClientBind) BatchSize() int { return 1 }
++
++func (b *AndroidClientBind) waitRetry() {
++	timer := time.NewTimer(time.Second)
++	defer timer.Stop()
++	select {
++	case <-timer.C:
++	case <-b.bindCtx.Done():
++	}
++}
++
++func (b *AndroidClientBind) logError(err error) {
++	now := time.Now().UnixNano()
++	previous := b.lastLogNano.Load()
++	if now-previous < int64(10*time.Second) || !b.lastLogNano.CompareAndSwap(previous, now) {
++		return
++	}
++	b.logger.Error(err)
++}
++
++func (b *AndroidClientBind) dropConn(conn net.PacketConn) {
++	b.connAccess.Lock()
++	defer b.connAccess.Unlock()
++	if b.conn == conn {
++		_ = b.conn.Close()
++		b.conn = nil
++	}
++}
++
++type androidEndpoint netip.AddrPort
++
++func (e androidEndpoint) ClearSrc()           {}
++func (e androidEndpoint) SrcToString() string { return "" }
++func (e androidEndpoint) DstToString() string { return netip.AddrPort(e).String() }
++func (e androidEndpoint) DstToBytes() []byte {
++	value, _ := netip.AddrPort(e).MarshalBinary()
++	return value
++}
++func (e androidEndpoint) DstIP() netip.Addr { return netip.AddrPort(e).Addr() }
++func (e androidEndpoint) SrcIP() netip.Addr { return netip.Addr{} }
+diff --git a/transport/wireguard/android_client_bind_test.go b/transport/wireguard/android_client_bind_test.go
+new file mode 100644
+index 0000000..5a83558
+--- /dev/null
++++ b/transport/wireguard/android_client_bind_test.go
+@@ -0,0 +1,130 @@
++package wireguard
++
++import (
++	"context"
++	"io"
++	"net"
++	"net/netip"
++	"testing"
++	"time"
++
++	metaConn "github.com/metacubex/wireguard-go/conn"
++	metaTun "github.com/metacubex/wireguard-go/tun"
++	"github.com/sagernet/sing/common/logger"
++	M "github.com/sagernet/sing/common/metadata"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestAndroidClientBindConnectedRoundTrip(t *testing.T) {
++	connection := newTestPacketConnection()
++	bind := NewAndroidClientBind(
++		context.Background(),
++		logger.NOP(),
++		testDialer{connection: connection},
++		[]peerConfig{{endpoint: netip.MustParseAddrPort("192.0.2.1:51820")}},
++	)
++	receivers, _, err := bind.Open(0)
++	require.NoError(t, err)
++	require.Equal(t, 1, bind.BatchSize())
++
++	endpoint, err := bind.ParseEndpoint("192.0.2.1:51820")
++	require.NoError(t, err)
++	require.NoError(t, bind.Send([][]byte{[]byte("outbound")}, endpoint))
++	require.Equal(t, []byte("outbound"), <-connection.writes)
++
++	connection.reads <- []byte("inbound")
++	packets := [][]byte{make([]byte, 64)}
++	sizes := make([]int, 1)
++	endpoints := make([]metaConn.Endpoint, 1)
++	count, err := receivers[0](packets, sizes, endpoints)
++	require.NoError(t, err)
++	require.Equal(t, 1, count)
++	require.Equal(t, []byte("inbound"), packets[0][:sizes[0]])
++	require.Equal(t, "192.0.2.1:51820", endpoints[0].DstToString())
++	require.NoError(t, bind.Close())
++	require.NoError(t, bind.Close())
++}
++
++func TestAndroidWireGuardEngineActivatesTunExplicitly(t *testing.T) {
++	tun := &androidTunAdapter{events: make(chan metaTun.Event, 1)}
++	engine := &androidWireGuardEngine{wireGuardEngine: testWireGuardEngine{}, tun: tun}
++	select {
++	case <-tun.events:
++		t.Fatal("TUN became active before IPC configuration")
++	default:
++	}
++	engine.activate()
++	require.Equal(t, metaTun.Event(metaTun.EventUp), <-tun.events)
++}
++
++type testWireGuardEngine struct{}
++
++func (testWireGuardEngine) IpcSet(string) error                         { return nil }
++func (testWireGuardEngine) Up() error                                   { return nil }
++func (testWireGuardEngine) Down() error                                 { return nil }
++func (testWireGuardEngine) Close()                                      {}
++func (testWireGuardEngine) DisableSomeRoamingForBrokenMobileSemantics() {}
++
++type testDialer struct{ connection net.Conn }
++
++func (d testDialer) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	return d.connection, nil
++}
++
++func (d testDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	return nil, io.ErrUnexpectedEOF
++}
++
++type testPacketConnection struct {
++	reads  chan []byte
++	writes chan []byte
++	closed chan struct{}
++}
++
++func newTestPacketConnection() *testPacketConnection {
++	return &testPacketConnection{
++		reads:  make(chan []byte, 1),
++		writes: make(chan []byte, 1),
++		closed: make(chan struct{}),
++	}
++}
++
++func (c *testPacketConnection) Read(buffer []byte) (int, error) {
++	select {
++	case packet := <-c.reads:
++		return copy(buffer, packet), nil
++	case <-c.closed:
++		return 0, net.ErrClosed
++	}
++}
++
++func (c *testPacketConnection) Write(buffer []byte) (int, error) {
++	copyBuffer := append([]byte(nil), buffer...)
++	select {
++	case c.writes <- copyBuffer:
++		return len(buffer), nil
++	case <-c.closed:
++		return 0, net.ErrClosed
++	}
++}
++
++func (c *testPacketConnection) Close() error {
++	select {
++	case <-c.closed:
++	default:
++		close(c.closed)
++	}
++	return nil
++}
++
++func (c *testPacketConnection) LocalAddr() net.Addr              { return testAddress("192.0.2.2:12345") }
++func (c *testPacketConnection) RemoteAddr() net.Addr             { return testAddress("192.0.2.1:51820") }
++func (c *testPacketConnection) SetDeadline(time.Time) error      { return nil }
++func (c *testPacketConnection) SetReadDeadline(time.Time) error  { return nil }
++func (c *testPacketConnection) SetWriteDeadline(time.Time) error { return nil }
++
++type testAddress string
++
++func (a testAddress) Network() string { return "udp" }
++func (a testAddress) String() string  { return string(a) }
+diff --git a/transport/wireguard/android_engine.go b/transport/wireguard/android_engine.go
+new file mode 100644
+index 0000000..6c5d0f5
+--- /dev/null
++++ b/transport/wireguard/android_engine.go
+@@ -0,0 +1,73 @@
++package wireguard
++
++import (
++	"sync"
++
++	"github.com/metacubex/amneziawg-go/device"
++	metaConn "github.com/metacubex/wireguard-go/conn"
++	metaDevice "github.com/metacubex/wireguard-go/device"
++	metaTun "github.com/metacubex/wireguard-go/tun"
++	sagerDevice "github.com/sagernet/wireguard-go/device"
++)
++
++// wireGuardEngine is the common lifecycle shared by the pinned sing-box
++// engine and the Android vanilla/Amnezia engines. Keeping it here avoids a
++// second Android TUN or a local proxy hop.
++type wireGuardEngine interface {
++	IpcSet(string) error
++	Up() error
++	Down() error
++	Close()
++	DisableSomeRoamingForBrokenMobileSemantics()
++}
++
++func NewAndroidWireGuardEngine(
++	tunDevice Device,
++	bind metaConn.Bind,
++	logger *sagerDevice.Logger,
++	amnezia *AmneziaOptions,
++	workers int,
++) wireGuardEngine {
++	adapter := newAndroidTunAdapter(tunDevice)
++	metaLogger := &metaDevice.Logger{Verbosef: logger.Verbosef, Errorf: logger.Errorf}
++	if amnezia != nil {
++		engine := device.NewDevice(adapter, bind, metaLogger, workers)
++		engine.DisableSomeRoamingForBrokenMobileSemantics()
++		return &androidWireGuardEngine{wireGuardEngine: engine, tun: adapter}
++	}
++	engine := metaDevice.NewDevice(adapter, bind, metaLogger, workers)
++	engine.DisableSomeRoamingForBrokenMobileSemantics()
++	return &androidWireGuardEngine{wireGuardEngine: engine, tun: adapter}
++}
++
++type androidWireGuardEngine struct {
++	wireGuardEngine
++	tun *androidTunAdapter
++}
++
++func (e *androidWireGuardEngine) activate() {
++	e.tun.events <- metaTun.EventUp
++}
++
++type androidTunAdapter struct {
++	Device
++	events chan metaTun.Event
++	close  sync.Once
++}
++
++func newAndroidTunAdapter(device Device) *androidTunAdapter {
++	return &androidTunAdapter{Device: device, events: make(chan metaTun.Event, 1)}
++}
++
++func (a *androidTunAdapter) Events() <-chan metaTun.Event {
++	return a.events
++}
++
++func (a *androidTunAdapter) Close() error {
++	var err error
++	a.close.Do(func() {
++		close(a.events)
++		err = a.Device.Close()
++	})
++	return err
++}
+diff --git a/transport/wireguard/endpoint.go b/transport/wireguard/endpoint.go
+index 648d73f..0f4e9a4 100644
+--- a/transport/wireguard/endpoint.go
++++ b/transport/wireguard/endpoint.go
+@@ -8,11 +8,10 @@ import (
+ 	"net"
+ 	"net/netip"
+ 	"os"
+-	"reflect"
++	"runtime"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+-	"unsafe"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/dialer"
+@@ -37,8 +36,7 @@ type Endpoint struct {
+ 	allowedAddress []netip.Prefix
+ 	tunDevice      Device
+ 	natDevice      NatDevice
+-	device         *device.Device
+-	allowedIPs     *device.AllowedIPs
++	device         wireGuardEngine
+ 	pause          pause.Manager
+ 	pauseCallback  *list.Element[pause.Callback]
+ }
+@@ -182,8 +180,15 @@ func (e *Endpoint) Start(resolve bool) error {
+ 	} else {
+ 		deviceInput = e.tunDevice
+ 	}
+-	wgDevice := device.NewDevice(e.options.Context, deviceInput, bind, logger, e.options.Workers, e.options.PreallocatedBuffersPerPool, e.options.DisablePauses)
+-	e.tunDevice.SetDevice(wgDevice)
++	var wgDevice wireGuardEngine
++	if runtime.GOOS == "android" && !e.options.System {
++		androidBind := NewAndroidClientBind(e.options.Context, e.options.Logger, e.options.Dialer, e.peers)
++		wgDevice = NewAndroidWireGuardEngine(deviceInput, androidBind, logger, e.options.Amnezia, e.options.Workers)
++		e.options.Logger.Info("wireguard engine: android split data-plane")
++	} else {
++		wgDevice = device.NewDevice(e.options.Context, deviceInput, bind, logger, e.options.Workers, e.options.PreallocatedBuffersPerPool, e.options.DisablePauses)
++		e.tunDevice.SetDevice(wgDevice.(*device.Device))
++	}
+ 	var ipcConf strings.Builder
+ 	ipcConf.WriteString(e.ipcConf)
+ 	if e.options.Amnezia != nil {
+@@ -269,12 +274,14 @@ func (e *Endpoint) Start(resolve bool) error {
+ 		wgDevice.Close()
+ 		return E.Cause(err, "setup wireguard: \n", ipcConf.String())
+ 	}
++	if androidEngine, isAndroidEngine := wgDevice.(*androidWireGuardEngine); isAndroidEngine {
++		androidEngine.activate()
++	}
+ 	e.device = wgDevice
+ 	e.pause = service.FromContext[pause.Manager](e.options.Context)
+ 	if e.pause != nil {
+ 		e.pauseCallback = e.pause.RegisterCallback(e.onPauseUpdated)
+ 	}
+-	e.allowedIPs = (*device.AllowedIPs)(unsafe.Pointer(reflect.Indirect(reflect.ValueOf(wgDevice)).FieldByName("allowedips").UnsafeAddr()))
+ 	return nil
+ }
+ 
+@@ -305,11 +312,10 @@ func (e *Endpoint) Close() error {
+ 	return nil
+ }
+ 
+-func (e *Endpoint) Lookup(address netip.Addr) *device.Peer {
+-	if e.allowedIPs == nil {
+-		return nil
+-	}
+-	return e.allowedIPs.Lookup(address.AsSlice())
++func (e *Endpoint) Contains(address netip.Addr) bool {
++	return common.Any(e.allowedAddress, func(prefix netip.Prefix) bool {
++		return prefix.Contains(address)
++	})
+ }
+ 
+ func (e *Endpoint) NewDirectRouteConnection(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {

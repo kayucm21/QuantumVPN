@@ -55,6 +55,13 @@ enum class HomeLayoutMode {
     Expert,
 }
 
+/** Server selection bias: Standard (balanced), Gaming (low latency), Movie (throughput). */
+enum class ServerMode {
+    Standard,
+    Gaming,
+    Movie,
+}
+
 data class UiSettings(
     val themeMode: ThemeMode = ThemeMode.System,
     val activeProfileId: String? = null,
@@ -70,6 +77,7 @@ data class UiSettings(
     val blockNonVpnTraffic: Boolean = false,
     val sortServersByPing: Boolean = true,
     val powerMode: PowerMode = PowerMode.Balanced,
+    val serverMode: ServerMode = ServerMode.Standard,
     val autoConnectTrustedWifi: Boolean = false,
     val trustedWifiSsids: String = "",
     val reduceMotion: Boolean = false,
@@ -113,6 +121,7 @@ data class UiSettings(
     val safeModeConnect: Boolean = false,
     val failoverCooldownUntilEpochMillis: Long = 0L,
     val customDohUrl: String = "",
+    val customDotUrl: String = "",
     val dismissedCoachMarkScreens: Set<String> = emptySet(),
     val scheduleWorkConnect: Boolean = false,
     val skipAutoConnectWhenRoaming: Boolean = true,
@@ -140,7 +149,7 @@ data class UiSettings(
     val incognitoSession: Boolean = false,
     val homeBlocksOrder: String = "modes,tools,server,subscription,adblock",
     val subscriptionPriorityIds: String = "",
-    val subscriptionRefreshHours: Int = 6,
+    val subscriptionRefreshHours: Int = 1,
     val lastSpeedTestDetail: String = "",
     val blockWebRtcMdns: Boolean = true,
     val quietNightReconnect: Boolean = true,
@@ -201,6 +210,9 @@ class UiSettingsStore(
                 powerMode = preferences[POWER_MODE]
                     ?.let { stored -> PowerMode.entries.firstOrNull { it.name == stored } }
                     ?: PowerMode.Balanced,
+                serverMode = preferences[SERVER_MODE]
+                    ?.let { stored -> ServerMode.entries.firstOrNull { it.name == stored } }
+                    ?: ServerMode.Standard,
                 autoConnectTrustedWifi = preferences[AUTO_CONNECT_TRUSTED_WIFI] ?: false,
                 trustedWifiSsids = preferences[TRUSTED_WIFI_SSIDS].orEmpty(),
                 reduceMotion = preferences[REDUCE_MOTION] ?: false,
@@ -251,6 +263,7 @@ class UiSettingsStore(
                 failoverCooldownUntilEpochMillis =
                     preferences[FAILOVER_COOLDOWN]?.toLongOrNull() ?: 0L,
                 customDohUrl = preferences[CUSTOM_DOH_URL] ?: "",
+                customDotUrl = preferences[CUSTOM_DOT_URL] ?: "",
                 dismissedCoachMarkScreens = preferences[COACH_MARKS_SCREENS]
                     ?.split(",")
                     ?.map { it.trim() }
@@ -384,6 +397,12 @@ class UiSettingsStore(
     suspend fun setPowerMode(mode: PowerMode) {
         dataStore.edit { preferences ->
             preferences[POWER_MODE] = mode.name
+        }
+    }
+
+    suspend fun setServerMode(mode: ServerMode) {
+        dataStore.edit { preferences ->
+            preferences[SERVER_MODE] = mode.name
         }
     }
 
@@ -565,6 +584,10 @@ class UiSettingsStore(
 
     suspend fun setCustomDohUrl(url: String) {
         dataStore.edit { it[CUSTOM_DOH_URL] = url.trim() }
+    }
+
+    suspend fun setCustomDotUrl(url: String) {
+        dataStore.edit { it[CUSTOM_DOT_URL] = url.trim() }
     }
 
     suspend fun setSafeModeConnect(enabled: Boolean) {
@@ -749,6 +772,7 @@ class UiSettingsStore(
         val BLOCK_NON_VPN_TRAFFIC = booleanPreferencesKey("block_non_vpn_traffic")
         val SORT_SERVERS_BY_PING = booleanPreferencesKey("sort_servers_by_ping")
         val POWER_MODE = stringPreferencesKey("power_mode")
+        val SERVER_MODE = stringPreferencesKey("server_mode")
         val AUTO_CONNECT_TRUSTED_WIFI = booleanPreferencesKey("auto_connect_trusted_wifi")
         val TRUSTED_WIFI_SSIDS = stringPreferencesKey("trusted_wifi_ssids")
         val REDUCE_MOTION = booleanPreferencesKey("reduce_motion")
@@ -792,6 +816,7 @@ class UiSettingsStore(
         val SAFE_MODE = booleanPreferencesKey("safe_mode")
         val FAILOVER_COOLDOWN = stringPreferencesKey("failover_cooldown")
         val CUSTOM_DOH_URL = stringPreferencesKey("custom_doh_url")
+val CUSTOM_DOT_URL = stringPreferencesKey("custom_dot_url")
         val COACH_MARKS_SCREENS = stringPreferencesKey("coach_marks_screens")
         val SCHED_WORK = booleanPreferencesKey("sched_work")
         val SKIP_ROAMING = booleanPreferencesKey("skip_roaming")

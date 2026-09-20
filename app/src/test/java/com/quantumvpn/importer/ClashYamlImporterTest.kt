@@ -23,7 +23,7 @@ class ClashYamlImporterTest {
         """.trimIndent()
         val servers = ClashYamlImporter.parse(yaml)
         assertEquals(1, servers.size)
-        assertEquals("ss", servers.single().outbound.string("type"))
+        assertEquals("shadowsocks", servers.single().outbound.string("type"))
         assertEquals("example.com", servers.single().outbound.string("server"))
     }
 

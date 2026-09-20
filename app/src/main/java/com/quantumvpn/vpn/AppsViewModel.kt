@@ -18,9 +18,11 @@ data class AppsUiState(
     val catalogLoaded: Boolean = false,
     val loading: Boolean = false,
     val error: String? = null,
+    val gameModeEnabled: Boolean = false,
+    val detectedGames: List<DetectedGame> = emptyList(),
 ) {
     val needsAppSelection: Boolean
-        get() = false
+        get() = initialized && allowedPackages.isEmpty()
 
     val missingPackages: Set<String>
         get() = if (catalogLoaded) {
@@ -28,12 +30,25 @@ data class AppsUiState(
         } else {
             emptySet()
         }
+
+    /** Выбранные пакеты игрового режима (для диагностики). */
+    val gamePackages: Set<String>
+        get() = detectedGames.flatMap(DetectedGame::selectedPackages).toSet()
 }
+
+/** Игра из каталога, найденная на устройстве, с отметками выбора. */
+data class DetectedGame(
+    val profile: GameProfile,
+    val installedPackages: Set<String>,
+    val selectedPackages: Set<String>,
+)
 
 class AppsViewModel(
     private val selectionStore: AppSelectionStore,
     private val appCatalog: AppCatalog,
     private val namedAppSetsStore: NamedAppSetsStore,
+    private val gameModeStore: GameModeStore,
+    private val vpnController: VpnController,
 ) : ViewModel() {
     private val apps = MutableStateFlow<List<InstalledApp>>(emptyList())
     private val catalogLoaded = MutableStateFlow(false)
@@ -48,12 +63,28 @@ class AppsViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val state = combine(
-        apps,
-        selectionStore.selection,
-        catalogLoaded,
-        loading,
-        error,
-    ) { installedApps, selection, isCatalogLoaded, isLoading, loadError ->
+        combine(
+            apps,
+            selectionStore.selection,
+            catalogLoaded,
+        ) { installedApps, selection, isCatalogLoaded ->
+            Triple(installedApps, selection, isCatalogLoaded)
+        },
+        combine(
+            loading,
+            error,
+            gameModeStore.snapshot,
+        ) { isLoading, loadError, gameMode ->
+            Triple(isLoading, loadError, gameMode)
+        },
+    ) { (installedApps, selection, isCatalogLoaded), (isLoading, loadError, gameMode) ->
+        val detected = GameCatalog.detectInstalled(installedApps).map { (profile, present) ->
+            DetectedGame(
+                profile = profile,
+                installedPackages = present,
+                selectedPackages = present.intersect(gameMode.packages),
+            )
+        }
         AppsUiState(
             apps = installedApps,
             allowedPackages = selection.allowedPackages,
@@ -62,6 +93,8 @@ class AppsViewModel(
             catalogLoaded = isCatalogLoaded,
             loading = isLoading,
             error = loadError,
+            gameModeEnabled = gameMode.enabled,
+            detectedGames = detected,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -167,13 +200,55 @@ class AppsViewModel(
         }
     }
 
+    fun setGameModeEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            gameModeStore.setEnabled(enabled)
+            vpnController.restartIfConnected("game-mode")
+        }
+    }
+
+    fun setGamePackageEnabled(packageName: String, enabled: Boolean) {
+        viewModelScope.launch {
+            gameModeStore.setGameEnabled(packageName, enabled)
+            vpnController.restartIfConnected("game-mode")
+        }
+    }
+
+    /** Пакетное переключение (одна игра = один рестарт, а не по числу пакетов). */
+    fun setGamePackagesEnabled(packageNames: Collection<String>, enabled: Boolean) {
+        viewModelScope.launch {
+            packageNames.forEach { gameModeStore.setGameEnabled(it, enabled) }
+            vpnController.restartIfConnected("game-mode")
+        }
+    }
+
+    /** Включить режим и выбрать все найденные на устройстве игры. */
+    fun enableDetectedGames() {
+        viewModelScope.launch {
+            val detected = GameCatalog.detectInstalled(apps.value)
+                .flatMap { (_, present) -> present }
+                .toSet()
+            gameModeStore.replaceGames(detected)
+            gameModeStore.setEnabled(true)
+            vpnController.restartIfConnected("game-mode")
+        }
+    }
+
     class Factory(
         private val selectionStore: AppSelectionStore,
         private val appCatalog: AppCatalog,
         private val namedAppSetsStore: NamedAppSetsStore,
+        private val gameModeStore: GameModeStore,
+        private val vpnController: VpnController,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            AppsViewModel(selectionStore, appCatalog, namedAppSetsStore) as T
+            AppsViewModel(
+                selectionStore,
+                appCatalog,
+                namedAppSetsStore,
+                gameModeStore,
+                vpnController,
+            ) as T
     }
 }

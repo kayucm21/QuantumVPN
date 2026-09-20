@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QuantumVPN</string>
+    <string name="widget_description">Швидке підключення QuantumVPN</string>
+    <string name="widget_title">QuantumVPN</string>
+    <string name="widget_wide_description">Трафік, підключення та зміна сервера</string>
+    <string name="widget_wide_title">QuantumVPN · широкий</string>
+    <string name="shortcut_connect_short">Підключити</string>
+    <string name="shortcut_connect_long">Підключити VPN</string>
+    <string name="shortcut_disconnect_short">Відключити</string>
+    <string name="shortcut_disconnect_long">Відключити VPN</string>
+    <string name="shortcut_ping_short">Сервери</string>
+    <string name="shortcut_ping_long">Відкрити сервери та пінг</string>
+    <string name="shortcut_import_short">Імпорт</string>
+    <string name="shortcut_import_long">Імпорт профілю</string>
+    <string name="shortcut_speedtest_short">Speedtest</string>
+    <string name="shortcut_speedtest_long">Запустити speedtest</string>
+    <string name="status_protected">Захищено</string>
+    <string name="status_unprotected">Не захищено</string>
+    <string name="action_add_subscription">Додати підписку</string>
+    <string name="network_map">Карта мережі</string>
+    <string name="choose_server">Оберіть сервер</string>
+    <string name="speed_test">Спідтест</string>
+    <string name="why_slow">Чому повільно</string>
+    <string name="event_journal">Журнал подій</string>
+    <string name="trusted_wifi">Довірені Wi‑Fi</string>
+    <string name="family_protect">Сімейний фільтр</string>
+    <string name="best_ping">Найкращий пінг</string>
+    <string name="same_region">Той самий регіон</string>
+    <string name="tab_home">Головна</string>
+    <string name="tab_servers">Сервери</string>
+    <string name="tab_routing">Маршрутизація</string>
+    <string name="tab_settings">Налаштування</string>
+    <string name="undo">Скасувати</string>
+    <string name="subscription_expiring">Підписка закінчується</string>
+    <string name="dns_preview">DNS preview</string>
+    <string name="tips_carousel">Поради</string>
+    <string name="reliability_uptime">Uptime</string>
+    <string name="work_schedule">Робоче підключення</string>
+    <string name="skip_roaming">Не автопідключати в роумінгу</string>
+    <string name="mobile_autoconnect">Автопідключення на mobile</string>
+    <string name="time_routing">Time-based routing</string>
+    <string name="recommended_server">Рекомендовано</string>
+    <string name="subscription_diff">Зміни підписки</string>
+</resources>

@@ -1,5 +1,6 @@
 package com.quantumvpn.config
 
+import com.quantumvpn.hardening.CarrierBypassOptions
 import com.quantumvpn.hardening.TunMtuMode
 import com.quantumvpn.hardening.VpnHidingOptions
 import kotlinx.serialization.json.JsonArray
@@ -86,7 +87,7 @@ class RuntimeConfigBuilderTest {
         assertEquals("1376", (endpoints[1]["mtu"] as JsonPrimitive).content)
         assertEquals("custom-direct", endpoints[1].string("detour"))
         assertFalse("mtu" in endpoints[2])
-        assertEquals("1420", (tun["mtu"] as JsonPrimitive).content)
+        assertEquals("1376", (tun["mtu"] as JsonPrimitive).content)
         assertFalse("stored profile must stay untouched", "1420" in stored)
         assertFalse("stored profile must not gain a detour", "zapret-wireguard-direct" in stored)
     }
@@ -375,7 +376,10 @@ class RuntimeConfigBuilderTest {
         val stored = validConfig(rootExtra = ",\"unknown_dns_owner\":true")
         val result = RuntimeConfigBuilder.build(
             stored,
-            options = RuntimeConfigOptions(dnsMode = DnsMode.Android),
+            options = RuntimeConfigOptions(
+                dnsMode = DnsMode.Android,
+                adBlockEnabled = false,
+            ),
         ) as RuntimeConfigResult.Ready
         val root = JsonConfig.parse(result.json) as JsonObject
         val dns = root["dns"] as JsonObject
@@ -403,6 +407,7 @@ class RuntimeConfigBuilderTest {
             stored,
             options = RuntimeConfigOptions(
                 dnsMode = DnsMode.Secure,
+                adBlockEnabled = false,
                 dnsOverride = DnsOverride(
                     hostname = " NTC.PARTY. ",
                     ipv4Address = " 130.255.77.28 ",
@@ -457,6 +462,9 @@ class RuntimeConfigBuilderTest {
             stored,
             options = RuntimeConfigOptions(
                 dnsMode = DnsMode.FromJson,
+                adBlockEnabled = false,
+                blockWebRtcMdns = false,
+                carrierBypass = CarrierBypassOptions(enabled = false),
                 healthCheckPackageName = "com.quantumvpn.debug",
             ),
         ) as RuntimeConfigResult.Ready
@@ -475,7 +483,7 @@ class RuntimeConfigBuilderTest {
         assertEquals("tcp", rules[1].string("network"))
         assertEquals("443", (rules[1]["port"] as JsonPrimitive).content)
         assertTrue(rules[1]["domain"].toString().contains("cp.cloudflare.com"))
-        assertTrue(rules[1]["package_name"].toString().contains("com.quantumvpn.debug"))
+        assertFalse("health probe rule must not carry a package_name", "package_name" in rules[1])
         assertFalse("stored profile must stay untouched", "\"sniff\"" in stored)
     }
 
@@ -485,7 +493,12 @@ class RuntimeConfigBuilderTest {
 
         val result = RuntimeConfigBuilder.build(
             stored,
-            options = RuntimeConfigOptions(dnsMode = DnsMode.FromJson),
+            options = RuntimeConfigOptions(
+                dnsMode = DnsMode.FromJson,
+                adBlockEnabled = false,
+                blockWebRtcMdns = false,
+                carrierBypass = CarrierBypassOptions(enabled = false),
+            ),
         ) as RuntimeConfigResult.Ready
         val root = JsonConfig.parse(result.json) as JsonObject
         val dns = root["dns"] as JsonObject
@@ -576,6 +589,7 @@ class RuntimeConfigBuilderTest {
             stored,
             options = RuntimeConfigOptions(
                 dnsMode = DnsMode.Automatic,
+                adBlockEnabled = false,
                 proxyIpv4Only = false,
             ),
         ) as RuntimeConfigResult.Ready
@@ -601,6 +615,7 @@ class RuntimeConfigBuilderTest {
             stored,
             options = RuntimeConfigOptions(
                 dnsMode = DnsMode.Automatic,
+                adBlockEnabled = false,
                 proxyIpv4Only = true,
             ),
         ) as RuntimeConfigResult.Ready
@@ -624,6 +639,7 @@ class RuntimeConfigBuilderTest {
             stored,
             options = RuntimeConfigOptions(
                 dnsMode = DnsMode.Android,
+                adBlockEnabled = false,
                 proxyIpv4Only = true,
             ),
         ) as RuntimeConfigResult.Ready
@@ -669,6 +685,7 @@ class RuntimeConfigBuilderTest {
             android.json,
             options = RuntimeConfigOptions(
                 dnsMode = DnsMode.Android,
+                adBlockEnabled = false,
                 proxyIpv4Only = true,
             ),
         ) as RuntimeConfigResult.Ready
@@ -691,6 +708,7 @@ class RuntimeConfigBuilderTest {
             directFinalStored,
             options = RuntimeConfigOptions(
                 dnsMode = DnsMode.Automatic,
+                adBlockEnabled = false,
                 proxyIpv4Only = true,
             ),
         ) as RuntimeConfigResult.Ready
@@ -715,6 +733,7 @@ class RuntimeConfigBuilderTest {
             directFinalStored,
             options = RuntimeConfigOptions(
                 dnsMode = DnsMode.Android,
+                adBlockEnabled = false,
                 proxyIpv4Only = true,
             ),
         ) as RuntimeConfigResult.Ready
@@ -775,6 +794,7 @@ class RuntimeConfigBuilderTest {
         val result = RuntimeConfigBuilder.build(
             stored,
             options = RuntimeConfigOptions(
+                adBlockEnabled = false,
                 bootstrapHost = BootstrapHostOverlay("server-a", "vpn.example", listOf("203.0.113.10")),
             ),
         ) as RuntimeConfigResult.Ready

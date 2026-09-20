@@ -612,3 +612,18 @@ production-signed arm64 APK на реальном устройстве и нез
 «Из JSON», DNS Android, Auto, Secure, смену Wi‑Fi/mobile и длительную сессию; после этого остаются физическая
 матрица этапа 8 (captive portal, IPv6-only/NAT64, камера/HTTPS subscription,
 blocked-DNS/LKG/DoH, OEM per-app/routing и энергия) и production signing key по `SIGNING.md`.
+
+## Этап 9 — игровой режим (GearUP-подобный fast path)
+
+Дизайн и поправка к ADR-003 — в [GAMEMODE.md](GAMEMODE.md). Код уже вписан
+в существующие координаты (Android allowlist + runtime route-правило),
+хранимый профиль не меняется, новых процессов/сервисов нет.
+
+- [ ] `G9-01` JVM unit tests: `GameModeRuntimeTest` (5) + `GameCatalogTest` (3)
+      зелёные в `./gradlew :app:testDebugUnitTest`.
+- [ ] `G9-02` Ручная матрица: игра из каталога при включённом VPN ходит с IP
+      провайдера, браузер — с IP VPN (раздельные маршруты за один TUN).
+- [ ] `G9-03` Режимы scope: Include (допуск игр в TUN), All/Exclude/Block
+      без регрессий; игра побеждает Block.
+- [ ] `G9-04` Замер пинга до/после (probe-хосты игровых серверов — только
+      проверенные, не выдумывать).

@@ -27,8 +27,6 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -99,6 +97,8 @@ import com.quantumvpn.vpn.VpnSessionStats
 import com.quantumvpn.vpn.primaryGroup
 import java.text.DateFormat
 import java.util.Date
+import com.quantumvpn.ui.components.QvBottomBar
+import com.quantumvpn.ui.components.QvTabItem
 
 private enum class AppTab(
     val id: String,
@@ -107,9 +107,8 @@ private enum class AppTab(
 ) {
     Home("home", "Главная", Icons.Default.Home),
     Servers("servers", "Серверы", Icons.AutoMirrored.Filled.List),
-    Subscriptions("subs", "Подписки", Icons.Default.Star),
-    Routing("routing", "Маршруты", Icons.Default.Share),
-    More("more", "Ещё", Icons.Default.Settings),
+    Statistics("statistics", "Статистика", Icons.Default.Menu),
+    Settings("settings", "Настройки", Icons.Default.Settings),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -144,6 +143,30 @@ fun QuantumVpnApp(
     initialShortcut: String? = null,
     onShortcutConsumed: () -> Unit = {},
 ) {
+    // V2 owns the complete user-visible shell. Legacy screens remain temporarily
+    // in source only as a rollback aid while the new shell is device-tested.
+    val useV2 = true
+    if (useV2) {
+        QuantumVpnAppV2(
+            state = state,
+            viewModel = profilesViewModel,
+            vpnState = vpnState,
+            selectorGroups = state.homeSelectorGroups.ifEmpty { selectorGroups },
+            sessionStats = sessionStats,
+            diagnostics = diagnostics,
+            onVpnStart = onVpnStart,
+            onVpnStop = onVpnStop,
+            onSelectServer = profilesViewModel::selectActiveServer,
+            onHomeSelected = onHomeSelected,
+            onMeasurePing = onMeasurePing,
+            onMeasureGroup = onMeasureGroup,
+            updateState = updateState,
+            onCheckUpdate = { onCheckUpdate(UpdateChannel.Stable) },
+            onDownloadUpdate = onDownloadUpdate,
+            onInstallUpdate = onInstallUpdate,
+            onCancelUpdate = onCancelUpdate,
+        )
+    } else {
     val context = LocalContext.current
     var selectedTab by rememberSaveable { mutableStateOf(AppTab.Home) }
     var gridMenuOpen by rememberSaveable { mutableStateOf(false) }
@@ -249,11 +272,7 @@ fun QuantumVpnApp(
         }
     }
     fun openTab(tab: AppTab) {
-        if (tab == AppTab.Routing && !com.quantumvpn.policy.ClientFeatureGate.features().routingEditor) {
-            profilesViewModel.showTip("Редактор маршрутов отключён оператором.")
-            return
-        }
-        if (tab == AppTab.More && (state.settings.appLockEnabled || state.settings.biometricLockEnabled)) {
+        if (tab == AppTab.Settings && (state.settings.appLockEnabled || state.settings.biometricLockEnabled)) {
             confirmDevice("QuantumVPN", "Подтвердите доступ к настройкам") {
                 selectedTab = tab
             }
@@ -292,13 +311,13 @@ fun QuantumVpnApp(
                 onShortcutConsumed()
             }
             "dns" -> {
-                selectedTab = AppTab.More
+                selectedTab = AppTab.Settings
                 profilesViewModel.raceDnsLatency()
                 onShortcutConsumed()
             }
             "import" -> {
-                selectedTab = AppTab.Subscriptions
-                profilesViewModel.importClipboard()
+                selectedTab = AppTab.Settings
+                profilesViewModel.installManagedSubscription()
                 onShortcutConsumed()
             }
             else -> onShortcutConsumed()
@@ -310,6 +329,7 @@ fun QuantumVpnApp(
     val pinnedKeys by profilesViewModel.pinnedKeys.collectAsState()
     val quarantinedKeys by profilesViewModel.quarantinedServerKeys.collectAsState()
     val reliabilityScores by profilesViewModel.reliabilityScores.collectAsState()
+    val reliabilityEntries by profilesViewModel.reliabilityEntries.collectAsState()
     val switchHistory by profilesViewModel.switchHistory.collectAsState()
     val lastDisconnectReason by profilesViewModel.lastDisconnectReason.collectAsState()
     val serverNotes by profilesViewModel.serverNotes.collectAsState()
@@ -370,6 +390,7 @@ fun QuantumVpnApp(
                 pingByTag = com.quantumvpn.vpn.SessionPingCache.snapshot(),
                 excludeTag = current,
                 reliabilityByTag = reliabilityScores,
+                mode = state.settings.serverMode,
             ) ?: continue
             profilesViewModel.selectActiveServer(next.groupTag, next.outboundTag)
             guardedStart(profileId)
@@ -498,6 +519,7 @@ fun QuantumVpnApp(
             typeByTag = typeByTag,
             failedType = failedType,
             reliabilityByTag = reliabilityScores,
+            mode = state.settings.serverMode,
         ) ?: candidates.minByOrNull { it.pingMillis }
         if (next == null) {
             profilesViewModel.showTip("Failover: нет другого сервера с пингом.")
@@ -720,7 +742,7 @@ fun QuantumVpnApp(
             onFinished = profilesViewModel::completeOnboarding,
             onImport = {
                 profilesViewModel.completeOnboarding()
-                selectedTab = AppTab.Subscriptions
+                selectedTab = AppTab.Settings
             },
         )
         return
@@ -753,27 +775,19 @@ fun QuantumVpnApp(
     }
 
     Scaffold(
-        topBar = {
-            if (selectedTab != AppTab.Home) {
-                CenterAlignedTopAppBar(
-                    title = { Text(selectedTab.title) },
-                    navigationIcon = {
-                        IconButton(onClick = { selectedTab = AppTab.Home }) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Назад",
-                                tint = CosmicTokens.OnVoid,
-                            )
-                        }
-                    },
-                    colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
-                        containerColor = CosmicTokens.Deep,
-                        titleContentColor = CosmicTokens.OnVoid,
-                    ),
-                )
-            }
+        // Each primary screen owns its heading, matching the four-tab app shell.
+        topBar = {},
+        bottomBar = {
+            QvBottomBar(
+                tabs = AppTab.entries.map { tab ->
+                    QvTabItem(id = tab.id, title = tab.title, icon = tab.icon)
+                },
+                selectedId = selectedTab.id,
+                onSelect = { id ->
+                    AppTab.entries.firstOrNull { it.id == id }?.let(::openTab)
+                },
+            )
         },
-        bottomBar = {},
         snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = if (selectedTab == AppTab.Home) {
             CosmicTokens.Void
@@ -794,7 +808,7 @@ fun QuantumVpnApp(
                     it.id == state.settings.activeProfileId
                 },
                 onSelectProfile = profilesViewModel::selectProfile,
-                onAddProfile = { openTab(AppTab.Subscriptions) },
+                onAddProfile = profilesViewModel::installManagedSubscription,
                 vpnState = vpnState,
                 selectorGroups = selectorGroups,
                 profileSelectorGroups = state.homeSelectorGroups,
@@ -828,11 +842,7 @@ fun QuantumVpnApp(
                 blockNonVpnTraffic = state.settings.blockNonVpnTraffic,
                 routingSummary = routingState.inspection?.summary,
                 onImportClipboard = {
-                    if (!com.quantumvpn.policy.ClientFeatureGate.features().importJson) {
-                        profilesViewModel.showTip("Импорт отключён оператором.")
-                    } else {
-                        profilesViewModel.importClipboard()
-                    }
+                    profilesViewModel.installManagedSubscription()
                 },
                 onRefreshSubscriptions = profilesViewModel::refreshAllSubscriptions,
                 onSpeedTest = profilesViewModel::runSpeedTest,
@@ -858,6 +868,7 @@ fun QuantumVpnApp(
                 showSessionTimer = state.settings.showSessionTimer,
                 hapticsEnabled = state.settings.hapticsEnabled,
                 connectEtaMillis = connectEtaMillis,
+                serverMode = state.settings.serverMode,
                 captivePortal = diagnostics.network?.captivePortal == true,
                 onOpenCaptivePortal = {
                     runCatching {
@@ -925,15 +936,16 @@ fun QuantumVpnApp(
                 onToggleKillSwitch = {
                     profilesViewModel.setBlockNonVpnTraffic(!state.settings.blockNonVpnTraffic)
                 },
-                onOpenDnsSettings = { openTab(AppTab.More) },
+                onOpenDnsSettings = { openTab(AppTab.Settings) },
                 adBlockEnabled = state.settings.adBlockEnabled,
                 adBlockActive = adBlockActive,
                 adBlockRuleCount = adBlockRuleCount,
                 adBlockOnlineDns = state.settings.adBlockOnlineDns,
+                adBlockLevel = state.settings.adBlockLevel,
                 onToggleAdBlock = profilesViewModel::setAdBlockEnabled,
                 onOpenAdBlockSettings = {
                     pendingSettingsDestination = SettingsDestination.AdBlock
-                    openTab(AppTab.More)
+                    openTab(AppTab.Settings)
                 },
                 confirmDisconnect = state.settings.confirmDisconnect,
                 networkTransportLabel = diagnostics.network?.transport?.let { raw ->
@@ -1039,7 +1051,7 @@ fun QuantumVpnApp(
                 vpnState = vpnState,
                 profileStore = profileStore,
                 onSelectProfile = profilesViewModel::selectProfile,
-                onAddProfile = { openTab(AppTab.Subscriptions) },
+                onAddProfile = profilesViewModel::installManagedSubscription,
                 onSelectServer = { groupTag, outboundTag ->
                     guardedSelectServer(groupTag, outboundTag)
                 },
@@ -1066,23 +1078,16 @@ fun QuantumVpnApp(
                 onRecordProbeFailure = profilesViewModel::recordServerProbeFailure,
                 onRecordProbeSuccess = profilesViewModel::recordServerProbeSuccess,
                 reliabilityScores = reliabilityScores,
+                reliabilityEntries = reliabilityEntries,
+                serverMode = state.settings.serverMode,
                 compactActions = true,
             )
-            AppTab.Subscriptions -> ProfilesScreen(
+            AppTab.Statistics -> StatisticsScreen(
                 contentPadding = contentPadding,
-                state = state,
-                viewModel = profilesViewModel,
+                sessionStats = sessionStats,
+                vpnState = vpnState,
             )
-            AppTab.Routing -> RoutingScreen(
-                contentPadding = contentPadding,
-                routingState = routingState,
-                routingViewModel = routingViewModel,
-                timeRoutingEnabled = state.settings.timeRoutingEnabled,
-                showCoachMark = CoachMarkScreen.Routing.name !in state.settings.dismissedCoachMarkScreens &&
-                    !state.settings.coachMarksDismissed,
-                onDismissCoachMark = { profilesViewModel.dismissCoachMark(CoachMarkScreen.Routing) },
-            )
-            AppTab.More -> SettingsScreen(
+            AppTab.Settings -> SettingsScreen(
                 contentPadding = contentPadding,
                 state = state,
                 vpnState = vpnState,
@@ -1131,9 +1136,8 @@ fun QuantumVpnApp(
                 )
                 listOf(
                     AppTab.Servers to "Выбор сервера и пинг",
-                    AppTab.Subscriptions to "Импорт и обновление",
-                    AppTab.Routing to "Маршруты и пресеты",
-                    AppTab.More to "Настройки приложения",
+                    AppTab.Statistics to "Трафик и качество сети",
+                    AppTab.Settings to "Настройки приложения",
                 ).forEach { (tab, subtitle) ->
                     Surface(
                         onClick = {
@@ -1158,6 +1162,7 @@ fun QuantumVpnApp(
                 }
             }
         }
+    }
     }
 }
 
@@ -1345,8 +1350,8 @@ private fun ProfilesScreen(
         item {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 com.quantumvpn.ui.components.QvHubHeader(
-                    title = "Подписки",
-                    subtitle = "Добавить, обновить и сравнить diff",
+                    title = "Подписка QuantumVPN",
+                    subtitle = "Серверы получаются через защищённый API",
                 )
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
@@ -1354,55 +1359,28 @@ private fun ProfilesScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        "Добавить подписку",
+                        "Встроенная конфигурация",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        "Файл, буфер, URL или QR: JSON, WireGuard, ссылки и подписки. " +
-                            "Неизвестные строки пропускаются.",
+                        "Конфигурация и серверы обновляются из защищённого API. " +
+                            "Ручной импорт ссылок, файлов и QR-кодов отключён.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Row(
+                    Button(
+                        onClick = {
+                            if (state.profiles.isEmpty()) {
+                                viewModel.installManagedSubscription()
+                            } else {
+                                viewModel.refreshAllSubscriptions()
+                            }
+                        },
+                        enabled = !state.busy,
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Button(
-                            onClick = {
-                                fileLauncher.launch(
-                                    arrayOf(
-                                        "application/json",
-                                        "application/x-wireguard-profile",
-                                        "application/x-amneziawg-profile",
-                                        "text/plain",
-                                        "application/octet-stream",
-                                    ),
-                                )
-                            },
-                            enabled = !state.busy,
-                            modifier = Modifier.weight(1f),
-                        ) { Text("Файл") }
-                        OutlinedButton(
-                            onClick = viewModel::importClipboard,
-                            enabled = !state.busy,
-                            modifier = Modifier.weight(1f),
-                        ) { Text("Буфер") }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        OutlinedButton(
-                            onClick = { urlDialogOpen = true },
-                            enabled = !state.busy,
-                            modifier = Modifier.weight(1f),
-                        ) { Text("URL") }
-                        OutlinedButton(
-                            onClick = requestQr,
-                            enabled = !state.busy,
-                            modifier = Modifier.weight(1f),
-                        ) { Text("QR") }
+                        Text(if (state.profiles.isEmpty()) "Получить конфигурацию" else "Обновить серверы")
                     }
                 }
                 }
@@ -1434,7 +1412,7 @@ private fun ProfilesScreen(
                         modifier = Modifier.semantics { heading() },
                     )
                     Text(
-                        "Импортируйте настоящий sing-box JSON или поддерживаемую ссылку.",
+                        "Получите встроенную защищённую конфигурацию выше.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }

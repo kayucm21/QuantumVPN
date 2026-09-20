@@ -34,7 +34,10 @@ internal class ServerPingTargetResolver(
         val rootTag = runtimeGroups.primaryGroup()?.tag ?: initialSelections.keys.firstOrNull()
         val selectedTag = rootTag?.let(selections::get)
         if (selectedTag != null) {
-            resolveLeaf(selectedTag, selections)?.let { return it }
+            // A concrete outbound is selected. Resolve it to a server if it is
+            // one; when it is a non-server (direct/urltest/…) there is no server
+            // to ping, so do not fall back to an unrelated configured server.
+            return resolveLeaf(selectedTag, selections)
         }
         return descriptions.values.singleOrNull { it.serverHost != null }?.toTarget()
     }
@@ -82,5 +85,6 @@ internal class ServerPingTargetResolver(
 
     private fun OutboundDescription.toTarget(): ServerPingTarget? = serverHost
         ?.takeIf(String::isNotBlank)
+        ?.takeUnless { com.quantumvpn.olcrtc.OlcrtcProtocol.isLoopbackHost(it) }
         ?.let { ServerPingTarget(outboundTag = tag, hostname = it) }
 }

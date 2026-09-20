@@ -149,6 +149,7 @@ internal fun HomeScreen(
     onRaceDns: () -> Unit = {},
     onBestPingHint: () -> Unit = {},
     connectEtaMillis: Long? = null,
+    serverMode: com.quantumvpn.ui.ServerMode = com.quantumvpn.ui.ServerMode.Standard,
     captivePortal: Boolean = false,
     onOpenCaptivePortal: () -> Unit = {},
     onLiveCheck: () -> Unit = {},
@@ -165,6 +166,8 @@ internal fun HomeScreen(
     adBlockActive: Boolean = false,
     adBlockRuleCount: Int = 0,
     adBlockOnlineDns: Boolean = true,
+    adBlockLevel: com.quantumvpn.hardening.AdBlockLevel =
+        com.quantumvpn.hardening.AdBlockLevel.Maximum,
     onToggleAdBlock: (Boolean) -> Unit = {},
     onOpenAdBlockSettings: () -> Unit = {},
     confirmDisconnect: Boolean = false,
@@ -330,47 +333,7 @@ internal fun HomeScreen(
                 )
             }
         } else if (profiles.isEmpty()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(CosmicTokens.Void)
-                    .padding(20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Start,
-                ) {
-                    IconButton(onClick = onOpenMenu) {
-                        Canvas(modifier = Modifier.size(24.dp)) {
-                            val gap = size.width * 0.16f
-                            val cell = (size.width - gap) / 2f
-                            val radius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
-                            listOf(
-                                Offset(0f, 0f),
-                                Offset(cell + gap, 0f),
-                                Offset(0f, cell + gap),
-                                Offset(cell + gap, cell + gap),
-                            ).forEach { origin ->
-                                drawRoundRect(
-                                    color = Color.White,
-                                    topLeft = origin,
-                                    size = Size(cell, cell),
-                                    cornerRadius = radius,
-                                )
-                            }
-                        }
-                    }
-                }
-                EmptyState(
-                    title = "Добро пожаловать",
-                    body = "Добавьте подписку, чтобы выбрать сервер и защитить трафик.",
-                    actionLabel = "Добавить подписку",
-                    onAction = onAddProfile,
-                    icon = EmptyStateIcons.NoSubscription,
-                    modifier = Modifier.padding(top = 48.dp),
-                )
-            }
+            ManagedWelcomeScreen(onContinue = onAddProfile)
         } else {
             FastVpnHomeContent(
                 vpnState = vpnState,
@@ -429,6 +392,7 @@ internal fun HomeScreen(
                                 groups = displayGroups,
                                 pingByTag = com.quantumvpn.vpn.SessionPingCache.snapshot(),
                                 excludeTag = null,
+                                mode = serverMode,
                             ) ?: group.items
                                 .mapNotNull { item ->
                                     val ping = item.pingMillis ?: return@mapNotNull null
@@ -530,6 +494,7 @@ internal fun HomeScreen(
                 adBlockActive = adBlockActive,
                 adBlockRuleCount = adBlockRuleCount,
                 adBlockOnlineDns = adBlockOnlineDns,
+                adBlockLevel = adBlockLevel,
                 onToggleAdBlock = onToggleAdBlock,
                 onOpenAdBlockSettings = onOpenAdBlockSettings,
                 adBlockedApprox = sessionStats.adBlockedPerMinute,
@@ -652,6 +617,56 @@ internal fun HomeScreen(
                     },
                 )
             }
+        }
+    }
+}
+
+/** First-run screen for the built-in subscription; no manual link import. */
+@Composable
+private fun ManagedWelcomeScreen(onContinue: () -> Unit) {
+    Box(
+        modifier = Modifier.fillMaxSize().background(
+            Brush.verticalGradient(listOf(Color(0xFF061A29), Color(0xFF03101C), Color(0xFF01060B))),
+        ),
+    ) {
+        Globe3DBackdrop(Modifier.fillMaxSize(), pulse = true, reduceMotion = false, countryCode = null)
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = CosmicTokens.StatusGreen.copy(alpha = 0.16f),
+                border = androidx.compose.foundation.BorderStroke(2.dp, CosmicTokens.StatusGreen),
+                modifier = Modifier.size(160.dp),
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(Icons.Default.Lock, contentDescription = null, tint = CosmicTokens.StatusGreen, modifier = Modifier.size(54.dp))
+                    Text("QuantumVPN", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+            }
+            Spacer(Modifier.height(32.dp))
+            Text("Защищённый интернет", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 28.sp, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Встроенное подключение готово. Выберите сервер и включите защиту в один тап.",
+                color = CosmicTokens.OnVoidMuted,
+                fontSize = 16.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(30.dp))
+            Button(
+                onClick = onContinue,
+                colors = ButtonDefaults.buttonColors(containerColor = CosmicTokens.StatusGreen, contentColor = Color(0xFF04120D)),
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+            ) { Text("Продолжить", fontWeight = FontWeight.Bold, fontSize = 17.sp) }
+            Spacer(Modifier.height(12.dp))
+            Text("Без ручного импорта ссылок", color = CosmicTokens.OnVoidMuted, fontSize = 12.sp)
         }
     }
 }
@@ -1228,7 +1243,7 @@ internal fun formatBytes(value: Long): String {
         size /= 1024
         unit++
     }
-    return "%.1f %s".format(size, units[unit])
+    return "%.1f %s".format(java.util.Locale.US, size, units[unit])
 }
 
 private fun VpnConnectionState.statusSubtitle(): String = when (this) {

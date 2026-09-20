@@ -50,6 +50,7 @@ import com.quantumvpn.updates.PreferFtpThenGitHubSource
 import com.quantumvpn.vpn.AndroidPackageAvailability
 import com.quantumvpn.vpn.AppCatalog
 import com.quantumvpn.vpn.AppSelectionStore
+import com.quantumvpn.vpn.GameModeStore
 import com.quantumvpn.vpn.AppsViewModel
 import com.quantumvpn.vpn.NamedAppSetsStore
 import com.quantumvpn.vpn.ServerNotesStore
@@ -102,8 +103,12 @@ class AppContainer(
     val happRoutingProfileStore = HappRoutingProfileStore(
         File(appContext.noBackupFilesDir, "happ-routing"),
     )
+    val olcrtcEngineStore = com.quantumvpn.olcrtc.OlcrtcEngineStore(
+        File(appContext.noBackupFilesDir, "olcrtc-engines"),
+    )
     val bootstrapCache = BootstrapCache(File(appContext.noBackupFilesDir, "network"))
     val appSelectionStore = AppSelectionStore(appContext)
+    val gameModeStore = GameModeStore(appContext)
     val namedAppSetsStore = NamedAppSetsStore(appContext)
     val appCatalog = AppCatalog(appContext)
     val vpnAppScopePreflight = VpnAppScopePreflight(
@@ -147,7 +152,7 @@ class AppContainer(
         currentVersionName = BuildConfig.VERSION_NAME,
         currentVersionCode = BuildConfig.VERSION_CODE.toLong(),
         source = PanelFirstUpdateSource(panelUpdateSource, compositeSource),
-        http = FtpAwareHttpClient(ftpUpdateSource),
+        http = com.quantumvpn.updates.PanelHttpsClient(),
         vpnFallback = AppUpdateVpnFallback(appContext, uiSettingsStore, vpnController),
         installIntentFactory = AndroidUpdateInstallIntentFactory(appContext),
     )
@@ -219,6 +224,7 @@ class AppContainer(
             bootstrapCache,
             ruleSetAssetManager,
             happRoutingProfileStore,
+            olcrtcEngineStore,
             recentServersStore,
             favoriteServersStore,
             pinnedServersStore,
@@ -241,7 +247,13 @@ class AppContainer(
         )
 
     val appsViewModelFactory: AppsViewModel.Factory
-        get() = AppsViewModel.Factory(appSelectionStore, appCatalog, namedAppSetsStore)
+        get() = AppsViewModel.Factory(
+            appSelectionStore,
+            appCatalog,
+            namedAppSetsStore,
+            gameModeStore,
+            vpnController,
+        )
 
     val routingViewModelFactory: RoutingViewModel.Factory
         get() = RoutingViewModel.Factory(

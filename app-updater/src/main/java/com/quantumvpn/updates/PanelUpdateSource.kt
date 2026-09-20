@@ -19,7 +19,9 @@ class PanelUpdateSource(
 ) : UpdateReleaseSource {
 
     override fun latest(channel: UpdateChannel): UpdateCandidate {
-        val endpoint = "${baseUrl.trimEnd('/')}/api/app/version"
+        val abi = supportedAbis.firstOrNull { it in setOf("arm64-v8a", "armeabi-v7a", "x86_64") }
+            ?: throw UpdateException("Архитектура устройства не поддерживается.")
+        val endpoint = "${baseUrl.trimEnd('/')}/api/app/version?abi=$abi"
         val version = try {
             PanelVersionJson.parse(http.readText(endpoint, MAX_VERSION_BYTES))
         } catch (error: UpdateException) {
@@ -32,11 +34,11 @@ class PanelUpdateSource(
         }
         val fileName = version.url.substringAfterLast('/').takeIf { it.endsWith(".apk") } ?: "update.apk"
         val size = try {
-            (http as? PanelHttpsClient)?.headSize(version.url) ?: 0L
+            version.size.takeIf { it > 0 } ?: (http as? PanelHttpsClient)?.headSize(version.url) ?: 0L
         } catch (_: Throwable) {
             0L
         }
-        if (size <= 0) throw UpdateException("Панель не вернула размер APK.")
+        if (size <= 0 || size > UpdateJson.MAX_APK_BYTES) throw UpdateException("Панель вернула некорректный размер APK.")
 
         val release = GitHubRelease(
             tag = "v${version.version}",

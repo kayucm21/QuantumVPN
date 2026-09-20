@@ -212,7 +212,12 @@ object ImportParser {
         if (head.contains("proxies:") && (head.contains("proxy-groups:") || head.contains("rules:"))) {
             return true
         }
-        return head.contains("mixed-port:") && head.contains("proxies:")
+        if (head.contains("mixed-port:") && head.contains("proxies:")) {
+            return true
+        }
+        // Minimal Clash YAML that only carries a top-level `proxies:` list
+        // (no proxy-groups/rules/mixed-port) is still a valid Clash import.
+        return head.contains("proxies:")
     }
 
     private fun decodeSubscriptionIfNeeded(text: String): String {
@@ -252,7 +257,7 @@ object ImportParser {
 
     private const val SUPPORTED_MESSAGE =
         "Поддерживаются JSON, WireGuard/AWG .conf, Clash YAML (только proxies), " +
-            "VLESS, VMess, Trojan, Shadowsocks, Hysteria, Hysteria2 и TUIC."
+            "VLESS, VMess, Trojan, Shadowsocks, Hysteria, Hysteria2, TUIC и olcrtc."
     private val SUPPORTED_SCHEMES = listOf(
         "vless://",
         "vmess://",
@@ -262,9 +267,11 @@ object ImportParser {
         "hysteria2://",
         "hy2://",
         "tuic://",
+        com.quantumvpn.olcrtc.OlcrtcSettings.SCHEME_OLCRTC,
+        com.quantumvpn.olcrtc.OlcrtcSettings.SCHEME_OLCONNECT,
     )
     private val EMBEDDED_LINK = Regex(
-        """(?i)\b(?:vless|vmess|trojan|ss|hysteria2?|hy2|tuic)://[^\s<>"']+""",
+        """(?i)\b(?:vless|vmess|trojan|ss|hysteria2?|hy2|tuic|olcrtc|olconnect)://[^\s<>"']+""",
     )
     private val HTTP_URL = Regex(
         """(?i)https?://[^\s<>"'）】\]]+""",
@@ -282,6 +289,10 @@ object ShareLinkParser {
             link.startsWith("hysteria2://", ignoreCase = true) ||
                 link.startsWith("hy2://", ignoreCase = true) -> parseHysteria2(link, index)
             link.startsWith("tuic://", ignoreCase = true) -> parseTuic(link, index)
+            com.quantumvpn.olcrtc.OlcrtcSettings.SCHEME_OLCRTC
+                .let { scheme -> link.startsWith(scheme, ignoreCase = true) } ||
+                com.quantumvpn.olcrtc.OlcrtcSettings.SCHEME_OLCONNECT
+                    .let { scheme -> link.startsWith(scheme, ignoreCase = true) } -> parseOlcrtc(link, index)
             else -> throw ImportException("Неподдерживаемый тип ссылки.")
         }
     } catch (error: ImportException) {
@@ -477,6 +488,117 @@ object ShareLinkParser {
                 alpn = query.csv("alpn"),
             ),
         )
+    }
+
+    /**
+     * New-style OlConnect olcRTC link:
+     *   olcrtc://<provider>@r/<roomId>?k=<keyHex>&t=<transport>&core=<core>
+     *             &c=<client_id>&d=<dns>&rp=<room_password>&f=<vp8_fps>&b=<vp8_batch>&ka=<keepalive>
+     * (scheme may be "olconnect://"; "r" is a placeholder host).
+     */
+    private fun parseOlcrtc(link: String, index: Int): ManagedServer {
+        val uri = URI(link)
+        val provider = decode(uri.rawUserInfo.orEmpty())
+            .takeIf(String::isNotBlank)
+            ?: throw ImportException("В olcrtc отсутствует провайдер (jitsi/telemost/wbstream).")
+        if (provider.lowercase() !in com.quantumvpn.olcrtc.OlcrtcSettings.PROVIDERS) {
+            throw ImportException("olcrtc провайдер '$provider' не поддерживается.")
+        }
+        val roomFromPath = uri.rawPath
+            ?.removePrefix("/")
+            ?.takeIf { it.isNotBlank() && it != "/" }
+            ?.let { decode(it) }
+        val roomId = roomFromPath
+            ?: uri.host?.takeUnless { it.equals("r", ignoreCase = true) }?.let { decode(it) }
+            ?: throw ImportException("В olcrtc отсутствует roomId.")
+
+        val q = query(uri)
+        val allowed = setOf("k", "key", "t", "transport", "core", "c", "client_id", "d", "dns",
+            "rp", "room_password", "f", "vp8_fps", "b", "vp8_batch", "ka", "keepalive", "compat")
+        val unknown = q.keys.filter { it.lowercase() !in allowed }
+        if (unknown.isNotEmpty()) {
+            throw ImportException("olcrtc: неизвестные параметры ${unknown.joinToString()}.")
+        }
+        fun Map<String, String>.value(key: String, alias: String): String? = this[key] ?: this[alias]
+
+        val keyHex = q.value("k", "key")
+            ?.takeIf(String::isNotBlank)
+            ?.lowercase()
+            ?: throw ImportException("В olcrtc отсутствует ключ (k).")
+        if (!Regex("^[0-9a-f]{${com.quantumvpn.olcrtc.OlcrtcSettings.KEY_HEX_LENGTH}}$").matches(keyHex)) {
+            throw ImportException("olcrtc ключ должен быть ${com.quantumvpn.olcrtc.OlcrtcSettings.KEY_HEX_LENGTH} hex-символа.")
+        }
+        val transport = q.value("t", "transport")?.lowercase() ?: defaultTransport(provider)
+        val compatibility = q.value("core", "compat")?.lowercase() ?: "current"
+        if (compatibility !in setOf("current", "legacy")) {
+            throw ImportException("olcrtc core '$compatibility' не поддерживается (current/legacy).")
+        }
+        val clientId = q.value("c", "client_id")?.takeIf(String::isNotBlank)
+            ?: stableClientId(provider, roomId, keyHex)
+        val dns = q.value("d", "dns")?.takeIf(String::isNotBlank)
+        val roomPassword = q.value("rp", "room_password")?.takeIf(String::isNotBlank)
+        val vp8Fps = q.value("f", "vp8_fps")?.toIntOrNull()
+            ?: com.quantumvpn.olcrtc.OlcrtcSettings.DEFAULT_VP8_FPS
+        val vp8Batch = q.value("b", "vp8_batch")?.toIntOrNull()
+            ?: com.quantumvpn.olcrtc.OlcrtcSettings.DEFAULT_VP8_BATCH
+        val keepalive = q.value("ka", "keepalive")?.toIntOrNull()
+            ?: com.quantumvpn.olcrtc.OlcrtcSettings.DEFAULT_KEEPALIVE_SECONDS
+
+        val identity = ProtocolOutboundBuilders.olcrtcIdentity(
+            provider = provider.lowercase(),
+            transport = transport,
+            compatibilityMode = compatibility,
+            roomId = roomId,
+            clientId = clientId,
+            keyHex = keyHex,
+            dns = dns,
+            roomPassword = roomPassword,
+        )
+        val settings = try {
+            com.quantumvpn.olcrtc.OlcrtcSettings(
+                provider = provider.lowercase(),
+                transport = transport,
+                compatibilityMode = compatibility,
+                roomId = roomId,
+                clientId = clientId,
+                keyHex = keyHex,
+                dnsServer = dns,
+                roomPassword = roomPassword,
+                vp8Fps = vp8Fps,
+                vp8BatchSize = vp8Batch,
+                keepaliveSeconds = keepalive,
+                udpEnabled = true,
+                socksPort = com.quantumvpn.olcrtc.OlcrtcSettings
+                    .deterministicSocksPort(identity),
+            )
+        } catch (error: IllegalArgumentException) {
+            throw ImportException(error.message ?: "Некорректные параметры olcrtc.")
+        }
+        return ProtocolOutboundBuilders.olcrtc(
+            displayName = displayName(uri, "olcrtc ${index + 1}"),
+            settings = settings,
+        )
+    }
+
+    private fun defaultTransport(provider: String): String {
+        val normalized = provider.lowercase()
+        if (normalized == "jitsi") return "datachannel"
+        if (normalized == "telemost" || normalized == "wbstream") return "vp8channel"
+        throw ImportException("olcrtc провайдер '$provider' не поддерживается.")
+    }
+
+    private fun stableClientId(provider: String, roomId: String, keyHex: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("$provider|$roomId|$keyHex".toByteArray(Charsets.UTF_8))
+        val data = digest.copyOf(16)
+        data[6] = (data[6].toInt() and 0x0f or 0x40).toByte()
+        data[8] = (data[8].toInt() and 0x3f or 0x80).toByte()
+        val hex = data.joinToString("") { "%02x".format(it) }
+        return buildString {
+            append(hex, 0, 8).append('-').append(hex, 8, 12).append('-')
+            append(hex, 12, 16).append('-').append(hex, 16, 20).append('-')
+            append(hex, 20, 32)
+        }
     }
 
     private fun decodeCredentials(value: String): String {

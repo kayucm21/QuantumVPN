@@ -1,0 +1,145 @@
+{
+	https_port 9443
+	default_bind 127.0.0.1
+	servers {
+		# Только HTTP/1.1: этот Caddy отдаёт лишь панель/подписку/заглушку, h2 тут
+		# ничего не ускоряет, но ломает WebSocket дашборда панели — браузер по h2
+		# делает WS через extended CONNECT, и в связке Reality-steal + proxy_protocol
+		# апгрейд рвётся. h1 → стандартный WS-upgrade сквозь весь путь.
+		protocols h1
+		listener_wrappers {
+			proxy_protocol {
+				allow 127.0.0.1/32
+			}
+			tls
+		}
+	}
+	auto_https disable_redirects
+	admin off
+	log {
+		output stderr
+		level ERROR
+	}
+}
+
+http://tepacom.o190.com {
+	bind 0.0.0.0
+	redir https://tepacom.o190.com{uri} permanent
+}
+
+https://tepacom.o190.com {
+        # QuantumVPN operator panel and client-control API.
+        @operator path /operator /operator/* /api/client/policy /api/client/diagnostic /api/v1/subscription
+        handle @operator {
+                reverse_proxy 127.0.0.1:8765 {
+                        # Pass the actual visitor address to diagnostics instead of
+                        # recording Caddy's loopback address.
+                        header_up X-Forwarded-For {remote_host}
+                        header_up X-Real-IP {remote_host}
+                }
+        }
+
+        # Stable app endpoint; the upstream subscription token stays on this host.
+        @appSubscription path /api/v1/subscription
+        handle @appSubscription {
+                header {
+                        Cache-Control "no-store"
+                        Pragma "no-cache"
+                        X-Content-Type-Options "nosniff"
+                        -Server
+                }
+                rewrite * /subs/5l9yiov85mxivfhx
+                reverse_proxy https://127.0.0.1:60001 {
+                        transport http {
+                                tls_insecure_skip_verify
+                                versions 1.1
+                        }
+                }
+        }
+
+	# Сертификат через ACME. Основной CA — ZeroSSL (мягче к валидации, отдельные лимиты),
+	# фолбэк — Let's Encrypt. EAB для ZeroSSL Caddy генерирует сам по email (ключ не нужен).
+	# Порядок issuer'ов = порядок попыток; чтобы сделать основным LE — поменяй блоки местами.
+	tls {
+		issuer acme {
+			dir https://acme.zerossl.com/v2/DV90
+			email admin@tepacom.o190.com
+		}
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			email admin@tepacom.o190.com
+		}
+	}
+	# Панель 3x-ui по секретному пути → локальный HTTPS-бэкенд x-ui.
+	# x-ui отдаёт HTTPS (web/subCertFile зашиты ради кнопки «взять сертификат панели»),
+	# поэтому бэкенд https. tls_insecure_skip_verify — проверка имени/срока на loopback
+	# не нужна (публичный TLS даёт сам Caddy), зато нет 502 после продления сертификата.
+	# versions 1.1 — ОБЯЗАТЕЛЬНО: WebSocket дашборда панели апгрейдится по HTTP/1.1,
+	# а к https-бэкенду Caddy иначе согласует h2 по ALPN и WS-апгрейд ломается.
+	@panel path /urdxxfy4 /urdxxfy4/*
+	handle @panel {
+		reverse_proxy https://127.0.0.1:60000 {
+			# WebSocket дашборда панели: x-ui принимает WS, только если Origin совпадает
+			# с его собственным хостом. За прокси Origin = публичный домен → x-ui отдаёт
+			# 403. Переписываем Origin на loopback-адрес бэкенда — апгрейд проходит.
+			# Роутинг панели по пути (webBasePath), не по Host, так что это безопасно.
+			header_up Origin https://127.0.0.1:60000
+			transport http {
+				tls_insecure_skip_verify
+				versions 1.1
+			}
+		}
+	}
+	# Подписка → локальный HTTPS-бэкенд x-ui
+	@sub path /subs /subs/*
+	handle @sub {
+		reverse_proxy https://127.0.0.1:60001 {
+			transport http {
+				tls_insecure_skip_verify
+				versions 1.1
+			}
+		}
+	}
+	# Trojan-WS по секретному пути → localhost-инбаунд x-ui (ws без TLS).
+	# Caddy сам апгрейдит WebSocket; TLS здесь уже терминирован Caddy.
+	@trojan path /qdgvffbmd1
+	handle @trojan {
+		reverse_proxy 127.0.0.1:8443
+	}
+	# Signed debug APKs published by the operator. Keep this handler above the
+	# decoy-site fallback so APK paths are never rewritten to index.html.
+	@downloads path /downloads/*
+	handle @downloads {
+		root * /var/www/quantumvpn
+		header {
+			Content-Disposition "attachment"
+			X-Content-Type-Options "nosniff"
+		}
+		file_server
+	}
+	# Всё остальное → сайт-заглушка (selfsteal)
+	handle {
+		encode gzip
+		header {
+			-Server
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "SAMEORIGIN"
+			X-XSS-Protection "1; mode=block"
+		}
+		root * /var/www/html
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+:9443 {
+	tls internal
+	respond 204
+	log off
+}
+
+:80 {
+	bind 0.0.0.0
+	respond 204
+	log off
+}

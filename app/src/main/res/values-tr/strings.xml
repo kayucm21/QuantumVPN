@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QuantumVPN</string>
+    <string name="widget_description">Hızlı QuantumVPN bağlantısı</string>
+    <string name="widget_title">QuantumVPN</string>
+    <string name="widget_wide_description">Trafik, bağlantı ve sunucu değiştirme</string>
+    <string name="widget_wide_title">QuantumVPN · geniş</string>
+    <string name="shortcut_connect_short">Bağlan</string>
+    <string name="shortcut_connect_long">VPN\'e bağlan</string>
+    <string name="shortcut_disconnect_short">Bağlantıyı kes</string>
+    <string name="shortcut_disconnect_long">VPN bağlantısını kes</string>
+    <string name="shortcut_ping_short">Sunucular</string>
+    <string name="shortcut_ping_long">Sunucuları ve pingi aç</string>
+    <string name="shortcut_import_short">İçe aktar</string>
+    <string name="shortcut_import_long">Profili içe aktar</string>
+    <string name="shortcut_speedtest_short">Speedtest</string>
+    <string name="shortcut_speedtest_long">Speedtest çalıştır</string>
+    <string name="status_protected">Korumalı</string>
+    <string name="status_unprotected">Korumasız</string>
+    <string name="action_add_subscription">Abonelik ekle</string>
+    <string name="network_map">Ağ haritası</string>
+    <string name="choose_server">Bir sunucu seçin</string>
+    <string name="speed_test">Hız testi</string>
+    <string name="why_slow">Neden yavaş</string>
+    <string name="event_journal">Olay günlüğü</string>
+    <string name="trusted_wifi">Güvenilir Wi‑Fi</string>
+    <string name="family_protect">Aile filtresi</string>
+    <string name="best_ping">En iyi ping</string>
+    <string name="same_region">Aynı bölge</string>
+    <string name="tab_home">Ana sayfa</string>
+    <string name="tab_servers">Sunucular</string>
+    <string name="tab_routing">Yönlendirme</string>
+    <string name="tab_settings">Ayarlar</string>
+    <string name="undo">Geri al</string>
+    <string name="subscription_expiring">Abonelik süresi doluyor</string>
+    <string name="dns_preview">DNS preview</string>
+    <string name="tips_carousel">İpuçları</string>
+    <string name="reliability_uptime">Uptime</string>
+    <string name="work_schedule">İş bağlantısı</string>
+    <string name="skip_roaming">Dolaşımda otomatik bağlanma</string>
+    <string name="mobile_autoconnect">Mobilde otomatik bağlan</string>
+    <string name="time_routing">Zaman tabanlı yönlendirme</string>
+    <string name="recommended_server">Önerilen</string>
+    <string name="subscription_diff">Abonelik değişiklikleri</string>
+</resources>

@@ -7,6 +7,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -202,8 +203,16 @@ fun QvBottomBar(
     onSelect: (String) -> Unit,
 ) {
     NavigationBar(
-        containerColor = CosmicTokens.Deep,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                width = 1.dp,
+                color = CosmicTokens.Hairline,
+                shape = RoundedCornerShape(topStart = CosmicTokens.Radius.lg, topEnd = CosmicTokens.Radius.lg),
+            ),
+        containerColor = CosmicTokens.Deep.copy(alpha = 0.98f),
         contentColor = CosmicTokens.OnVoid,
+        tonalElevation = 0.dp,
     ) {
         tabs.forEach { tab ->
             NavigationBarItem(
@@ -214,7 +223,7 @@ fun QvBottomBar(
                 colors = NavigationBarItemDefaults.colors(
                     selectedIconColor = CosmicTokens.Orbit,
                     selectedTextColor = CosmicTokens.Orbit,
-                    indicatorColor = CosmicTokens.Panel,
+                    indicatorColor = CosmicTokens.NeonDim.copy(alpha = 0.7f),
                     unselectedIconColor = CosmicTokens.OnVoidMuted,
                     unselectedTextColor = CosmicTokens.OnVoidMuted,
                 ),

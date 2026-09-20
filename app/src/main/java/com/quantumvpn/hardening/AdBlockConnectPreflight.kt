@@ -34,7 +34,9 @@ object AdBlockConnectPreflight {
     ): Result {
         val before = settingsStore.settings.first()
         settingsStore.setAdBlockEnabled(true)
-        settingsStore.setAdBlockLevel(AdBlockLevel.Maximum)
+        // Standard + filtered DNS protects the whole TUN session without the
+        // compatibility regressions of the most aggressive domain lists.
+        settingsStore.setAdBlockLevel(AdBlockLevel.Standard)
         settingsStore.setAdBlockOnlineDns(true)
         settingsStore.setAdBlockTrackersOnly(false)
         settingsStore.setSafeModeConnect(false)
@@ -50,7 +52,7 @@ object AdBlockConnectPreflight {
         }
 
         val tip = buildString {
-            append("Ad-block: Максимум + AdGuard DoH · Safe mode выкл.")
+            append("Ad-block: Стандарт + AdGuard DoH · Safe mode выкл.")
             when {
                 fixed -> append(" · Private DNS → Автоматически")
                 opened -> append(" · Откройте Private DNS: Автоматически или Выкл.")
@@ -62,12 +64,12 @@ object AdBlockConnectPreflight {
 
         return Result(
             settingsApplied = !before.adBlockEnabled ||
-                before.adBlockLevel != AdBlockLevel.Maximum ||
+                before.adBlockLevel != AdBlockLevel.Standard ||
                 !before.adBlockOnlineDns ||
                 before.safeModeConnect ||
                 before.adBlockTrackersOnly,
             adBlockEnabled = true,
-            level = AdBlockLevel.Maximum,
+            level = AdBlockLevel.Standard,
             onlineDns = true,
             safeModeOff = true,
             privateDnsMode = dnsMode,

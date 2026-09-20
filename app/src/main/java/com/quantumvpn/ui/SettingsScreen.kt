@@ -70,6 +70,7 @@ import com.quantumvpn.diagnostics.DiagnosticState
 import com.quantumvpn.diagnostics.DiagnosticStageStatus
 import com.quantumvpn.diagnostics.DiagnosticStopOutcome
 import com.quantumvpn.diagnostics.LeakChecker
+import com.quantumvpn.diagnostics.MemoryUsageProbe
 import com.quantumvpn.diagnostics.WhySlowDiagnoser
 import com.quantumvpn.hardening.TunMtuMode
 import com.quantumvpn.profiles.ProfilesUiState
@@ -758,6 +759,8 @@ private fun DiagnosticsSettings(
     var overlayExpanded by rememberSaveable { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     var exportError by remember { mutableStateOf<String?>(null) }
+    var sendingReport by remember { mutableStateOf(false) }
+    var reportStatus by remember { mutableStateOf<String?>(null) }
 
     SettingsSubpage(contentPadding, "Диагностика", onBack) {
         Column(
@@ -815,6 +818,33 @@ private fun DiagnosticsSettings(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Добровольный отчёт об ошибке", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Отправка происходит только после нажатия кнопки. Передаются модель устройства, версия приложения, последняя ошибка и до 80 очищенных строк журнала. Подписки, ключи и ссылки удаляются.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    enabled = !sendingReport,
+                    onClick = {
+                        scope.launch {
+                            sendingReport = true
+                            reportStatus = null
+                            val result = com.quantumvpn.diagnostics.VoluntaryDiagnosticReporter(context).send(diagnostics)
+                            reportStatus = if (result.isSuccess) "Отчёт отправлен." else "Не удалось отправить отчёт."
+                            sendingReport = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().testTag("send-voluntary-diagnostic"),
+                ) { Text(if (sendingReport) "Отправка…" else "Отправить отчёт") }
+                reportStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
+        }
         val app = context.applicationContext as? QuantumVpnApplication
         val exitEvents by (app?.container?.exitIpTimelineStore?.events
             ?: kotlinx.coroutines.flow.flowOf(emptyList())).collectAsState(initial = emptyList())
@@ -1243,12 +1273,57 @@ private fun DiagnosticsSettings(
                 }
             }
         }
+        MemoryUsageCard()
         OutlinedButton(onClick = onClearDnsCache) { Text("Очистить DNS-кэш и перезапустить core") }
         Text(
             "Runtime-лог на диск не пишется; временный export удаляется при следующем запуске.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        }
+    }
+}
+
+@Composable
+private fun MemoryUsageCard() {
+    val context = LocalContext.current
+    val snapshot = remember { MemoryUsageProbe.snapshot(context) }
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Память", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Процесс: heap ${snapshot.heapUsagePercent}% · PSS ${snapshot.formatMb(snapshot.totalPssMb)}",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            LinearProgressIndicator(
+                progress = { snapshot.heapUsagePercent / 100f },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "Java heap: ${snapshot.formatMb(snapshot.heapUsedMb)} / ${snapshot.formatMb(snapshot.heapMaxMb)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Native heap: ${snapshot.formatMb(snapshot.nativeHeapUsedMb)} / ${snapshot.formatMb(snapshot.nativeHeapMaxMb)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Устройство: ${snapshot.deviceUsagePercent}% занято · свободно ${snapshot.formatMb(snapshot.deviceAvailMb)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (snapshot.lowMemory) {
+                Text(
+                    "⚠ Система в состоянии нехватки памяти (low memory).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
     }
 }

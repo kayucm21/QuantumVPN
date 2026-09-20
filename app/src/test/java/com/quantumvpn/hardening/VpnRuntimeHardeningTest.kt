@@ -22,8 +22,10 @@ class VpnRuntimeHardeningTest {
             """.trimIndent(),
         )
 
-        val result = VpnRuntimeHardening.apply(source, VpnHidingOptions())
-            as RuntimeHardeningResult.Ready
+        val result = VpnRuntimeHardening.apply(
+            source,
+            VpnHidingOptions(tunMtuMode = TunMtuMode.Normalize1500),
+        ) as RuntimeHardeningResult.Ready
         val experimental = result.root["experimental"] as JsonObject
         val clash = experimental["clash_api"] as JsonObject
         val tun = (result.root["inbounds"] as JsonArray).single() as JsonObject
@@ -132,8 +134,10 @@ class VpnRuntimeHardeningTest {
             """.trimIndent(),
         )
 
-        val result = VpnRuntimeHardening.apply(source, VpnHidingOptions())
-            as RuntimeHardeningResult.Ready
+        val result = VpnRuntimeHardening.apply(
+            source,
+            VpnHidingOptions(tunMtuMode = TunMtuMode.Normalize1500),
+        ) as RuntimeHardeningResult.Ready
         val tun = (result.root["inbounds"] as JsonArray).single() as JsonObject
 
         assertEquals("1500", (tun["mtu"] as JsonPrimitive).content)

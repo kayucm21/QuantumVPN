@@ -33,6 +33,7 @@ import com.quantumvpn.diagnostics.SecretRedactor
 import com.quantumvpn.config.JsonConfig
 import com.quantumvpn.config.RuntimeConfigResult
 import com.quantumvpn.hardening.CarrierBypassHardening
+import com.quantumvpn.olcrtc.OlcrtcProtocol
 import com.quantumvpn.hardening.BypassPreset
 import com.quantumvpn.hardening.resolveBypassOptions
 import com.quantumvpn.hardening.VpnHidingOptions
@@ -54,6 +55,9 @@ import io.nekohasekai.libbox.OverrideOptions
 import io.nekohasekai.libbox.StatusMessage
 import io.nekohasekai.libbox.StringIterator
 import io.nekohasekai.libbox.SystemProxyStatus
+import mobilecore.LogWriter
+import mobilecore.Mobilecore
+import mobilecore.SocketProtector
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -87,6 +91,11 @@ private data class UnderlyingPolicyKey(
     val strictPrivateDns: Boolean,
     val strictPrivateDnsServerName: String?,
     val strictPrivateDnsReady: Boolean,
+)
+
+private data class OlcrtcEngineSession(
+    val profileId: String,
+    val tag: String,
 )
 
 private fun UnderlyingNetworkState.policyKey() = UnderlyingPolicyKey(
@@ -173,6 +182,9 @@ class QuantumVpnService : VpnService() {
     private var networkRestartJob: Job? = null
     @Volatile
     private var muteNotificationTrafficDetail: Boolean = false
+    private val olcrtcEngineLock = Mutex()
+    @Volatile
+    private var activeOlcrtcEngine: OlcrtcEngineSession? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -457,8 +469,9 @@ class QuantumVpnService : VpnService() {
             val ruleCount = com.quantumvpn.hardening.AdBlockHardening.ruleCount(adBlockOptions)
             val online = if (adBlockOptions.useOnlineFilterDns) " + AdGuard DoH онлайн" else ""
             controller.publishDiagnosticWarning(
-                "Блокировка рекламы: DNS reject + перехват DNS + маршрут ($ruleCount правил$online). " +
-                    "Работает для всех приложений в VPN.",
+                "Блокировка рекламы: DNS reject + перехват DNS + " +
+                    "весь DNS → ${com.quantumvpn.hardening.AdBlockHardening.ONLINE_FILTER_HOST} " +
+                    "($ruleCount правил$online). Сайты и приложения в VPN.",
             )
         } else if (uiSettings.adBlockEnabled && !panelAllowsAdblock) {
             controller.publishDiagnosticWarning(
@@ -473,8 +486,23 @@ class QuantumVpnService : VpnService() {
         val selection = container.appSelectionStore.selection.first()
         val selectedPackages = selection.allowedPackages
         val scopeMode = selection.mode
+        // Игровой режим: выбранные игры допускаются в TUN и уходят в direct.
+        // В Include-режиме без допуска правило sing-box мёртвое, поэтому
+        // игры добавляем в TUN-выборку до dry-run и адаптера (ассёрты сходятся).
+        val gameMode = container.gameModeStore.snapshot.first()
+        val gamePackages = if (gameMode.enabled) {
+            gameMode.packages.filter { it != packageName }.toSet()
+        } else {
+            emptySet()
+        }
+        val tunSelected =
+            if (gamePackages.isNotEmpty() && scopeMode == AppScopeMode.Include) {
+                selectedPackages + gamePackages
+            } else {
+                selectedPackages
+            }
         val preflight = container.vpnAppScopePreflight.apply(
-            selectedPackages = selectedPackages,
+            selectedPackages = tunSelected,
             mode = scopeMode,
             allowedSink = AllowedApplicationSink { },
             disallowedSink = DisallowedApplicationSink { },
@@ -561,11 +589,13 @@ class QuantumVpnService : VpnService() {
                         healthCheckPackageName = packageName,
                         updaterPackageName = packageName.takeIf { updaterRouting },
                         customDohUrl = uiSettings.customDohUrl.takeIf { it.isNotBlank() },
+                        customDotUrl = uiSettings.customDotUrl.takeIf { it.isNotBlank() },
                         blockedPackageNames = if (scopeMode == AppScopeMode.Block) {
-                            effectivePackages.filter { it != packageName }
+                            effectivePackages.filter { it != packageName } - gamePackages
                         } else {
                             emptyList()
                         },
+                        gameModePackages = gamePackages.toList(),
                     ),
                 )
             ) {
@@ -656,6 +686,9 @@ class QuantumVpnService : VpnService() {
             updaterRouting = updaterRouting,
             controller = controller,
             onTrafficRate = ::updateTrafficNotification,
+            onOlcrtcStop = {
+                runBlocking { olcrtcEngineLock.withLock { stopOlcrtcEngineUnlocked() } }
+            },
         )
         if (!registerPendingSession(resources, token)) {
             resources.close()
@@ -664,7 +697,7 @@ class QuantumVpnService : VpnService() {
         try {
             resources.attachPlatform(AndroidPlatformAdapter(
                 service = this,
-                selectedPackages = selectedPackages,
+                selectedPackages = tunSelected,
                 scopeMode = scopeMode,
                 expectedPackages = effectivePackages,
                 scopePreflight = container.vpnAppScopePreflight,
@@ -690,6 +723,10 @@ class QuantumVpnService : VpnService() {
             )
             resources.markLibboxStarted()
             check(token == controller.currentGeneration()) { "Запуск отменён." }
+
+            controller.startConnectionDiagnosticStage(token, "olcrtc_engine", "Подготовка движка olcrtc")
+            startOlcrtcEngine(profileId, profile.json)
+            controller.finishConnectionDiagnosticStage(token, "olcrtc_engine", DiagnosticStageStatus.Success)
 
             // Subscribe before any startup probe. The command server retains a bounded
             // backlog, so handshake, transport and DNS failures remain available even
@@ -746,6 +783,7 @@ class QuantumVpnService : VpnService() {
             if (!controller.diagnosticsVisible.value) resources.closeLogClient(controller)
             startConnectionIdentityProbe(resources)
             startTrafficWatchdog(resources, token, profileId)
+            startPeriodicServerPing(resources)
             scheduleDeferredHealthCheck(resources, dnsMode, token)
         } catch (error: Throwable) {
             discardSession(resources)
@@ -1217,6 +1255,22 @@ class QuantumVpnService : VpnService() {
         })
     }
 
+    /**
+     * Refresh server latency while VPN is active.  The first pass is delayed so
+     * it never competes with tunnel startup; later passes are intentionally
+     * sparse to avoid battery, CPU, or radio churn.
+     */
+    private fun startPeriodicServerPing(session: ActiveSession) {
+        session.replacePingJob(serviceScope.launch {
+            delay(INITIAL_GROUP_PING_DELAY_MILLIS)
+            while (activeSession === session && session.generation == controller.currentGeneration()) {
+                val group = controller.selectorGroups.value.primaryGroup()?.tag
+                if (!group.isNullOrBlank()) requestGroupPing(session.profileId, group, startId = 0)
+                delay(PERIODIC_GROUP_PING_INTERVAL_MILLIS)
+            }
+        })
+    }
+
     private suspend fun measureServerPing(
         session: ActiveSession,
         target: ServerPingTarget,
@@ -1235,6 +1289,7 @@ class QuantumVpnService : VpnService() {
         val candidate = ConfigAnalyzer.selectServer(stored.json, groupTag, outboundTag)
         withContext(Dispatchers.Default) { Libbox.checkConfig(candidate) }
         container.profileStore.update(session.profileId, candidate)
+        startOlcrtcEngine(session.profileId, candidate)
         val client = session.client() ?: error("Клиент управления sing-box недоступен.")
         try {
             client.selectOutbound(groupTag, outboundTag)
@@ -1252,6 +1307,76 @@ class QuantumVpnService : VpnService() {
         finishForeground()
         controller.publish(token, failure)
         if (startId > 0) stopSelfResult(startId) else stopSelf()
+    }
+
+    private suspend fun startOlcrtcEngine(profileId: String, rawJson: String) {
+        val target = BootstrapConfig.target(rawJson)
+        val isOlcrtc = target != null &&
+            target.outboundType == "socks" &&
+            OlcrtcProtocol.isLoopbackHost(target.hostname)
+        if (!isOlcrtc || target == null) {
+            stopOlcrtcEngine()
+            return
+        }
+        val tag = target.outboundTag
+        val settings = container.olcrtcEngineStore.read(profileId)[tag]
+        if (settings == null) {
+            stopOlcrtcEngine()
+            throw IllegalStateException(
+                "olcrtc: параметры сессии не найдены. Переимпортируйте профиль.",
+            )
+        }
+        olcrtcEngineLock.withLock {
+            if (isOlcrtcRunning() && activeOlcrtcEngine?.profileId == profileId && activeOlcrtcEngine?.tag == tag) {
+                return
+            }
+            stopOlcrtcEngineUnlocked()
+            Mobilecore.setProtector(SocketProtector { fd -> VpnTestHooks.protect(this@QuantumVpnService, fd.toInt()) })
+            Mobilecore.setLogWriter(OlcrtcNativeLogWriter())
+            Mobilecore.startOlcrtc(
+                settings.provider,
+                settings.transport,
+                settings.compatibilityMode,
+                settings.roomId,
+                settings.clientId,
+                settings.keyHex,
+                settings.dnsServer.orEmpty(),
+                settings.vp8Fps.toLong(),
+                settings.vp8BatchSize.toLong(),
+                settings.keepaliveSeconds.toLong(),
+                settings.udpEnabled,
+                settings.socksPort.toLong(),
+            )
+            try {
+                Mobilecore.waitOlcrtcReady(settings.readyTimeoutMillis())
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                stopOlcrtcEngineUnlocked()
+                throw IllegalStateException("olcrtc: движок не готов: ${error.message}", error)
+            }
+            activeOlcrtcEngine = OlcrtcEngineSession(profileId, tag)
+        }
+    }
+
+    private fun stopOlcrtcEngine() {
+        serviceScope.launch {
+            olcrtcEngineLock.withLock { stopOlcrtcEngineUnlocked() }
+        }
+    }
+
+    private fun stopOlcrtcEngineUnlocked() {
+        if (activeOlcrtcEngine == null) return
+        runCatching { Mobilecore.stopOlcrtc() }
+        activeOlcrtcEngine = null
+    }
+
+    private fun isOlcrtcRunning(): Boolean =
+        runCatching { Mobilecore.isOlcrtcRunning() }.getOrDefault(false)
+
+    private class OlcrtcNativeLogWriter : LogWriter {
+        override fun writeLog(message: String) {
+        }
     }
 
     internal fun requestStopFromCore() {
@@ -1504,6 +1629,7 @@ class QuantumVpnService : VpnService() {
         val updaterRouting: Boolean,
         private val controller: VpnController,
         private val onTrafficRate: (downloadBytesPerSecond: Long, uploadBytesPerSecond: Long) -> Unit,
+        private val onOlcrtcStop: () -> Unit,
     ) : AutoCloseable {
         private val closing = AtomicBoolean(false)
         private val tunCloseStarted = AtomicBoolean(false)
@@ -1519,6 +1645,7 @@ class QuantumVpnService : VpnService() {
         private var diagnosticsObserver: Job? = null
         private var identityJob: Job? = null
         private var trafficWatchdogJob: Job? = null
+        private var pingJob: Job? = null
         private var statusClient: CommandClient? = null
         private var statusClientCounted = false
         private var logClient: CommandClient? = null
@@ -1625,6 +1752,14 @@ class QuantumVpnService : VpnService() {
                 } else {
                     trafficWatchdogJob.also { trafficWatchdogJob = candidate }
                 }
+            }
+            previous?.cancel()
+            if (closing.get()) candidate.cancel()
+        }
+
+        fun replacePingJob(candidate: Job) {
+            val previous = synchronized(resourceLock) {
+                if (closing.get()) null else pingJob.also { pingJob = candidate }
             }
             previous?.cancel()
             if (closing.get()) candidate.cancel()
@@ -1745,11 +1880,12 @@ class QuantumVpnService : VpnService() {
                 closeTun()
                 timedStopStage("close_observers", "Остановка callback и фоновых задач") {
                     val resources = synchronized(resourceLock) {
-                        listOfNotNull(statusObserver, diagnosticsObserver, identityJob, trafficWatchdogJob).also {
+                        listOfNotNull(statusObserver, diagnosticsObserver, identityJob, trafficWatchdogJob, pingJob).also {
                             statusObserver = null
                             diagnosticsObserver = null
                             identityJob = null
                             trafficWatchdogJob = null
+                            pingJob = null
                         }
                     }
                     resources.forEach(Job::cancel)
@@ -1778,6 +1914,9 @@ class QuantumVpnService : VpnService() {
                 }
                 timedStopStage("close_network", "Закрытие мониторинга сети") {
                     networkMonitor.close()
+                }
+                timedStopStage("close_olcrtc", "Остановка движка olcrtc") {
+                    onOlcrtcStop()
                 }
             } finally {
                 VpnRuntimeMetrics.sessionClosed()
@@ -1918,10 +2057,13 @@ class QuantumVpnService : VpnService() {
                         while (iterator.hasNext()) {
                             val item = iterator.next()
                             val description = descriptions[item.tag]
+                            val displayType = description?.let {
+                                com.quantumvpn.olcrtc.OlcrtcProtocol.displayType(it)
+                            } ?: item.type.ifBlank { "unknown" }
                             add(
                                 RuntimeOutboundItem(
                                     tag = item.tag,
-                                    type = item.type.ifBlank { description?.type ?: "unknown" },
+                                    type = displayType,
                                     endpoint = description?.endpoint,
                                     pingMillis = null,
                                     pingMeasuredAtEpochSeconds = null,
@@ -1959,6 +2101,8 @@ class QuantumVpnService : VpnService() {
     companion object {
         private const val STATUS_INTERVAL_NANOS = 1_000_000_000L
         private const val GROUP_PING_CONCURRENCY = 4
+        private const val INITIAL_GROUP_PING_DELAY_MILLIS = 30_000L
+        private const val PERIODIC_GROUP_PING_INTERVAL_MILLIS = 10 * 60_000L
         private const val ACTION_START = "com.quantumvpn.vpn.START"
         private const val ACTION_STOP = "com.quantumvpn.vpn.STOP"
         private const val ACTION_SELECT = "com.quantumvpn.vpn.SELECT"

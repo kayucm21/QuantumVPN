@@ -42,6 +42,7 @@ import com.quantumvpn.ui.ConnectionExperienceMode
 import com.quantumvpn.ui.HomeLayoutMode
 import com.quantumvpn.ui.HomeVisualTheme
 import com.quantumvpn.ui.PowerMode
+import com.quantumvpn.ui.ServerMode
 import com.quantumvpn.ui.ThemeMode
 import com.quantumvpn.ui.UiSettings
 import com.quantumvpn.ui.UiSettingsStore
@@ -163,6 +164,7 @@ class ProfilesViewModel(
     private val bootstrapCache: BootstrapCache,
     private val ruleSetAssets: RuleSetAssetManager,
     private val happRoutingStore: HappRoutingProfileStore,
+    private val olcrtcEngineStore: com.quantumvpn.olcrtc.OlcrtcEngineStore,
     private val recentServersStore: RecentServersStore,
     private val favoriteServersStore: FavoriteServersStore,
     private val pinnedServersStore: PinnedServersStore,
@@ -200,6 +202,9 @@ class ProfilesViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
     val reliabilityScores = serverReliabilityStore.entries
         .map { map -> map.mapValues { it.value.score } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+    /** Full per-server reliability entries (successes/failures) for the ranking screen. */
+    val reliabilityEntries = serverReliabilityStore.entries
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
     val reliabilitySummary = reliabilityReportStore.summary
         .stateIn(
@@ -307,6 +312,10 @@ class ProfilesViewModel(
 
     fun setCustomDohUrl(url: String) = operation(markBusy = false) {
         settingsStore.setCustomDohUrl(url)
+    }
+
+    fun setCustomDotUrl(url: String) = operation(markBusy = false) {
+        settingsStore.setCustomDotUrl(url)
     }
 
     fun setSkipAutoConnectWhenRoaming(enabled: Boolean) = operation(markBusy = false) {
@@ -422,7 +431,8 @@ class ProfilesViewModel(
                 ) { profiles, settings, quotas ->
                     Triple(profiles, settings, quotas)
                 }.collect { (profiles, settings, quotas) ->
-                    val homeGroups = settings.activeProfileId?.let { id ->
+                    val effectiveId = settings.activeProfileId ?: profiles.firstOrNull()?.id
+                    val homeGroups = effectiveId?.let { id ->
                         runCatching { homeSelectorGroups(store.read(id).json) }.getOrDefault(emptyList())
                     }.orEmpty()
                     mutableState.update {
@@ -519,9 +529,13 @@ class ProfilesViewModel(
             else -> ManagedProfileUpdate(candidateJson, selectedTag = "", selectionChanged = false)
         }
         val json = applyRoutingOverlay(profileId, parsed.routing, update.json)
+        require(homeSelectorGroups(json).any { it.items.isNotEmpty() }) {
+            "Ответ подписки не содержит серверов. Сохранён предыдущий список."
+        }
         requireValid(json)
         val diff = SubscriptionDiff.compute(profileId, stored.metadata.name, oldJson, json)
         store.update(profileId, json)
+        if (candidate is ImportCandidate.Managed) writeOlcrtcEngines(profileId, candidate.servers)
         return diff.takeIf { it.hasChanges }
     }
 
@@ -588,14 +602,27 @@ class ProfilesViewModel(
         importSubscriptionUrl(http)
     }
 
-    private suspend fun importSubscriptionUrl(url: String) {
+    /** Loads the only subscription offered by the application. */
+    fun installManagedSubscription() = operation {
+        importSubscriptionUrl(
+            url = ManagedSubscriptionEndpoint.url,
+            suggestedName = ManagedSubscriptionEndpoint.profileName,
+            sourceDescription = ManagedSubscriptionEndpoint.sourceDescription,
+        )
+    }
+
+    private suspend fun importSubscriptionUrl(
+        url: String,
+        suggestedName: String = "Подписка",
+        sourceDescription: String = SecretRedactor.redactInline(url),
+    ) {
         val validatedUrl = HttpSubscriptionFetcher.validatedUrl(url)
         val payload = fetchSubscriptionPayload(validatedUrl)
         preview(
             raw = payload.body,
             source = ProfileSource.Url,
-            suggestedName = "Подписка",
-            sourceDescription = SecretRedactor.redactInline(validatedUrl),
+            suggestedName = suggestedName,
+            sourceDescription = sourceDescription,
             sourceUrl = validatedUrl,
             routingHeader = payload.routingHeader,
         )
@@ -668,6 +695,9 @@ class ProfilesViewModel(
             requireValid(json)
             store.update(metadata.id, json)
         }
+        (pending.candidate as? ImportCandidate.Managed)?.let { managed ->
+            writeOlcrtcEngines(metadata.id, managed.servers)
+        }
         if (mutableState.value.settings.activeProfileId == null) {
             settingsStore.setActiveProfile(metadata.id)
             settingsStore.setDnsMode(
@@ -697,6 +727,7 @@ class ProfilesViewModel(
         val target = store.read(targetProfileId)
         val update = ManagedProfileEditor.appendServer(target.json, server)
         store.update(targetProfileId, update.json)
+        appendOlcrtcEngine(targetProfileId, target.json, server)
         mutableState.update { it.copy(importPreview = null) }
         showMessage("Сервер добавлен в ${target.metadata.name}. Работающий VPN не изменён.")
     }
@@ -710,6 +741,9 @@ class ProfilesViewModel(
             happRoutingStore.applyImport(profileId, pending.routing)
         }
         store.update(profileId, pending.preparedJson)
+        (pending.candidate as? ImportCandidate.Managed)?.let { managed ->
+            writeOlcrtcEngines(profileId, managed.servers)
+        }
         mutableState.update { it.copy(importPreview = null) }
         val connectedNow = (vpnController.state.value as? VpnConnectionState.Connected)
             ?.profileId == profileId
@@ -1041,6 +1075,11 @@ class ProfilesViewModel(
         settingsAuditStore.append("powerMode", mode.name)
     }
 
+    fun setServerMode(mode: ServerMode) = operation(markBusy = false) {
+        settingsStore.setServerMode(mode)
+        settingsAuditStore.append("serverMode", mode.name)
+    }
+
     /** Games / Video / Balance: persist preset and nudge DNS without MTU hacks. */
     fun applyExperiencePreset(mode: PowerMode) = operation(markBusy = false) {
         settingsStore.setPowerMode(mode)
@@ -1306,6 +1345,10 @@ class ProfilesViewModel(
             ?.substringAfterLast(':')
             ?.toIntOrNull()
         val type = desc.type.lowercase()
+        if (com.quantumvpn.olcrtc.OlcrtcProtocol.isLoopbackSocks(desc)) {
+            showTip("olcrtc: доступность проверяется движком при подключении.")
+            return@operation
+        }
         val useTls = type !in setOf("hysteria", "hysteria2", "tuic", "wireguard", "shadowsocks")
         val result = com.quantumvpn.vpn.LiveServerChecker.check(host, port, useTls = useTls)
         eventJournal.append("live_check", result.detail)
@@ -1397,7 +1440,9 @@ class ProfilesViewModel(
         val stored = runCatching { store.read(id) }.getOrNull()
         val wasActive = mutableState.value.settings.activeProfileId == id
         val name = stored?.metadata?.name ?: id
+        val engines = olcrtcEngineStore.read(id)
         store.delete(id)
+        olcrtcEngineStore.remove(id)
         subscriptionSourceStore.remove(id)
         happRoutingStore.remove(id)
         bootstrapCache.removeProfile(id)
@@ -1407,6 +1452,7 @@ class ProfilesViewModel(
         if (stored != null) {
             offerUndo("Профиль «$name» удалён") {
                 val meta = store.create(name, stored.json, stored.metadata.source)
+                olcrtcEngineStore.write(meta.id, engines)
                 if (wasActive) settingsStore.setActiveProfile(meta.id)
             }
         } else {
@@ -1511,10 +1557,12 @@ class ProfilesViewModel(
         val ids = store.profiles.value.map { it.id }
         for (id in ids) {
             store.delete(id)
+            olcrtcEngineStore.remove(id)
             subscriptionSourceStore.remove(id)
             happRoutingStore.remove(id)
             bootstrapCache.removeProfile(id)
         }
+        olcrtcEngineStore.wipe()
         settingsStore.setActiveProfile(null)
         settingsAuditStore.append("panicWipe", ids.size.toString())
         eventJournal.append("security", "Panic wipe: ${ids.size} profiles")
@@ -1760,7 +1808,7 @@ class ProfilesViewModel(
                     val description = descriptions[tag]
                     RuntimeOutboundItem(
                         tag = tag,
-                        type = description?.type ?: "proxy",
+                        type = com.quantumvpn.olcrtc.OlcrtcProtocol.displayType(description) ?: "proxy",
                         endpoint = description?.endpoint,
                         pingMillis = null,
                         pingMeasuredAtEpochSeconds = null,
@@ -1769,6 +1817,25 @@ class ProfilesViewModel(
             )
         }
         return groups.forServerUi()
+    }
+
+    private suspend fun writeOlcrtcEngines(profileId: String, servers: List<com.quantumvpn.profiles.ManagedServer>) {
+        val engines = buildMap<String, com.quantumvpn.olcrtc.OlcrtcSettings> {
+            ManagedProfileFactory.taggedServers(servers).forEachIndexed { index, tagged ->
+                servers[index].olcrtc?.let { put(tagged.tag, it) }
+            }
+        }
+        olcrtcEngineStore.write(profileId, engines)
+    }
+
+    private suspend fun appendOlcrtcEngine(profileId: String, oldJson: String, server: com.quantumvpn.profiles.ManagedServer) {
+        val settings = server.olcrtc ?: return
+        val baseTag = ManagedProfileFactory.taggedServers(listOf(server)).single().tag
+        val usedTags = ConfigAnalyzer.outboundDescriptions(oldJson).keys.toSet()
+        var tag = baseTag
+        var suffix = 2
+        while (tag in usedTags) tag = "$baseTag-${suffix++}"
+        olcrtcEngineStore.write(profileId, olcrtcEngineStore.read(profileId) + (tag to settings))
     }
 
     private fun ProfileEditorState.withText(value: String): ProfileEditorState = copy(
@@ -1840,6 +1907,7 @@ class ProfilesViewModel(
         private val bootstrapCache: BootstrapCache,
         private val ruleSetAssets: RuleSetAssetManager,
         private val happRoutingStore: HappRoutingProfileStore,
+        private val olcrtcEngineStore: com.quantumvpn.olcrtc.OlcrtcEngineStore,
         private val recentServersStore: RecentServersStore,
         private val favoriteServersStore: FavoriteServersStore,
         private val pinnedServersStore: PinnedServersStore,
@@ -1874,6 +1942,7 @@ class ProfilesViewModel(
                 bootstrapCache,
                 ruleSetAssets,
                 happRoutingStore,
+                olcrtcEngineStore,
                 recentServersStore,
                 favoriteServersStore,
                 pinnedServersStore,

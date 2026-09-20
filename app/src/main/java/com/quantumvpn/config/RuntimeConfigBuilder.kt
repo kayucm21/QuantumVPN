@@ -71,8 +71,16 @@ data class RuntimeConfigOptions(
     val healthCheckPackageName: String? = null,
     val updaterPackageName: String? = null,
     val customDohUrl: String? = null,
+    /** Custom DNS-over-TLS endpoint (host[:port]); used when set alongside a managed DNS mode. */
+    val customDotUrl: String? = null,
     /** Per-app reject inside TUN (Block mode). Own package is excluded. */
     val blockedPackageNames: List<String> = emptyList(),
+    /**
+     * Игровой режим: пакеты идут в built-in outbound `direct` (напрямую через
+     * сеть Android, минуя VPN-сервер). Сервис обязан допустить их в TUN.
+     * Правило ставится первым — игровой fast path побеждает Block.
+     */
+    val gameModePackages: List<String> = emptyList(),
 )
 
 sealed interface RuntimeConfigResult {
@@ -218,6 +226,7 @@ object RuntimeConfigBuilder {
             bootstrapHost = options.bootstrapHost,
             healthCheckPackageName = options.healthCheckPackageName,
             customDohUrl = options.customDohUrl,
+            customDotUrl = options.customDotUrl,
         )
         if (dnsOverlay is RuntimeConfigResult.Invalid) return dnsOverlay
         val dnsReady = (dnsOverlay as RuntimeConfigResult.Ready).json
@@ -235,10 +244,17 @@ object RuntimeConfigBuilder {
             proxyTag = selectedProxyTag,
         )
         val hardened = WebRtcMdnsHardening.apply(withAds, options.blockWebRtcMdns)
-        val finalRoot = if (options.blockedPackageNames.isNotEmpty()) {
+        val withBlocked = if (options.blockedPackageNames.isNotEmpty()) {
             applyBlockedPackages(hardened, options.blockedPackageNames)
         } else {
             hardened
+        }
+        // Игровой fast path — последним, чтобы его правило оказалось первым:
+        // sing-box выполняет route.rules по порядку, игра побеждает Block.
+        val finalRoot = if (options.gameModePackages.isNotEmpty()) {
+            applyGameModePackages(withBlocked, options.gameModePackages)
+        } else {
+            withBlocked
         }
         return RuntimeConfigResult.Ready(JsonConfig.format(finalRoot))
     }
@@ -256,6 +272,28 @@ object RuntimeConfigBuilder {
             }
         if (blockRules.isEmpty()) return root
         route["rules"] = JsonArray(blockRules + existingRules)
+        return JsonObject(root.toMutableMap().apply { this["route"] = JsonObject(route) })
+    }
+
+    /**
+     * Игровой fast path: одно правило `{package_name → direct}` поверх всех.
+     * `direct` — встроенный outbound sing-box, существует всегда.
+     * Хранимый профиль не трогаем; невалидные пакеты отбрасываем молча.
+     */
+    private fun applyGameModePackages(root: JsonObject, packages: List<String>): JsonObject {
+        val route = (root["route"] as? JsonObject)?.toMutableMap() ?: return root
+        val existingRules = (route["rules"] as? JsonArray).orEmpty()
+        val valid = packages.distinct().filter { ANDROID_PACKAGE.matches(it) }
+        if (valid.isEmpty()) return root
+        val gameRule = buildJsonObject {
+            put(
+                "package_name",
+                JsonArray(valid.map(::JsonPrimitive)),
+            )
+            put("action", "route")
+            put("outbound", "direct")
+        }
+        route["rules"] = JsonArray(listOf(gameRule) + existingRules)
         return JsonObject(root.toMutableMap().apply { this["route"] = JsonObject(route) })
     }
 
@@ -322,6 +360,7 @@ object RuntimeConfigBuilder {
         bootstrapHost: BootstrapHostOverlay?,
         healthCheckPackageName: String?,
         customDohUrl: String? = null,
+        customDotUrl: String? = null,
     ): RuntimeConfigResult {
         val next = root.toMutableMap()
         var dns = (root["dns"] as? JsonObject)?.toMutableMap() ?: mutableMapOf()
@@ -347,7 +386,7 @@ object RuntimeConfigBuilder {
             servers = servers + androidDnsServer()
             if (mode != DnsMode.Android) {
                 val proxy = checkNotNull(selectedProxyTag)
-                servers = servers + secureDnsServers(proxy, customDohUrl)
+                servers = servers + secureDnsServers(proxy, customDohUrl, customDotUrl)
             }
             normalizedOverride?.let { servers = servers + dnsOverrideServer(it) }
             dns["strategy"] = JsonPrimitive("prefer_ipv4")
@@ -461,7 +500,11 @@ object RuntimeConfigBuilder {
         put("server", DNS_OVERRIDE_TAG)
     }
 
-    private fun secureDnsServers(proxyTag: String, customDohUrl: String? = null): List<JsonObject> {
+    private fun secureDnsServers(
+        proxyTag: String,
+        customDohUrl: String? = null,
+        customDotUrl: String? = null,
+    ): List<JsonObject> {
         val custom = customDohUrl?.trim().orEmpty()
         if (custom.isNotBlank()) {
             val uri = runCatching { java.net.URI(custom) }.getOrNull()
@@ -469,6 +512,21 @@ object RuntimeConfigBuilder {
             val tag = "zapret-custom-doh"
             return listOf(
                 dohServer(tag, host, host, proxyTag),
+                buildJsonObject {
+                    put("type", "fallback")
+                    put("tag", SECURE_DNS_TAG)
+                    put("servers", JsonArray(listOf(JsonPrimitive(tag))))
+                    put("strategy", "parallel")
+                },
+            )
+        }
+        val dot = customDotUrl?.trim().orEmpty()
+        if (dot.isNotBlank()) {
+            val host = dot.substringBefore(':').trim()
+            val port = dot.substringAfter(':', "").trim().toIntOrNull() ?: 853
+            val tag = "zapret-custom-dot"
+            return listOf(
+                dotServer(tag, host, port, proxyTag),
                 buildJsonObject {
                     put("type", "fallback")
                     put("tag", SECURE_DNS_TAG)
@@ -507,6 +565,22 @@ object RuntimeConfigBuilder {
                 buildJsonObject {
                     put("enabled", true)
                     put("server_name", serverName)
+                },
+            )
+            put("detour", proxyTag)
+        }
+
+    private fun dotServer(tag: String, host: String, port: Int, proxyTag: String) =
+        buildJsonObject {
+            put("type", "tcp")
+            put("tag", tag)
+            put("server", host)
+            put("server_port", port)
+            put(
+                "tls",
+                buildJsonObject {
+                    put("enabled", true)
+                    put("server_name", host)
                 },
             )
             put("detour", proxyTag)

@@ -65,7 +65,7 @@ object ExitLocationResolver {
         return "${'A' + (first - 0x1F1E6)}${'A' + (second - 0x1F1E6)}"
     }
 
-    private val FLAG_EMOJI = Regex("""[\uD83C][\uDDE6-\uDDFF][\uD83C][\uDDE6-\uDDFF]""")
+    private val FLAG_EMOJI = Regex("""[\x{1F1E6}-\x{1F1FF}][\x{1F1E6}-\x{1F1FF}]""")
     private val ISO_CODE = Regex("""(?i)(?:^|[^A-Z])([A-Z]{2})(?:\d+)?(?:$|[^A-Z])""")
 
     private val COUNTRY_BY_CODE = mapOf(

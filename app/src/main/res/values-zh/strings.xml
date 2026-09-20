@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QuantumVPN</string>
+    <string name="widget_description">快速连接 QuantumVPN</string>
+    <string name="widget_title">QuantumVPN</string>
+    <string name="widget_wide_description">流量、连接和更换服务器</string>
+    <string name="widget_wide_title">QuantumVPN · 宽版</string>
+    <string name="shortcut_connect_short">连接</string>
+    <string name="shortcut_connect_long">连接 VPN</string>
+    <string name="shortcut_disconnect_short">断开</string>
+    <string name="shortcut_disconnect_long">断开 VPN</string>
+    <string name="shortcut_ping_short">服务器</string>
+    <string name="shortcut_ping_long">打开服务器和 ping</string>
+    <string name="shortcut_import_short">导入</string>
+    <string name="shortcut_import_long">导入配置</string>
+    <string name="shortcut_speedtest_short">测速</string>
+    <string name="shortcut_speedtest_long">运行测速</string>
+    <string name="status_protected">已保护</string>
+    <string name="status_unprotected">未保护</string>
+    <string name="action_add_subscription">添加订阅</string>
+    <string name="network_map">网络地图</string>
+    <string name="choose_server">选择服务器</string>
+    <string name="speed_test">测速</string>
+    <string name="why_slow">为什么慢</string>
+    <string name="event_journal">事件日志</string>
+    <string name="trusted_wifi">可信 Wi‑Fi</string>
+    <string name="family_protect">家庭过滤</string>
+    <string name="best_ping">最佳 ping</string>
+    <string name="same_region">同一地区</string>
+    <string name="tab_home">主页</string>
+    <string name="tab_servers">服务器</string>
+    <string name="tab_routing">路由</string>
+    <string name="tab_settings">设置</string>
+    <string name="undo">撤销</string>
+    <string name="subscription_expiring">订阅即将到期</string>
+    <string name="dns_preview">DNS 预览</string>
+    <string name="tips_carousel">提示</string>
+    <string name="reliability_uptime">正常运行时间</string>
+    <string name="work_schedule">工作连接</string>
+    <string name="skip_roaming">漫游时不自动连接</string>
+    <string name="mobile_autoconnect">移动数据自动连接</string>
+    <string name="time_routing">基于时间的路由</string>
+    <string name="recommended_server">推荐</string>
+    <string name="subscription_diff">订阅变更</string>
+</resources>

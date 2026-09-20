@@ -2,9 +2,7 @@ package com.quantumvpn.diagnostics
 
 import android.os.Process
 import android.util.AtomicFile
-import com.quantumvpn.BuildConfig
 import com.quantumvpn.config.JsonConfig
-import com.quantumvpn.updates.PanelDiagnosticReporter
 import java.io.File
 import java.io.OutputStreamWriter
 import java.util.concurrent.atomic.AtomicBoolean
@@ -45,21 +43,6 @@ class AppCrashStore(root: File) {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             runCatching { record(thread.name, throwable) }
-            // Best-effort: also push the crash to the RosPanel operator so they see client
-            // errors without a support ticket. Never throws into the crash path.
-            runCatching {
-                val sw = java.io.StringWriter()
-                throwable.printStackTrace(java.io.PrintWriter(sw))
-                val detail = sw.toString().take(4000)
-                PanelDiagnosticReporter.report(
-                    baseUrl = BuildConfig.PANEL_UPDATE_BASE_URL,
-                    appVersion = BuildConfig.VERSION_NAME,
-                    device = PanelDiagnosticReporter.deviceLabel(),
-                    level = "error",
-                    message = "${throwable.javaClass.name}: ${throwable.message ?: "crash"}",
-                    detail = detail,
-                )
-            }
             if (previous != null) {
                 previous.uncaughtException(thread, throwable)
             } else {

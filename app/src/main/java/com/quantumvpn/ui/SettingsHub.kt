@@ -23,10 +23,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -36,6 +38,8 @@ import androidx.compose.ui.unit.dp
 import com.quantumvpn.BuildConfig
 import com.quantumvpn.config.DnsMode
 import com.quantumvpn.diagnostics.DiagnosticState
+import com.quantumvpn.diagnostics.DnsPreviewProbe
+import kotlinx.coroutines.launch
 import com.quantumvpn.profiles.ProfilesUiState
 import com.quantumvpn.profiles.ProfilesViewModel
 import com.quantumvpn.ui.components.QvDivider
@@ -190,6 +194,27 @@ internal fun ConnectionSettingsPage(
                 testTag = "hub-safe-mode",
             )
         }
+        QvSection(title = "Режим сервера") {
+            Text(
+                "Влияет на выбор сервера: Gaming — минимальная задержка, Movie — стабильность/пропускная способность.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                com.quantumvpn.ui.ServerMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = state.settings.serverMode == mode,
+                        onClick = { viewModel.setServerMode(mode) },
+                        label = { Text(mode.name) },
+                    )
+                }
+            }
+        }
         QvSection(title = "Аварийный сброс") {
             OutlinedButton(
                 onClick = viewModel::panicResetNetworkOverlays,
@@ -340,6 +365,32 @@ internal fun NetworkSettingsPage(
                     }) { Text("Сброс") }
                 }
             }
+            var customDot by rememberSaveable(state.settings.customDotUrl) {
+                mutableStateOf(state.settings.customDotUrl)
+            }
+            OutlinedTextField(
+                value = customDot,
+                onValueChange = { customDot = it },
+                label = { Text("Свой DoT сервер (режим Secure)") },
+                placeholder = { Text("dns.example:853") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = { viewModel.setCustomDotUrl(customDot.trim()) },
+                    modifier = Modifier.weight(1f),
+                ) { Text("Сохранить DoT") }
+                if (customDot.isNotBlank()) {
+                    TextButton(onClick = {
+                        customDot = ""
+                        viewModel.setCustomDotUrl("")
+                    }) { Text("Сброс") }
+                }
+            }
             Text(
                 "Пресеты DNS-override (hostname → IPv4 для HTTPS health):",
                 style = MaterialTheme.typography.bodySmall,
@@ -361,7 +412,66 @@ internal fun NetworkSettingsPage(
                     )
                 }
             }
+            QvDivider()
+            ResolvePreviewTool()
         }
+    }
+}
+
+@Composable
+private fun ResolvePreviewTool() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var hostname by rememberSaveable { mutableStateOf("") }
+    var result by remember { mutableStateOf<com.quantumvpn.diagnostics.DnsPreviewResult?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    Text(
+        "Проверка резолва (Resolve preview)",
+        style = MaterialTheme.typography.titleSmall,
+    )
+    OutlinedTextField(
+        value = hostname,
+        onValueChange = { hostname = it },
+        label = { Text("Домен") },
+        placeholder = { Text("example.com") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedButton(
+            onClick = {
+                if (hostname.isNotBlank() && !busy) {
+                    busy = true
+                    result = null
+                    scope.launch {
+                        result = DnsPreviewProbe.resolve(context, hostname)
+                        busy = false
+                    }
+                }
+            },
+            enabled = hostname.isNotBlank() && !busy,
+            modifier = Modifier.weight(1f),
+        ) { Text(if (busy) "Проверка…" else "Проверить") }
+        if (result != null) {
+            TextButton(onClick = {
+                hostname = ""
+                result = null
+            }) { Text("Сброс") }
+        }
+    }
+    result?.let { r ->
+        Text(
+            r.summaryRu,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (r.error != null || r.addresses.isEmpty()) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+        )
     }
 }
 
@@ -892,7 +1002,7 @@ internal fun AdBlockSettingsPage(
             QvDivider()
             QvToggleRow(
                 title = "Онлайн DNS-фильтр (AdGuard DoH)",
-                subtitle = "Keyword-домены через AdGuard DNS через VPN; ловит новые ad-сети",
+                subtitle = "Весь DNS сайтов и приложений → dns.adguard-dns.com через VPN",
                 checked = state.settings.adBlockOnlineDns,
                 onCheckedChange = viewModel::setAdBlockOnlineDns,
                 testTag = "adblock-online-dns",
@@ -984,9 +1094,9 @@ internal fun AdBlockSettingsPage(
         }
         QvSection(title = "Как это работает") {
             Text("• Перехват DNS: порт 53 + DoH/DoT (protocol dns) → sing-box")
-            Text("• DNS reject: ad-домены → NXDOMAIN")
+            Text("• DNS reject: известные ad-домены → NXDOMAIN")
             Text("• Маршрут reject: пакеты к ad-хостам не проходят даже при прямом IP")
-            Text("• AdGuard DoH: keyword-домены и режим «Максимум» — онлайн-фильтр")
+            Text("• Весь DNS сайтов/приложений → dns.adguard-dns.com (AdGuard DoH)")
             Text("• Перед Connect: Maximum + AdGuard + Safe mode off автоматически")
             Text("• Действует на весь трафик внутри VPN")
             OutlinedButton(

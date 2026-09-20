@@ -236,6 +236,77 @@ fun AppPickerScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Text("Игровой режим (низкий пинг)", fontWeight = FontWeight.Medium)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Игры напрямую")
+                            Text(
+                                "Выбранные игры идут мимо VPN-сервера кратчайшим маршрутом. " +
+                                    "При включении VPN перезапустится.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = state.gameModeEnabled,
+                            onCheckedChange = { viewModel.setGameModeEnabled(it) },
+                            modifier = Modifier
+                                .testTag("game-mode-switch")
+                                .semantics {
+                                    contentDescription = "Игровой режим"
+                                },
+                        )
+                    }
+                    if (state.gameModeEnabled) {
+                        if (state.detectedGames.isEmpty()) {
+                            Text(
+                                "Игры из каталога не найдены на устройстве.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        state.detectedGames.forEach { game ->
+                            val allSelected = game.selectedPackages.containsAll(game.installedPackages)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.setGamePackagesEnabled(
+                                            game.installedPackages,
+                                            !allSelected,
+                                        )
+                                    },
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(game.profile.title)
+                                    Text(
+                                        game.profile.detail,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Checkbox(
+                                    checked = allSelected,
+                                    onCheckedChange = { checked ->
+                                        viewModel.setGamePackagesEnabled(
+                                            game.installedPackages,
+                                            checked,
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("game-${game.profile.id}"),
+                                )
+                            }
+                        }
+                        OutlinedButton(onClick = viewModel::enableDetectedGames) {
+                            Text("Выбрать все найденные игры")
+                        }
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),

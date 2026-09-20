@@ -15,6 +15,7 @@ data class ManagedServer(
     val displayName: String,
     val identityKey: String,
     val outbound: JsonObject,
+    val olcrtc: com.quantumvpn.olcrtc.OlcrtcSettings? = null,
 )
 
 data class TlsSettings(
@@ -205,6 +206,57 @@ object ProtocolOutboundBuilders {
             putTls(tls)
         },
     )
+
+    /**
+     * olcRTC (OlConnect WebRTC) server. The engine runs a local SOCKS5 proxy;
+     * this outbound must be a plain loopback "socks" because the sing-box
+     * extended core rejects custom outbound fields. Engine parameters travel
+     * in a SecureVault-sealed sidecar instead.
+     */
+    fun olcrtc(
+        displayName: String,
+        settings: com.quantumvpn.olcrtc.OlcrtcSettings,
+    ): ManagedServer = ManagedServer(
+        displayName = displayName,
+        identityKey = olcrtcIdentity(
+            settings.provider,
+            settings.transport,
+            settings.compatibilityMode,
+            settings.roomId,
+            settings.clientId,
+            settings.keyHex,
+            settings.dnsServer,
+            settings.roomPassword,
+        ),
+        outbound = buildJsonObject {
+            put("type", "socks")
+            put("server", "127.0.0.1")
+            put("server_port", settings.socksPort)
+        },
+        olcrtc = settings,
+    )
+
+    /** Deterministic identity for olcRTC servers; also feeds the stable SOCKS port. */
+    fun olcrtcIdentity(
+        provider: String,
+        transport: String,
+        compatibilityMode: String,
+        roomId: String,
+        clientId: String,
+        keyHex: String,
+        dns: String?,
+        roomPassword: String?,
+    ): String = listOf(
+        "olcrtc",
+        provider.lowercase(),
+        transport.lowercase(),
+        compatibilityMode.lowercase(),
+        roomId,
+        clientId,
+        keyHex.lowercase(),
+        dns.orEmpty().lowercase(),
+        roomPassword.orEmpty(),
+    ).joinToString("|")
 
     private fun identity(
         type: String,

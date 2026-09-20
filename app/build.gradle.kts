@@ -1,5 +1,8 @@
 import java.security.MessageDigest
 import java.util.Properties
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 
 plugins {
     id("com.android.application")
@@ -24,15 +27,16 @@ val coreCommit = coreProperties.getProperty("CORE_COMMIT")
 val corePatchFile = coreProperties.getProperty("CORE_PATCH_FILE")
 val corePatchSha256 = coreProperties.getProperty("CORE_PATCH_SHA256")
 val libboxAar = layout.projectDirectory.file("libs/libbox.aar").asFile
+val olcrtcAar = layout.projectDirectory.file("libs/olcrtc.aar").asFile
 val libboxMetadata = layout.projectDirectory.file("libs/libbox.properties").asFile
 val appVersionCode = providers.gradleProperty("zapretVersionCode")
     .orElse(providers.environmentVariable("ZAPRET_VERSION_CODE"))
-    .orElse("81")
+    .orElse("82")
     .get()
     .toInt()
 val appVersionName = providers.gradleProperty("zapretVersionName")
     .orElse(providers.environmentVariable("ZAPRET_VERSION_NAME"))
-    .orElse("5.5.4")
+    .orElse("5.6.1")
     .get()
 val ftpUpdateHost = providers.gradleProperty("zapretFtpHost")
     .orElse(secretProp("ZAPRET_FTP_HOST", "zapretFtpHost"))
@@ -234,6 +238,82 @@ android {
         compose = true
     }
 
+    packaging {
+        resources {
+            // Drop duplicate license/legal metadata from AARs; keep the bundled
+            // raw legal resources referenced by the app's legal screen.
+            excludes += setOf(
+                "/META-INF/{AL2.0,LGPL2.1}",
+                "/META-INF/DEPENDENCIES",
+                "/META-INF/LICENSE*",
+                "/META-INF/NOTICE*",
+                "/META-INF/*.version",
+            )
+        }
+    }
+
+}
+
+val olcrtcStrippedAar = layout.buildDirectory.file("olcrtc-stripped/olcrtc.aar")
+
+val stripOlcrtcAar by tasks.registering {
+    group = "build"
+    description = "Repacks app/libs/olcrtc.aar without the duplicate gomobile go.* runtime (libbox.aar already supplies it)."
+    inputs.file(olcrtcAar)
+    outputs.file(olcrtcStrippedAar)
+    doLast {
+        val output = olcrtcStrippedAar.get().asFile
+        output.parentFile.mkdirs()
+        val tmp = File(output.parentFile, "olcrtc-repack")
+        if (tmp.exists()) tmp.deleteRecursively()
+        tmp.mkdirs()
+        val classesBytes = ZipInputStream(olcrtcAar.inputStream()).use { input ->
+            var entry = input.nextEntry
+            var bytes: ByteArray? = null
+            while (entry != null) {
+                if (entry.name == "classes.jar") {
+                    bytes = input.readBytes()
+                    break
+                }
+                entry = input.nextEntry
+            }
+            check(bytes != null) { "olcrtc.aar does not contain classes.jar." }
+            bytes
+        }
+        val strippedClasses = File(tmp, "classes.jar")
+        ZipOutputStream(strippedClasses.outputStream()).use { out ->
+            ZipInputStream(classesBytes.inputStream()).use { input ->
+                var entry = input.nextEntry
+                while (entry != null) {
+                    val name = entry.name
+                    val keep = !entry.isDirectory && !name.startsWith("go/") && !name.startsWith("META-INF/")
+                    if (keep) {
+                        out.putNextEntry(ZipEntry(name))
+                        input.copyTo(out)
+                        out.closeEntry()
+                    }
+                    entry = input.nextEntry
+                }
+            }
+        }
+        ZipOutputStream(output.outputStream()).use { out ->
+            ZipInputStream(olcrtcAar.inputStream()).use { input ->
+                var entry = input.nextEntry
+                while (entry != null) {
+                    if (!entry.isDirectory && entry.name != "classes.jar" && !entry.name.startsWith("META-INF/")) {
+                        out.putNextEntry(ZipEntry(entry.name))
+                        input.copyTo(out)
+                        out.closeEntry()
+                    }
+                    entry = input.nextEntry
+                }
+            }
+            out.putNextEntry(ZipEntry("classes.jar"))
+            strippedClasses.inputStream().use { it.copyTo(out) }
+            out.closeEntry()
+        }
+        check(output.isFile && output.length() > 0L) { "Failed to repack olcrtc AAR." }
+    }
 }
 
 dependencies {
@@ -249,6 +329,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation(files(libboxAar))
+    implementation(project.files(olcrtcStrippedAar) { builtBy("stripOlcrtcAar") })
     implementation(project(":app-updater"))
     implementation(project(":network-bootstrap"))
     implementation(project(":wireguard-import"))

@@ -97,7 +97,7 @@ object BootstrapConfig {
                 hostname = hostname,
                 port = port,
                 requiresDns = requiresDns,
-                tcpPreflightSupported = type !in UDP_TRANSPORTS,
+                tcpPreflightSupported = type !in UDP_TRANSPORTS && !isLoopbackSocks(type, hostname),
                 staleAddressAllowed = requiresDns && authenticatedTls,
             )
         }
@@ -158,12 +158,21 @@ object BootstrapConfig {
         else -> emptyList()
     }
 
+    /**
+     * Loopback "socks" outbounds (olcRTC engine) have no remote TCP preflight:
+     * the engine is started by the VpnService after TUN creation, so a dial
+     * here would race the engine startup.
+     */
+    private fun isLoopbackSocks(type: String, hostname: String): Boolean =
+        type == "socks" && hostname.lowercase() in LOOPBACK_HOSTS
+
     private fun JsonObject.boolean(key: String): Boolean? =
         (this[key] as? JsonPrimitive)?.booleanOrNull
 
     private fun looksNumeric(value: String): Boolean = ':' in value || IPV4.matches(value)
 
     private val IPV4 = Regex("(?:\\d{1,3}\\.){3}\\d{1,3}")
+    private val LOOPBACK_HOSTS = setOf("127.0.0.1", "::1", "localhost")
     private val UDP_TRANSPORTS = setOf("hysteria", "hysteria2", "tuic", "wireguard")
     private val NON_PROXY_TYPES = setOf("direct", "block", "dns", null)
 }

@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 
 /**
  * The RosPanel admin API publishes a single app release the client polls for auto-update.
@@ -21,6 +22,7 @@ data class PanelAppVersion(
     val url: String,
     val sha256: String,
     val note: String,
+    val size: Long = 0,
 )
 
 object PanelVersionJson {
@@ -38,6 +40,7 @@ object PanelVersionJson {
             url = (root["url"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank).orEmpty(),
             sha256 = (root["sha256"] as? JsonPrimitive)?.contentOrNull?.lowercase().orEmpty(),
             note = (root["note"] as? JsonPrimitive)?.contentOrNull.orEmpty(),
+            size = (root["size"] as? JsonPrimitive)?.longOrNull ?: 0L,
         )
     }
 }

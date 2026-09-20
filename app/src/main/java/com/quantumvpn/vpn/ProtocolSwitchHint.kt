@@ -1,5 +1,7 @@
 package com.quantumvpn.vpn
 
+import com.quantumvpn.ui.ServerMode
+
 /**
  * Prefer alternate protocol family on failover (Hysteria ↔ VLESS/Trojan/Reality).
  */
@@ -16,12 +18,16 @@ object ProtocolSwitchHint {
 
     /**
      * Rank candidates: prefer opposite protocol family from [failedType], then QoE.
+     *
+     * [mode] biases the score: Gaming weights latency heavily, Movie de-emphasizes
+     * latency in favor of reliability/throughput, Standard is balanced.
      */
     fun preferAlternate(
         candidates: List<ServerFailover.Candidate>,
         typeByTag: Map<String, String>,
         failedType: String?,
         reliabilityByTag: Map<String, Int> = emptyMap(),
+        mode: ServerMode = ServerMode.Standard,
     ): ServerFailover.Candidate? {
         if (candidates.isEmpty()) return null
         val failedFamily = family(failedType)
@@ -31,7 +37,18 @@ object ProtocolSwitchHint {
             val altBonus = if (failedFamily != "other" && fam != failedFamily && fam != "other") 0 else 80
             val health = ServerHealthScore.score(c.pingMillis)
             val reliability = reliabilityByTag[c.outboundTag] ?: 50
-            altBonus + (200 - health - reliability) * 10 + c.pingMillis
+            val latencyWeight = when (mode) {
+                ServerMode.Gaming -> 3
+                ServerMode.Movie -> 0
+                ServerMode.Standard -> 1
+            }
+            val reliabilityWeight = when (mode) {
+                ServerMode.Gaming -> 1
+                ServerMode.Movie -> 3
+                ServerMode.Standard -> 1
+            }
+            altBonus + (200 - health - reliability) * 10 * reliabilityWeight +
+                c.pingMillis * latencyWeight
         }
     }
 }

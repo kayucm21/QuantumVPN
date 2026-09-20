@@ -33,7 +33,7 @@ data class AdBlockOptions(
     val level: AdBlockLevel = AdBlockLevel.Standard,
     val trackersOnly: Boolean = false,
     val whitelistSuffixes: List<String> = emptyList(),
-    /** AdGuard / filter DNS через DoH и VPN-proxy — ловит новые ad-домены онлайн. */
+    /** Весь DNS сайтов/приложений → DoH dns.adguard-dns.com через VPN-proxy. */
     val useOnlineFilterDns: Boolean = true,
     /** Дополнительные категории контента для блокировки (независимо от [level]). */
     val categories: Set<AdBlockCategory> = emptySet(),
@@ -42,9 +42,9 @@ data class AdBlockOptions(
 /**
  * Runtime-only ad/tracker blocking for the whole VPN session:
  * - route `reject` (TCP/UDP/QUIC не проходят к ad-хостам);
- * - DNS sink (NXDOMAIN / 0.0.0.0) для тех же доменов;
- * - опционально AdGuard DoH через proxy для keyword-доменов и (в режиме Maximum)
- *   для всего остального DNS — серверная фильтрация перехватывает новые источники рекламы.
+ * - DNS reject (NXDOMAIN) для известных ad/tracker доменов;
+ * - при `useOnlineFilterDns`: весь DNS сайтов и приложений → DoH
+ *   https://dns.adguard-dns.com/dns-query через VPN-proxy.
  *
  * Работает системно: TUN принимает весь трафик устройства, поэтому блокировка
  * распространяется на все приложения, пока VPN активен.
@@ -52,6 +52,8 @@ data class AdBlockOptions(
 object AdBlockHardening {
     const val DNS_BLOCK_TAG = "dns-block-ads-qv"
     const val ONLINE_FILTER_DNS_TAG = "dns-adguard-filter-qv"
+    const val ONLINE_FILTER_HOST = "dns.adguard-dns.com"
+    const val ONLINE_FILTER_IPV4 = "94.140.14.14"
     const val ROUTE_RULE_TAG = "zapret-adblock-route"
 
     fun apply(root: JsonObject, enabled: Boolean): JsonObject =
@@ -69,7 +71,8 @@ object AdBlockHardening {
         if (suffixes.isEmpty() && domains.isEmpty() && keywords.isEmpty()) return strip(root)
 
         val onlineDns = options.useOnlineFilterDns && !proxyTag.isNullOrBlank()
-        val routeAllDns = options.level == AdBlockLevel.Maximum && onlineDns
+        // Весь DNS сессии → AdGuard DoH (сайты, приложения, in-app) при включённом онлайн-фильтре.
+        val routeAllDns = onlineDns
 
         var next = ensureInfrastructure(root)
         next = applyRouteReject(next, suffixes, domains, keywords)
@@ -296,7 +299,7 @@ object AdBlockHardening {
             }
         }
         if (routeAllDns) {
-            // В режиме Maximum весь остальной DNS → AdGuard (онлайн-фильтр новых ad-доменов).
+            // Весь остальной DNS (сайты + приложения) → dns.adguard-dns.com.
             rules.add(
                 buildJsonObject {
                     put("action", "route")
@@ -310,18 +313,25 @@ object AdBlockHardening {
             0,
             dnsRouteRule(
                 domains = YOUTUBE_HISTORY_ALLOW_DOMAINS,
-                server = dns.string("final") ?: "local-dns",
+                server = if (routeAllDns) {
+                    ONLINE_FILTER_DNS_TAG
+                } else {
+                    dns.string("final") ?: "local-dns"
+                },
             ),
         )
 
+        val dnsMut = dns.toMutableMap()
+        dnsMut["rules"] = JsonArray(rules)
+        dnsMut["servers"] = JsonArray(servers)
+        if (routeAllDns) {
+            // Финальный резолвер сессии — AdGuard (блокирует рекламу на неизвестных доменах).
+            dnsMut["final"] = JsonPrimitive(ONLINE_FILTER_DNS_TAG)
+        }
+
         return JsonObject(
             root.toMutableMap().apply {
-                this["dns"] = JsonObject(
-                    dns.toMutableMap().apply {
-                        this["rules"] = JsonArray(rules)
-                        this["servers"] = JsonArray(servers)
-                    },
-                )
+                this["dns"] = JsonObject(dnsMut)
             },
         )
     }
@@ -351,20 +361,58 @@ object AdBlockHardening {
     }
 
     private fun ensureOnlineFilterServer(servers: MutableList<JsonElement>, proxyTag: String) {
-        if (servers.any { (it as? JsonObject)?.string("tag") == ONLINE_FILTER_DNS_TAG }) return
+        servers.removeAll { element ->
+            val tag = (element as? JsonObject)?.string("tag").orEmpty()
+            tag == ONLINE_FILTER_DNS_TAG ||
+                tag == "${ONLINE_FILTER_DNS_TAG}-host" ||
+                tag == "${ONLINE_FILTER_DNS_TAG}-ip"
+        }
+        val hostTag = "${ONLINE_FILTER_DNS_TAG}-host"
+        val ipTag = "${ONLINE_FILTER_DNS_TAG}-ip"
+        // DoH AdGuard: https://dns.adguard-dns.com/dns-query — реклама на сайтах и в приложениях.
         servers.add(
             buildJsonObject {
                 put("type", "https")
-                put("tag", ONLINE_FILTER_DNS_TAG)
-                put("server", "94.140.14.14")
+                put("tag", hostTag)
+                put("server", ONLINE_FILTER_HOST)
+                put("server_port", 443)
+                put("path", "/dns-query")
                 put(
                     "tls",
                     buildJsonObject {
                         put("enabled", true)
-                        put("server_name", "dns.adguard-dns.com")
+                        put("server_name", ONLINE_FILTER_HOST)
                     },
                 )
                 put("detour", proxyTag)
+            },
+        )
+        servers.add(
+            buildJsonObject {
+                put("type", "https")
+                put("tag", ipTag)
+                put("server", ONLINE_FILTER_IPV4)
+                put("server_port", 443)
+                put("path", "/dns-query")
+                put(
+                    "tls",
+                    buildJsonObject {
+                        put("enabled", true)
+                        put("server_name", ONLINE_FILTER_HOST)
+                    },
+                )
+                put("detour", proxyTag)
+            },
+        )
+        servers.add(
+            buildJsonObject {
+                put("type", "fallback")
+                put("tag", ONLINE_FILTER_DNS_TAG)
+                put(
+                    "servers",
+                    JsonArray(listOf(JsonPrimitive(hostTag), JsonPrimitive(ipTag))),
+                )
+                put("strategy", "parallel")
             },
         )
     }
@@ -395,7 +443,11 @@ object AdBlockHardening {
         val serversBefore = servers.size
         servers.removeAll { element ->
             val tag = (element as? JsonObject)?.string("tag").orEmpty()
-            tag == DNS_BLOCK_TAG || tag == "${DNS_BLOCK_TAG}-sink" || tag == ONLINE_FILTER_DNS_TAG
+            tag == DNS_BLOCK_TAG ||
+                tag == "${DNS_BLOCK_TAG}-sink" ||
+                tag == ONLINE_FILTER_DNS_TAG ||
+                tag == "${ONLINE_FILTER_DNS_TAG}-host" ||
+                tag == "${ONLINE_FILTER_DNS_TAG}-ip"
         }
         if (rules.size == rulesBefore && servers.size == serversBefore) return root
         return JsonObject(
@@ -434,7 +486,10 @@ object AdBlockHardening {
     private fun isManagedAdDnsRule(element: JsonElement): Boolean {
         val rule = element as? JsonObject ?: return false
         val server = rule.string("server") ?: return false
-        return server == DNS_BLOCK_TAG || server == ONLINE_FILTER_DNS_TAG
+        return server == DNS_BLOCK_TAG ||
+            server == ONLINE_FILTER_DNS_TAG ||
+            server == "${ONLINE_FILTER_DNS_TAG}-host" ||
+            server == "${ONLINE_FILTER_DNS_TAG}-ip"
     }
 
     private fun JsonObject.string(name: String): String? =

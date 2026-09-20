@@ -30,7 +30,7 @@ internal class AdBlockStatsTracker(
     }
 
     private fun trim(now: Long) {
-        while (recentHits.isNotEmpty() && now - recentHits.first() > windowMillis) {
+        while (recentHits.isNotEmpty() && now - recentHits.first() >= windowMillis) {
             recentHits.removeFirst()
         }
     }

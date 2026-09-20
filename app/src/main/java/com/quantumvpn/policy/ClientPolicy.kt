@@ -33,6 +33,8 @@ data class ClientPolicy(
     val bannedSerials: List<String> = emptyList(),
     val bannedIps: List<String> = emptyList(),
     val banned: Boolean = false,
+    val adsListUrl: String = "",
+    val adblockLevel: String = "",
 ) {
     fun activeAnnounce(nowEpochSec: Long = System.currentTimeMillis() / 1000): String {
         if (announce.isBlank()) return ""

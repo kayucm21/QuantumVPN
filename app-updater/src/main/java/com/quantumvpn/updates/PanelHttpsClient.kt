@@ -113,7 +113,7 @@ class PanelHttpsClient : UpdateHttpClient {
             throw UpdateException("Панель вернула некорректный URL.", error)
         }
         if (uri.scheme != "https" || uri.userInfo != null || uri.fragment != null ||
-            uri.port !in setOf(-1, 443)
+            uri.port !in setOf(-1, 443, 8443)
         ) {
             throw UpdateException("Обновления разрешены только по HTTPS с панели.")
         }

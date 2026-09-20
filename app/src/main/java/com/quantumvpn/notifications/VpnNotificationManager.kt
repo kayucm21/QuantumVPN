@@ -5,6 +5,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import android.app.PendingIntent
+import android.content.Intent
+import com.quantumvpn.MainActivity
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -28,6 +31,51 @@ class VpnNotificationManager(
         private const val NOTIFICATION_ID_CRITICAL = 1001
         private const val NOTIFICATION_ID_RECONNECT = 1002
         private const val NOTIFICATION_ID_DISCONNECTED = 1003
+        private const val NOTIFICATION_ID_UPDATE = 1010
+        private const val NOTIFICATION_ID_SERVICE = 1011
+    }
+
+    private fun launchAppIntent(): PendingIntent = PendingIntent.getActivity(
+        context,
+        0,
+        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    fun showUpdateAvailableNotification(version: String) {
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID_CRITICAL)
+            .setContentTitle("Доступно обновление QuantumVPN")
+            .setContentText("Версия $version готова к загрузке. Нажмите, чтобы обновить приложение.")
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentIntent(launchAppIntent())
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        notificationManager.notify(NOTIFICATION_ID_UPDATE, notification)
+    }
+
+    fun showMaintenanceNotification(message: String) {
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID_CRITICAL)
+            .setContentTitle("Технические работы")
+            .setContentText(message.ifBlank { "Сервис временно недоступен. Мы сообщим о восстановлении." })
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(launchAppIntent())
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        notificationManager.notify(NOTIFICATION_ID_SERVICE, notification)
+    }
+
+    fun showServiceRestoredNotification() {
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID_CRITICAL)
+            .setContentTitle("Сервис QuantumVPN восстановлен")
+            .setContentText("Технические работы завершены. VPN снова доступен.")
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentIntent(launchAppIntent())
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        notificationManager.notify(NOTIFICATION_ID_SERVICE, notification)
     }
 
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

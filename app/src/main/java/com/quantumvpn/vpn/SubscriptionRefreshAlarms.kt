@@ -8,6 +8,7 @@ import android.content.Intent
 import com.quantumvpn.QuantumVpnApplication
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import com.quantumvpn.updates.UpdateChannel
 
 /**
  * Always-on periodic subscription refresh (no manual action required).
@@ -15,7 +16,7 @@ import kotlinx.coroutines.runBlocking
  */
 object SubscriptionRefreshAlarms {
     const val ACTION = "com.quantumvpn.action.REFRESH_SUBSCRIPTIONS"
-    const val DEFAULT_HOURS = 6
+    const val DEFAULT_HOURS = 1
     /** Pending flag for next ProfilesViewModel tick when receiver can't refresh fully. */
     @Volatile
     var pendingRefresh: Boolean = false
@@ -54,6 +55,8 @@ class SubscriptionRefreshReceiver : BroadcastReceiver() {
             Thread {
                 try {
                     runBlocking {
+                        app.container.clientPolicyRepository.refresh()
+                        app.container.updateController.checkOnce(UpdateChannel.Stable)
                         app.container.eventJournalStore.append(
                             "subs",
                             "Scheduled subscription refresh requested",

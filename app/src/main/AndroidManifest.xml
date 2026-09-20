@@ -19,6 +19,8 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <!-- GitHub-distributed builds launch the system installer only after explicit download/install confirmation. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Always-on subscription auto-refresh must survive device reboots. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Requested only after the user opens the QR scanner. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
@@ -159,6 +161,14 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="com.quantumvpn.action.REFRESH_SUBSCRIPTIONS" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".vpn.SubscriptionRefreshBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 

@@ -51,6 +51,18 @@ class AdBlockHardeningTest {
         assertTrue(
             servers.any { (it as JsonObject).string("tag") == AdBlockHardening.ONLINE_FILTER_DNS_TAG },
         )
+        assertTrue(
+            servers.any {
+                val o = it as JsonObject
+                o.string("tag")?.startsWith(AdBlockHardening.ONLINE_FILTER_DNS_TAG) == true &&
+                    (o.string("server") == AdBlockHardening.ONLINE_FILTER_HOST ||
+                        o.string("server") == AdBlockHardening.ONLINE_FILTER_IPV4)
+            },
+        )
+        assertEquals(
+            AdBlockHardening.ONLINE_FILTER_DNS_TAG,
+            (result["dns"] as JsonObject).string("final"),
+        )
     }
 
     @Test

@@ -50,7 +50,7 @@ class UpdateController(
     /** Runs at most once per app process; no worker, alarm or periodic polling is created. */
     fun checkOnce(channel: UpdateChannel) {
         if (automaticCheckStarted.compareAndSet(false, true)) {
-            check(channel, autoDownload = true)
+            check(channel, autoDownload = false)
         }
     }
 

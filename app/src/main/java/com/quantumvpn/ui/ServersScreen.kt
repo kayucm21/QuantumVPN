@@ -109,6 +109,8 @@ internal fun ServersScreen(
     onRecordProbeFailure: (profileId: String, groupTag: String, outboundTag: String) -> Unit = { _, _, _ -> },
     onRecordProbeSuccess: (profileId: String, groupTag: String, outboundTag: String) -> Unit = { _, _, _ -> },
     reliabilityScores: Map<String, Int> = emptyMap(),
+    reliabilityEntries: Map<String, com.quantumvpn.vpn.ReliabilityEntry> = emptyMap(),
+    serverMode: com.quantumvpn.ui.ServerMode = com.quantumvpn.ui.ServerMode.Standard,
     compactActions: Boolean = false,
 ) {
     val connected = vpnState as? VpnConnectionState.Connected
@@ -693,11 +695,34 @@ internal fun ServersScreen(
                             shape = MaterialTheme.shapes.large,
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
-                                Text(
-                                    "Серверы · ${orderedServers.size}",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        "Серверы · ${orderedServers.size}",
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                    if (serverMode != com.quantumvpn.ui.ServerMode.Standard) {
+                                        Surface(
+                                            color = Color.White.copy(alpha = 0.18f),
+                                            shape = MaterialTheme.shapes.small,
+                                        ) {
+                                            Text(
+                                                when (serverMode) {
+                                                    com.quantumvpn.ui.ServerMode.Gaming -> "🎮 Gaming"
+                                                    com.quantumvpn.ui.ServerMode.Movie -> "🎬 Movie"
+                                                    com.quantumvpn.ui.ServerMode.Standard -> ""
+                                                },
+                                                color = Color.White,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                            )
+                                        }
+                                    }
+                                }
                                 Text(
                                     best?.let { "Лучший пинг: ${it.second} ms · ${it.first.tag}" }
                                         ?: "Потяните вниз или нажмите «Проверить» для пинга",
@@ -746,6 +771,55 @@ internal fun ServersScreen(
                                             }
                                         },
                                     ) { Text("Выбрать") }
+                                }
+                            }
+                        }
+                    }
+                    val ranked = orderedServers
+                        .mapNotNull { item ->
+                            reliabilityEntries[item.tag]?.let { entry ->
+                                Triple(item, entry, reliabilityScores[item.tag] ?: entry.score)
+                            }
+                        }
+                        .filter { it.second.successes + it.second.failures >= 2 }
+                        .sortedByDescending { it.third }
+                        .take(5)
+                    if (ranked.isNotEmpty()) {
+                        item(key = "reliability-ranking") {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                shape = MaterialTheme.shapes.large,
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        "Надёжность серверов",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    ranked.forEachIndexed { index, (item, entry, score) ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text(
+                                                "${index + 1}. ${item.tag}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                            Text(
+                                                "$score% · ${entry.successes}✓/${entry.failures}✗",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

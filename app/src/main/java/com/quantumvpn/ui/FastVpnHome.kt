@@ -145,6 +145,8 @@ fun FastVpnHomeContent(
     adBlockActive: Boolean = false,
     adBlockRuleCount: Int = 0,
     adBlockOnlineDns: Boolean = true,
+    adBlockLevel: com.quantumvpn.hardening.AdBlockLevel =
+        com.quantumvpn.hardening.AdBlockLevel.Maximum,
     onToggleAdBlock: (Boolean) -> Unit = {},
     onOpenAdBlockSettings: () -> Unit = {},
     adBlockedApprox: Int = 0,
@@ -184,6 +186,31 @@ fun FastVpnHomeContent(
     // Block ads when user enabled it and VPN session is active.
     val adBlockOn = adBlockEnabled && adBlockActive
     val pad = if (compactHome) 14.dp else 20.dp
+
+    // This is the primary production home now. Keep the former dense dashboard
+    // below while its advanced controls are migrated into dedicated tabs.
+    ModernHomeContent(
+        title = title,
+        vpnState = vpnState,
+        sessionTimerLabel = sessionTimerLabel,
+        serverFlag = serverFlag,
+        serverLabel = serverLabel,
+        serverPingLabel = serverPingLabel,
+        connectEnabled = connectEnabled,
+        reduceMotion = reduceMotion,
+        adBlockEnabled = adBlockEnabled,
+        adBlockActive = adBlockOn,
+        adBlockRuleCount = adBlockRuleCount,
+        adBlockOnlineDns = adBlockOnlineDns,
+        adBlockLevel = adBlockLevel,
+        adBlockedSessionTotal = adBlockedSessionTotal,
+        onOpenMenu = onOpenMenu,
+        onToggleConnect = onToggleConnect,
+        onOpenServers = onOpenServers,
+        onToggleAdBlock = onToggleAdBlock,
+        onOpenAdBlockSettings = onOpenAdBlockSettings,
+    )
+    return
 
     Box(
         modifier = modifier
@@ -489,6 +516,7 @@ fun FastVpnHomeContent(
                     configured = adBlockEnabled,
                     ruleCount = adBlockRuleCount,
                     onlineDns = adBlockOnlineDns,
+                    level = adBlockLevel,
                     blockedApprox = adBlockedApprox,
                     blockedSessionTotal = adBlockedSessionTotal,
                     onToggle = onToggleAdBlock,
@@ -496,6 +524,101 @@ fun FastVpnHomeContent(
                 )
             }
             Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+/** Clean four-tab home matching the released QuantumVPN visual system. */
+@Composable
+private fun ModernHomeContent(
+    title: String,
+    vpnState: VpnConnectionState,
+    sessionTimerLabel: String,
+    serverFlag: String?,
+    serverLabel: String,
+    serverPingLabel: String?,
+    connectEnabled: Boolean,
+    reduceMotion: Boolean,
+    adBlockEnabled: Boolean,
+    adBlockActive: Boolean,
+    adBlockRuleCount: Int,
+    adBlockOnlineDns: Boolean,
+    adBlockLevel: com.quantumvpn.hardening.AdBlockLevel,
+    adBlockedSessionTotal: Long,
+    onOpenMenu: () -> Unit,
+    onToggleConnect: () -> Unit,
+    onOpenServers: () -> Unit,
+    onToggleAdBlock: (Boolean) -> Unit,
+    onOpenAdBlockSettings: () -> Unit,
+) {
+    val connected = vpnState is VpnConnectionState.Connected
+    val busy = vpnState is VpnConnectionState.Starting || vpnState is VpnConnectionState.Stopping
+    val stateText = when {
+        connected -> "Защита включена"
+        busy -> "Подключение…"
+        else -> "Безопасное соединение"
+    }
+    Box(
+        modifier = Modifier.fillMaxSize().background(
+            Brush.verticalGradient(listOf(Color(0xFF071B2A), Color(0xFF04111E), Color(0xFF02070D))),
+        ),
+    ) {
+        Globe3DBackdrop(
+            modifier = Modifier.fillMaxSize(),
+            pulse = connected && !reduceMotion,
+            reduceMotion = reduceMotion,
+            countryCode = null,
+        )
+        Column(
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 18.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text(title, color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+                    Text("Ваш безопасный интернет", color = CosmicTokens.OnVoidMuted, fontSize = 13.sp)
+                }
+                IconButton(onClick = onOpenMenu) {
+                    Surface(shape = CircleShape, color = CosmicTokens.Card, modifier = Modifier.size(42.dp)) {
+                        Box(contentAlignment = Alignment.Center) { GridMenuIcon(Color.White, Modifier.size(18.dp)) }
+                    }
+                }
+            }
+            Spacer(Modifier.height(38.dp))
+            Surface(
+                shape = CircleShape,
+                color = if (connected) CosmicTokens.StatusGreen.copy(alpha = 0.15f) else CosmicTokens.Card.copy(alpha = 0.85f),
+                border = androidx.compose.foundation.BorderStroke(2.dp, if (connected) CosmicTokens.StatusGreen else Color.White.copy(alpha = 0.20f)),
+                modifier = Modifier.size(218.dp),
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text(if (connected) "✓" else "◉", color = if (connected) CosmicTokens.StatusGreen else Color.White, fontSize = 50.sp)
+                    Text(stateText, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                    Text(if (connected || busy) sessionTimerLabel else "Нажмите для подключения", color = CosmicTokens.OnVoidMuted, fontSize = 12.sp)
+                }
+            }
+            Spacer(Modifier.height(22.dp))
+            FastPowerButton(
+                connected = connected, busy = busy, enabled = connectEnabled, reduceMotion = reduceMotion,
+                globe3d = true, onClick = onToggleConnect, onSwipeLeft = {}, onSwipeRight = {},
+            )
+            Spacer(Modifier.height(24.dp))
+            ServerSelectCard(serverFlag, serverLabel, serverPingLabel, onOpenServers)
+            Spacer(Modifier.height(12.dp))
+            AdBlockBar(
+                enabled = adBlockActive, configured = adBlockEnabled, ruleCount = adBlockRuleCount,
+                onlineDns = adBlockOnlineDns, level = adBlockLevel, blockedSessionTotal = adBlockedSessionTotal,
+                onToggle = onToggleAdBlock, onOpenSettings = onOpenAdBlockSettings,
+            )
+            Spacer(Modifier.height(22.dp))
         }
     }
 }
@@ -598,12 +721,20 @@ private fun TrafficAreaChart(
     }
 }
 
+private fun levelLabel(level: com.quantumvpn.hardening.AdBlockLevel): String = when (level) {
+    com.quantumvpn.hardening.AdBlockLevel.Light -> "Лёгкий"
+    com.quantumvpn.hardening.AdBlockLevel.Standard -> "Стандарт"
+    com.quantumvpn.hardening.AdBlockLevel.Hard -> "Жёсткий"
+    com.quantumvpn.hardening.AdBlockLevel.Maximum -> "Максимум"
+}
+
 @Composable
 private fun AdBlockBar(
     enabled: Boolean,
     configured: Boolean,
     ruleCount: Int,
     onlineDns: Boolean,
+    level: com.quantumvpn.hardening.AdBlockLevel,
     blockedApprox: Int = 0,
     blockedSessionTotal: Long = 0L,
     onToggle: (Boolean) -> Unit,
@@ -635,9 +766,9 @@ private fun AdBlockBar(
                 Text(
                     when {
                         enabled && onlineDns ->
-                            "DNS + маршрут · ~$ruleCount правил · AdGuard онлайн"
+                            "DNS + маршрут · ~$ruleCount · ${levelLabel(level)} · AdGuard"
                         enabled ->
-                            "DNS + маршрут · ~$ruleCount правил · локальные списки"
+                            "DNS + маршрут · ~$ruleCount · ${levelLabel(level)} · локальные списки"
                         configured ->
                             "Включена · активируется с VPN"
                         else ->

@@ -1,5 +1,7 @@
 package com.quantumvpn.vpn
 
+import com.quantumvpn.ui.ServerMode
+
 /** Pick next-best outbound for auto-failover and «Лучший сервер» (ping + QoE score). */
 object ServerFailover {
     data class Candidate(val groupTag: String, val outboundTag: String, val pingMillis: Int)
@@ -12,6 +14,7 @@ object ServerFailover {
         maxPingMillis: Int = 2_000,
         /** Optional reliability 0..100 — higher is better. */
         reliabilityByTag: Map<String, Int> = emptyMap(),
+        mode: ServerMode = ServerMode.Standard,
     ): Candidate? {
         val primary = groups.forServerUi().primaryGroup() ?: return null
         val blocked = excludeTags + setOfNotNull(excludeTag)
@@ -30,10 +33,22 @@ object ServerFailover {
                     typeByTag = primary.items.associate { it.tag to it.type },
                     failedType = null,
                     reliabilityByTag = reliabilityByTag,
+                    mode = mode,
                 ) ?: list.minByOrNull { candidate ->
                     val health = ServerHealthScore.score(candidate.pingMillis)
                     val reliability = reliabilityByTag[candidate.outboundTag] ?: 50
-                    (200 - health - reliability) * 10 + candidate.pingMillis
+                    val latencyWeight = when (mode) {
+                        ServerMode.Gaming -> 3
+                        ServerMode.Movie -> 0
+                        ServerMode.Standard -> 1
+                    }
+                    val reliabilityWeight = when (mode) {
+                        ServerMode.Gaming -> 1
+                        ServerMode.Movie -> 3
+                        ServerMode.Standard -> 1
+                    }
+                    (200 - health - reliability) * 10 * reliabilityWeight +
+                        candidate.pingMillis * latencyWeight
                 }
             }
     }
@@ -64,6 +79,7 @@ object ServerFailover {
         pingByTag: Map<String, Int?>,
         maxPingMillis: Int = 2_000,
         reliabilityByTag: Map<String, Int> = emptyMap(),
+        mode: ServerMode = ServerMode.Standard,
     ): Candidate? = nextBest(
         groups = groups,
         pingByTag = pingByTag,
@@ -71,5 +87,6 @@ object ServerFailover {
         excludeTags = emptySet(),
         maxPingMillis = maxPingMillis,
         reliabilityByTag = reliabilityByTag,
+        mode = mode,
     )
 }

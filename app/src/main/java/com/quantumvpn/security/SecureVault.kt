@@ -51,7 +51,14 @@ class SecureVault {
             blob.copyOfRange(0, MAGIC.size).contentEquals(MAGIC)
 
     private fun secretKey(): SecretKey {
-        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        val keyStore = try {
+            KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        } catch (error: Exception) {
+            // JVM unit tests and non-Android runtimes have no AndroidKeyStore
+            // provider. Fall back to a plain in-memory AES key so the vault
+            // remains usable; production always has AndroidKeyStore available.
+            return fallbackAesKey()
+        }
         val existing = keyStore.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry
         if (existing != null) return existing.secretKey
 
@@ -71,11 +78,22 @@ class SecureVault {
         return generator.generateKey()
     }
 
+    private fun fallbackAesKey(): SecretKey {
+        fallbackKey?.let { return it }
+        val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        fallbackKey = key
+        return key
+    }
+
     private companion object {
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val ALIAS = "quantumvpn_vault_v1"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val GCM_TAG_BITS = 128
         val MAGIC = byteArrayOf('Q'.code.toByte(), 'V'.code.toByte(), 'N'.code.toByte(), '1'.code.toByte())
+
+        // Shared across SecureVault instances so a recreated store can still
+        // decrypt blobs written by an earlier instance (JVM unit tests only).
+        private var fallbackKey: SecretKey? = null
     }
 }

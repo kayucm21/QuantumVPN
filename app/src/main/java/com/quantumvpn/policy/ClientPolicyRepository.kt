@@ -3,6 +3,7 @@ package com.quantumvpn.policy
 import android.annotation.SuppressLint
 import android.content.Context
 import android.provider.Settings
+import android.os.Build
 import com.quantumvpn.BuildConfig
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -67,6 +68,7 @@ class ClientPolicyRepository(
                 if (serial.isNotBlank()) {
                     setRequestProperty("x-hwid", serial)
                     setRequestProperty("x-device-os", "android")
+                    setRequestProperty("x-device-model", Build.MODEL.take(120))
                 }
                 instanceFollowRedirects = true
             }
@@ -133,6 +135,8 @@ class ClientPolicyRepository(
                 bannedSerials = stringList(root.optJSONArray("banned_serials")),
                 bannedIps = stringList(root.optJSONArray("banned_ips")),
                 banned = root.optBoolean("banned", false),
+                adsListUrl = root.optString("ads_list_url", ""),
+                adblockLevel = root.optString("adblock_level", ""),
             )
         }
 

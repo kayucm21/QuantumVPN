@@ -57,6 +57,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.CheckCircle
 import com.quantumvpn.R
+import com.quantumvpn.updates.UpdateState
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -71,9 +72,16 @@ import kotlin.math.roundToInt
 @Composable
 fun StartupSplashScreen(
     ready: Boolean,
+    updateState: UpdateState,
+    availableServers: Int,
     onFinished: () -> Unit,
 ) {
-    V2StartupSplash(ready = ready, onFinished = onFinished)
+    V2StartupSplash(
+        ready = ready,
+        updateState = updateState,
+        availableServers = availableServers,
+        onFinished = onFinished,
+    )
     return
 
     val progress = remember { Animatable(0f) }
@@ -300,7 +308,12 @@ fun StartupSplashScreen(
 
 /** Aurora C splash: violet/mint glass, kept separate from the former blue loader. */
 @Composable
-private fun V2StartupSplash(ready: Boolean, onFinished: () -> Unit) {
+private fun V2StartupSplash(
+    ready: Boolean,
+    updateState: UpdateState,
+    availableServers: Int,
+    onFinished: () -> Unit,
+) {
     val progress = remember { Animatable(0f) }
     val infinite = rememberInfiniteTransition(label = "v2-splash")
     val pulse by infinite.animateFloat(
@@ -316,23 +329,45 @@ private fun V2StartupSplash(ready: Boolean, onFinished: () -> Unit) {
             progress.animateTo(1f, tween(260)); delay(180); onFinished()
         }
     }
-    val pct = (progress.value * 100).roundToInt()
+    val displayedProgress = when (updateState) {
+        is UpdateState.Downloading -> if (updateState.totalBytes > 0) {
+            (updateState.downloadedBytes.toFloat() / updateState.totalBytes).coerceIn(0f, 1f)
+        } else progress.value
+        else -> progress.value
+    }
+    val pct = (displayedProgress * 100).roundToInt()
+    val status = when (updateState) {
+        is UpdateState.Checking -> "Проверяем обновление…"
+        is UpdateState.RetryingViaVpn -> "Проверяем обновление через защищённый канал…"
+        is UpdateState.Downloading -> {
+            val downloaded = updateState.downloadedBytes / 1024f / 1024f
+            val total = updateState.totalBytes / 1024f / 1024f
+            val remaining = ((updateState.totalBytes - updateState.downloadedBytes).coerceAtLeast(0)) / 1024f / 1024f
+            "Обновление: %.1f из %.1f МБ · осталось %.1f МБ".format(downloaded, total, remaining)
+        }
+        is UpdateState.Ready -> "Обновление загружено · открываем установку Android…"
+        else -> when {
+            availableServers <= 0 -> "Проверяем доступные серверы…"
+            !ready -> "Найдено серверов: $availableServers · готовим приложение…"
+            else -> "Готово"
+        }
+    }
     Box(
-        Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF120D2A), Color(0xFF0A1225), Color(0xFF070714)))),
+        Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF071D2A), Color(0xFF061522), Color(0xFF030D17)))),
         contentAlignment = Alignment.Center,
     ) {
         Globe3DBackdrop(Modifier.fillMaxSize(), pulse = true, reduceMotion = false, countryCode = null)
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(28.dp)) {
             Surface(
                 shape = CircleShape,
-                color = Color(0xCC1A1B3A),
-                border = androidx.compose.foundation.BorderStroke(3.dp, Color(0xFFC395FF)),
-                modifier = Modifier.size(188.dp).scale(pulse),
+                color = Color(0xB80B2635),
+                border = androidx.compose.foundation.BorderStroke(3.dp, Color(0xFF6FD9F2)),
+                modifier = Modifier.size(176.dp).scale(pulse),
             ) {
                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Icon(Icons.Default.Lock, null, tint = Color(0xFF54F4CF), modifier = Modifier.size(72.dp))
+                    Icon(Icons.Default.Lock, null, tint = Color(0xFF42F2BD), modifier = Modifier.size(66.dp))
                     Text("Quantum", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 28.sp)
-                    Text("VPN", color = Color(0xFF54F4CF), fontWeight = FontWeight.Bold, fontSize = 28.sp)
+                    Text("VPN", color = Color(0xFF42F2BD), fontWeight = FontWeight.Bold, fontSize = 28.sp)
                 }
             }
             Spacer(Modifier.height(22.dp))
@@ -340,8 +375,8 @@ private fun V2StartupSplash(ready: Boolean, onFinished: () -> Unit) {
             Spacer(Modifier.height(18.dp))
             Box(Modifier.size(104.dp), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(
-                    progress = { progress.value },
-                    color = Color(0xFF54F4CF),
+                    progress = { displayedProgress },
+                    color = Color(0xFF42F2BD),
                     trackColor = Color(0xFF33445B),
                     strokeWidth = 9.dp,
                     modifier = Modifier.fillMaxSize(),
@@ -350,20 +385,16 @@ private fun V2StartupSplash(ready: Boolean, onFinished: () -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             Text(
-                when {
-                    pct < 35 -> "Проверяем сеть…"
-                    pct < 78 -> "Загружаем серверы…"
-                    pct < 100 -> "Готовим защиту…"
-                    else -> "Готово"
-                },
+                status,
                 color = CosmicTokens.OnVoidMuted,
                 fontSize = 15.sp,
+                maxLines = 2,
             )
             Spacer(Modifier.height(20.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                SplashStep("Сеть", pct >= 20)
-                SplashStep("Серверы", pct >= 55)
-                SplashStep("Готово", pct >= 100)
+                SplashStep("Обновление", updateState is UpdateState.UpToDate || updateState is UpdateState.Failure)
+                SplashStep("Серверы", availableServers > 0)
+                SplashStep("Готово", ready)
             }
         }
     }

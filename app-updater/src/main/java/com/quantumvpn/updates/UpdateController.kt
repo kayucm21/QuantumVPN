@@ -47,10 +47,10 @@ class UpdateController(
         cleanupStaleFiles()
     }
 
-    /** Runs at most once per app process; no worker, alarm or periodic polling is created. */
-    fun checkOnce(channel: UpdateChannel) {
+    /** Runs at most once per app process; startup may opt into verified automatic download. */
+    fun checkOnce(channel: UpdateChannel, autoDownload: Boolean = false) {
         if (automaticCheckStarted.compareAndSet(false, true)) {
-            check(channel, autoDownload = false)
+            check(channel, autoDownload = autoDownload)
         }
     }
 

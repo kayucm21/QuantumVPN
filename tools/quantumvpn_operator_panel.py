@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Small self-contained QuantumVPN operator panel (stdlib only)."""
-import base64, hashlib, html, json, os, sqlite3, ssl, time, shutil
+import base64, hashlib, html, json, os, sqlite3, ssl, time, shutil, threading
 from urllib.parse import urlsplit, parse_qs
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,10 +13,13 @@ PASSWORD = os.environ["QV_ADMIN_PASSWORD"]
 UPSTREAM = os.environ["QV_SUBSCRIPTION_UPSTREAM"]
 ROSPANEL_DB = os.environ.get("QV_ROSPANEL_DB", "/var/lib/rospanel/rospanel.db")
 
-VERSION = "5.6.14"
-VERSION_CODE = 95
+VERSION = "5.6.15"
+VERSION_CODE = 96
 DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/downloads")
 PUBLIC_BASE = "https://tepacom.o190.com:8443"
+_DB_INIT_LOCK = threading.Lock()
+_DB_READY = False
+_LAST_EVENT_CLEANUP = 0
 
 @lru_cache(maxsize=8)
 def release_info(abi, size, mtime):
@@ -25,22 +28,30 @@ def release_info(abi, size, mtime):
     with open(os.path.join(DOWNLOAD_ROOT, VERSION, name), "rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
-    return {"version": VERSION, "version_code": VERSION_CODE, "url": f"{PUBLIC_BASE}/downloads/{VERSION}/{name}", "sha256": digest.hexdigest(), "size": size, "note": "Aurora C: пинг без VPN, AdGuard DNS в туннеле, системные уведомления об обновлении и состоянии сервиса."}
+    return {"version": VERSION, "version_code": VERSION_CODE, "url": f"{PUBLIC_BASE}/downloads/{VERSION}/{name}", "sha256": digest.hexdigest(), "size": size, "note": "Liquid Glass Orbit C: автообновление при запуске, проверка серверов и мгновенная реакция на технические работы."}
 
 def conn():
+    global _DB_READY, _LAST_EVENT_CLEANUP
     os.makedirs(ROOT, exist_ok=True)
     db = sqlite3.connect(DB)
-    db.execute("create table if not exists settings (key text primary key, value text not null)")
-    db.execute("create table if not exists events (ts integer, kind text, device text, ip text, detail text)")
-    db.execute("create table if not exists protocols (name text primary key, enabled integer not null default 1)")
-    for key, value in {"maintenance":"0", "maintenance_message":"Ведутся технические работы. После завершения работ мы возобновим сервис.", "announce":"", "subscription_main_enabled":"1", "update_notifications_enabled":"1"}.items():
-        db.execute("insert or ignore into settings values (?,?)", (key,value))
-    db.execute(
-        "update settings set value=? where key='maintenance_message' and value=?",
-        ("Ведутся технические работы. После завершения работ мы возобновим сервис.", "Технические работы. Извините за неудобства."),
-    )
-    db.execute("delete from events where ts < ?", (int(time.time()) - 14*86400,))
-    db.commit(); return db
+    now = int(time.time())
+    with _DB_INIT_LOCK:
+        if not _DB_READY:
+            db.execute("create table if not exists settings (key text primary key, value text not null)")
+            db.execute("create table if not exists events (ts integer, kind text, device text, ip text, detail text)")
+            db.execute("create table if not exists protocols (name text primary key, enabled integer not null default 1)")
+            for key, value in {"maintenance":"0", "maintenance_message":"Ведутся технические работы. После завершения работ мы возобновим сервис.", "announce":"", "subscription_main_enabled":"1", "update_notifications_enabled":"1"}.items():
+                db.execute("insert or ignore into settings values (?,?)", (key,value))
+            db.execute(
+                "update settings set value=? where key='maintenance_message' and value=?",
+                ("Ведутся технические работы. После завершения работ мы возобновим сервис.", "Технические работы. Извините за неудобства."),
+            )
+            _DB_READY = True
+        if now - _LAST_EVENT_CLEANUP >= 3600:
+            db.execute("delete from events where ts < ?", (now - 14*86400,))
+            _LAST_EVENT_CLEANUP = now
+        db.commit()
+    return db
 
 def settings(db): return dict(db.execute("select key,value from settings"))
 def auth(header):
@@ -124,7 +135,10 @@ class App(BaseHTTPRequestHandler):
                 status["upstream"] = "probe_failed"
             return self.reply(200, json.dumps(status))
         if self.path.startswith("/api/client/policy"):
-            dev,ip=self.client(); db.execute("insert into events values (?,?,?,?,?)",(int(time.time()),"policy",dev,ip,self.headers.get("x-device-model","Android")[:120])); db.commit()
+            dev,ip=self.client(); now=int(time.time())
+            last=db.execute("select max(ts) from events where kind='policy' and device=?",(dev,)).fetchone()[0] or 0
+            if now-last >= 600:
+                db.execute("insert into events values (?,?,?,?,?)",(now,"policy",dev,ip,self.headers.get("x-device-model","Android")[:120])); db.commit()
             result={"platform":"android","maintenance":s["maintenance"]=="1","maintenance_message":s["maintenance_message"],"announce":s["announce"],"latest_version":VERSION,"version_code":VERSION_CODE,"update_url":f"{PUBLIC_BASE}/downloads/{VERSION}/QuantumVPN-{VERSION}-operator-debug-arm64-v8a.apk","update_notifications":True,"features":{"vpn_connect":s["maintenance"]!="1","import_json":False,"adblock":True}}
             return self.reply(200,json.dumps(result))
         if self.path == "/api/v1/subscription":

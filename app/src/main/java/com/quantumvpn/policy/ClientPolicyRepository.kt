@@ -26,7 +26,7 @@ import org.json.JSONObject
 /**
  * Polls RosPanel Client Control for the branded Android APK.
  * Base URL = BuildConfig.PANEL_UPDATE_BASE_URL (includes secret path).
- * Sends x-hwid (ANDROID_ID) so Ops bans apply within ~60s.
+ * Sends x-hwid (ANDROID_ID) so maintenance and access changes apply promptly.
  */
 class ClientPolicyRepository(
     private val appContext: Context? = null,
@@ -37,7 +37,7 @@ class ClientPolicyRepository(
     val policy: StateFlow<ClientPolicy> = mutable.asStateFlow()
     private var loop: Job? = null
 
-    fun start(intervalMs: Long = 60_000L) {
+    fun start(intervalMs: Long = 5_000L) {
         if (baseUrl.isBlank()) return
         if (loop?.isActive == true) return
         loop = scope.launch(Dispatchers.IO) {

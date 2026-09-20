@@ -56,6 +56,7 @@ class MainActivity : FragmentActivity() {
     private var homeSelected = false
     private var diagnosticsSelected = false
     private var pendingUpdateInstall = false
+    private var startupInstallerOpenedFor: String? = null
     private var pendingShortcut by mutableStateOf<String?>(null)
     private var lastSubscriptionRefreshMs = 0L
     private val updateController
@@ -108,7 +109,7 @@ class MainActivity : FragmentActivity() {
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        updateController.checkOnce(UpdateChannel.Stable)
+        updateController.checkOnce(UpdateChannel.Stable, autoDownload = true)
         setContent {
             val state by profilesViewModel.state.collectAsState()
             val vpnState by vpnController.state.collectAsState()
@@ -137,6 +138,42 @@ class MainActivity : FragmentActivity() {
                     context = this@MainActivity,
                     openPrivateDnsSettingsIfStrict = false,
                 )
+            }
+            var startupServersChecked by remember { mutableStateOf(false) }
+            LaunchedEffect(state.initialized, state.profiles.size) {
+                if (state.initialized && state.profiles.isEmpty() && state.importPreview == null) {
+                    profilesViewModel.installManagedSubscription()
+                }
+            }
+            LaunchedEffect(state.importPreview?.sourceUrl, state.importPreview?.isRefresh) {
+                val preview = state.importPreview
+                if (preview != null && !preview.isRefresh &&
+                    preview.sourceUrl == com.quantumvpn.profiles.ManagedSubscriptionEndpoint.url
+                ) {
+                    profilesViewModel.confirmImport(preview.suggestedName)
+                }
+            }
+            LaunchedEffect(state.homeSelectorGroups) {
+                if (state.homeSelectorGroups.any { it.items.isNotEmpty() }) startupServersChecked = true
+            }
+            LaunchedEffect(Unit) {
+                kotlinx.coroutines.delay(15_000)
+                startupServersChecked = true
+            }
+            var startupUpdateSettled by remember { mutableStateOf(false) }
+            LaunchedEffect(updateState) {
+                when (val update = updateState) {
+                    is com.quantumvpn.updates.UpdateState.Ready -> {
+                        val version = update.candidate.metadata.versionName
+                        if (startupInstallerOpenedFor != version) {
+                            startupInstallerOpenedFor = version
+                            requestUpdateInstall()
+                        }
+                    }
+                    is com.quantumvpn.updates.UpdateState.UpToDate,
+                    is com.quantumvpn.updates.UpdateState.Failure -> startupUpdateSettled = true
+                    else -> Unit
+                }
             }
             var splashDone by remember { mutableStateOf(false) }
             val darkTheme = if (!splashDone) {
@@ -213,7 +250,9 @@ class MainActivity : FragmentActivity() {
                 }
                 if (!splashDone) {
                     StartupSplashScreen(
-                        ready = state.initialized,
+                        ready = state.initialized && startupServersChecked && startupUpdateSettled,
+                        updateState = updateState,
+                        availableServers = state.homeSelectorGroups.sumOf { it.items.size },
                         onFinished = { splashDone = true },
                     )
                 } else {

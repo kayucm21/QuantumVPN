@@ -69,7 +69,6 @@ import com.quantumvpn.diagnostics.DiagnosticState
 import com.quantumvpn.diagnostics.VoluntaryDiagnosticReporter
 import com.quantumvpn.profiles.ProfilesUiState
 import com.quantumvpn.profiles.ProfilesViewModel
-import com.quantumvpn.profiles.ManagedSubscriptionEndpoint
 import com.quantumvpn.vpn.RuntimeSelectorGroup
 import com.quantumvpn.vpn.VpnConnectionState
 import com.quantumvpn.vpn.VpnSessionStats
@@ -122,19 +121,6 @@ fun QuantumVpnAppV2(
     androidx.compose.runtime.DisposableEffect(tab) {
         onHomeSelected(tab == V2Tab.Home || tab == V2Tab.Statistics)
         onDispose { onHomeSelected(false) }
-    }
-    LaunchedEffect(state.initialized) {
-        if (state.initialized && state.profiles.isEmpty()) viewModel.installManagedSubscription()
-    }
-    // The bundled subscription is the only configuration offered by this shell.
-    // Unlike a user-imported link, it must be committed immediately after it has
-    // been fetched; otherwise the preview remains invisible in V2 and Servers
-    // appears empty forever.
-    LaunchedEffect(state.importPreview?.sourceUrl, state.importPreview?.isRefresh) {
-        val preview = state.importPreview
-        if (preview != null && !preview.isRefresh && preview.sourceUrl == ManagedSubscriptionEndpoint.url) {
-            viewModel.confirmImport(preview.suggestedName)
-        }
     }
     LaunchedEffect(state.message) {
         if (state.message != null) {
@@ -291,39 +277,41 @@ private fun V2Home(
                 Text("Quantum", color = Aurora.Text, fontSize = 29.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 10.dp))
                 Text("VPN", color = Aurora.Mint, fontSize = 29.sp, fontWeight = FontWeight.Bold)
             }
-            Spacer(Modifier.height(38.dp))
+            Spacer(Modifier.height(20.dp))
+            Surface(onClick = onServers, color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("⚡", fontSize = 24.sp)
+                    Column(Modifier.weight(1f).padding(start = 11.dp)) {
+                        Text("Лучший сервер", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                        Text(server, color = Aurora.Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Surface(color = Aurora.Mint.copy(alpha = .12f), shape = RoundedCornerShape(13.dp)) {
+                        Text(ping?.let { "$it мс" } ?: "авто", color = Aurora.Mint, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                    }
+                }
+            }
+            Spacer(Modifier.height(18.dp))
             Text(
                 if (connected) "Защита включена" else "Защита выключена",
                 color = if (connected) Aurora.Mint else Color(0xFFFF9EAF),
                 fontWeight = FontWeight.Bold,
-                fontSize = 28.sp,
+                fontSize = 24.sp,
             )
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(14.dp))
             Surface(
                 shape = CircleShape,
                 color = Aurora.Glass,
                 border = androidx.compose.foundation.BorderStroke(2.dp, if (connected) Aurora.Mint else Aurora.Violet),
-                modifier = Modifier.size(210.dp).clickable(enabled = !busy) { onConnect() },
+                modifier = Modifier.size(172.dp).clickable(enabled = !busy) { onConnect() },
             ) {
                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Icon(if (connected) Icons.Default.CheckCircle else Icons.Default.Lock, null, tint = Aurora.Mint, modifier = Modifier.size(68.dp))
+                    Icon(if (connected) Icons.Default.CheckCircle else Icons.Default.Lock, null, tint = Aurora.Mint, modifier = Modifier.size(54.dp))
                     Spacer(Modifier.height(9.dp))
-                    Text(if (connected) "Подключено" else if (busy) "Подключение…" else "Нажмите для старта", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text(if (connected) "Отключить" else if (busy) "Подключение…" else "Подключить", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                     Text(if (connected) "Соединение защищено" else if (hasProfile) "Готово к подключению" else "Загружаем серверы", color = Aurora.Muted, fontSize = 13.sp)
                 }
             }
-            Spacer(Modifier.height(22.dp))
-            Surface(onClick = onServers, color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("🌐", fontSize = 28.sp)
-                    Column(Modifier.weight(1f).padding(start = 13.dp)) {
-                        Text(server, color = Aurora.Text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(ping?.let { "$it мс · авто-выбор" } ?: "Список обновится автоматически", color = Aurora.Muted, fontSize = 12.sp)
-                    }
-                    Text("›", color = Aurora.Mint, fontSize = 26.sp)
-                }
-            }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 V2Metric("Трафик", formatBytes(stats.downloadTotalBytes + stats.uploadTotalBytes), Modifier.weight(1f))
                 V2Metric("Защита", if (adBlock) "DNS активен" else "DNS выключен", Modifier.weight(1f))

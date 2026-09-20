@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import com.quantumvpn.updates.UpdateState
 import kotlinx.coroutines.flow.collectLatest
+import com.quantumvpn.vpn.VpnConnectionState
 
 class QuantumVpnApplication : Application() {
     private val crashStore: AppCrashStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -27,7 +28,10 @@ class QuantumVpnApplication : Application() {
         container.wifiAutoConnect.start()
         container.vpnSchedule.start()
         container.clientPolicyRepository.start()
-        container.updateController.checkOnce(com.quantumvpn.updates.UpdateChannel.Stable)
+        container.updateController.checkOnce(
+            com.quantumvpn.updates.UpdateChannel.Stable,
+            autoDownload = true,
+        )
         VpnScheduleAlarms.reschedule(this)
         com.quantumvpn.vpn.SubscriptionRefreshAlarms.reschedule(this)
         CoroutineScope(Dispatchers.IO).launch {
@@ -56,6 +60,13 @@ class QuantumVpnApplication : Application() {
             container.clientPolicyRepository.policy.collectLatest { policy ->
                 val known = prefs.contains("maintenance")
                 val previous = prefs.getBoolean("maintenance", false)
+                if (policy.maintenance) {
+                    when (container.vpnController.state.value) {
+                        is VpnConnectionState.Connected,
+                        is VpnConnectionState.Starting -> container.vpnController.stop()
+                        else -> Unit
+                    }
+                }
                 if (policy.maintenance && (!known || !previous)) {
                     container.notificationManager.showMaintenanceNotification(policy.maintenanceMessage)
                 } else if (known && previous && !policy.maintenance) {

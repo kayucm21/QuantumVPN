@@ -1,0 +1,23 @@
+{
+  "schema": 2,
+  "version_name": "5.7.5",
+  "version_code": 103,
+  "application_id": "com.quantumvpn.debug",
+  "signing_certificate_sha256": "4cb9e0871e8f54000da71d6e11ebb4b19c8dec4ea6737c8e266d4d000706851d",
+  "core_tag": "v1.13.18-extended-2.6.5",
+  "core_commit": "e8f6936480b7fa9738911e3e7fc2ec0d8a634a88",
+  "artifacts": [
+    {
+      "abi": "arm64-v8a",
+      "apk_file": "QuantumVPN-5.7.5-operator-debug-arm64-v8a.apk",
+      "apk_sha256": "1b531e225412f0a9ff677cad6503623bb6b1f3ce25a9d1f1d1880bf4a5d70996",
+      "apk_size": 135855043
+    },
+    {
+      "abi": "armeabi-v7a",
+      "apk_file": "QuantumVPN-5.7.5-operator-debug-armeabi-v7a.apk",
+      "apk_sha256": "3a942c7a4bb838bfbb3290acdb51d506b1226092f0325bf486400f86f86ca74a",
+      "apk_size": 126310351
+    }
+  ]
+}

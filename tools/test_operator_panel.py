@@ -54,14 +54,17 @@ class OperatorTests(unittest.TestCase):
             settings = self.panel.settings(db)
             self.assertEqual(settings["maintenance"], "1")
             self.assertEqual(settings["subscription_main_enabled"], "1")
-            self.assertEqual(db.execute("select count(*) from events where kind='admin'").fetchone()[0], 2)
+            self.assertEqual(db.execute("select count(*) from audit where action like 'policy:%'").fetchone()[0], 2)
 
     def test_operator_download_buttons_use_current_version(self):
         token = base64.b64encode(b"test:test").decode()
         with urlopen(Request(self.base + "/operator", headers={"Authorization": "Basic " + token})) as response:
             page = response.read().decode("utf-8")
-        self.assertIn(f"APK {self.panel.VERSION}", page)
-        self.assertIn(f"/downloads/{self.panel.VERSION}/QuantumVPN-{self.panel.VERSION}-operator-debug-arm64-v8a.apk", page)
+        self.assertIn(f'value="{self.panel.VERSION}"', page)
+        with urlopen(self.base + "/api/app/version?abi=arm64-v8a") as response:
+            info = json.load(response)
+        self.assertEqual(info["version"], self.panel.VERSION)
+        self.assertIn(f"/downloads/{self.panel.VERSION}/", info["url"])
         self.assertNotIn("5.6.13", page)
 
     def test_staged_rollout_holds_devices_outside_percentage(self):

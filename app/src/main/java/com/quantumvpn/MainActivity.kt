@@ -56,7 +56,6 @@ class MainActivity : FragmentActivity() {
     private var homeSelected = false
     private var diagnosticsSelected = false
     private var pendingUpdateInstall = false
-    private var startupInstallerOpenedFor: String? = null
     private var pendingShortcut by mutableStateOf<String?>(null)
     private var lastSubscriptionRefreshMs = 0L
     private val updateController
@@ -109,7 +108,6 @@ class MainActivity : FragmentActivity() {
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        updateController.checkOnce(UpdateChannel.Stable, autoDownload = true)
         setContent {
             val state by profilesViewModel.state.collectAsState()
             val vpnState by vpnController.state.collectAsState()
@@ -160,22 +158,13 @@ class MainActivity : FragmentActivity() {
                 kotlinx.coroutines.delay(15_000)
                 startupServersChecked = true
             }
-            var startupUpdateSettled by remember { mutableStateOf(false) }
-            LaunchedEffect(updateState) {
-                when (val update = updateState) {
-                    is com.quantumvpn.updates.UpdateState.Ready -> {
-                        val version = update.candidate.metadata.versionName
-                        if (startupInstallerOpenedFor != version) {
-                            startupInstallerOpenedFor = version
-                            requestUpdateInstall()
-                        }
-                    }
-                    is com.quantumvpn.updates.UpdateState.UpToDate,
-                    is com.quantumvpn.updates.UpdateState.Failure -> startupUpdateSettled = true
-                    else -> Unit
+            var splashDone by remember { mutableStateOf(false) }
+            LaunchedEffect(splashDone) {
+                if (splashDone) {
+                    kotlinx.coroutines.delay(750)
+                    updateController.checkOnce(UpdateChannel.Stable, autoDownload = false)
                 }
             }
-            var splashDone by remember { mutableStateOf(false) }
             val darkTheme = if (!splashDone) {
                 true
             } else {
@@ -250,7 +239,7 @@ class MainActivity : FragmentActivity() {
                 }
                 if (!splashDone) {
                     StartupSplashScreen(
-                        ready = state.initialized && startupServersChecked && startupUpdateSettled,
+                        ready = state.initialized && startupServersChecked,
                         updateState = updateState,
                         availableServers = state.homeSelectorGroups.sumOf { it.items.size },
                         onFinished = { splashDone = true },

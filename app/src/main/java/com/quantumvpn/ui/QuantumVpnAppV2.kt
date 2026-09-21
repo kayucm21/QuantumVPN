@@ -89,14 +89,14 @@ private enum class V2Tab(val title: String, val icon: ImageVector) {
 /** Aurora C — violet/mint glass visual language used by every production tab. */
 private val LocalAuroraDark = staticCompositionLocalOf { true }
 private object Aurora {
-    val Night: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF020F19) else Color(0xFFF2F7F6)
-    val VioletNight: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF071E2A) else Color(0xFFE3F1EF)
-    val Glass: Color @Composable get() = if (LocalAuroraDark.current) Color(0xE30A2432) else Color(0xEFFFFFFF)
-    val Mint: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF2EF2A3) else Color(0xFF00745B)
-    val Violet: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF9A7AF5) else Color(0xFF6550A8)
-    val Text: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFFF5F2FF) else Color(0xFF211D35)
-    val Muted: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFFB9B6D1) else Color(0xFF605976)
-    val Border: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF24506A) else Color(0xFFB8D0D0)
+    val Night: Color @Composable get() = MaterialTheme.colorScheme.background
+    val VioletNight: Color @Composable get() = MaterialTheme.colorScheme.surface
+    val Glass: Color @Composable get() = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = .92f)
+    val Mint: Color @Composable get() = MaterialTheme.colorScheme.primary
+    val Violet: Color @Composable get() = MaterialTheme.colorScheme.secondary
+    val Text: Color @Composable get() = MaterialTheme.colorScheme.onBackground
+    val Muted: Color @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
+    val Border: Color @Composable get() = MaterialTheme.colorScheme.outline
 }
 
 /** The production visual shell. It replaces the legacy hub without touching VPN core. */
@@ -513,6 +513,11 @@ private fun V2Settings(adBlock: Boolean, killSwitch: Boolean, diagnostics: Diagn
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var logStatus by remember { mutableStateOf("") }
+    var privacyOpen by rememberSaveable { mutableStateOf(false) }
+    if (privacyOpen) {
+        V2PrivacyPage(onBack = { privacyOpen = false })
+        return
+    }
     Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Aurora.VioletNight, Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
         V2BrandHeader("Свобода без границ")
         Text("Настройки", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
@@ -526,6 +531,8 @@ private fun V2Settings(adBlock: Boolean, killSwitch: Boolean, diagnostics: Diagn
         Spacer(Modifier.height(18.dp))
         Text("ПРИЛОЖЕНИЕ", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
         V2StatusRow("Диагностика", "Добровольный отчёт", true)
+        Spacer(Modifier.height(10.dp))
+        V2NavRow("Конфиденциальность", "Что хранится на устройстве и что отправляется", onClick = { privacyOpen = true })
         Spacer(Modifier.height(10.dp))
         V2StatusRow("Оформление", "Северное сияние · фиолетово-мятное стекло", true)
         Spacer(Modifier.height(10.dp))
@@ -547,9 +554,35 @@ private fun V2Settings(adBlock: Boolean, killSwitch: Boolean, diagnostics: Diagn
     }
 }
 
+@Composable
+private fun V2PrivacyPage(onBack: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Aurora.VioletNight, Aurora.Night)))
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+    ) {
+        TextButton(onClick = onBack) { Text("← Назад") }
+        Text("Конфиденциальность", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
+        Text("Данные остаются под вашим контролем", color = Aurora.Muted, modifier = Modifier.padding(top = 4.dp, bottom = 18.dp))
+        listOf(
+            "История сайтов и DNS-запросов не сохраняется",
+            "Подписки и ключи хранятся локально в Android Keystore",
+            "Диагностика отправляется только после нажатия кнопки",
+            "Отчёт очищается от ссылок, ключей и других секретов",
+            "Обновления APK проверяются по SHA-256 и подписи",
+        ).forEach { item ->
+            V2StatusRow(item, "Включено по умолчанию", true)
+            Spacer(Modifier.height(10.dp))
+        }
+    }
+}
+
 @Composable private fun V2Metric(title: String, value: String, modifier: Modifier) = Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = modifier) { Column(Modifier.padding(16.dp)) { Text(title, color = Aurora.Muted); Text(value, color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 20.sp) } }
 @Composable private fun V2Toggle(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) = Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(title, color = Aurora.Text, fontWeight = FontWeight.SemiBold); Text(subtitle, color = Aurora.Muted, fontSize = 12.sp) }; Switch(checked = checked, onCheckedChange = onChange, colors = SwitchDefaults.colors(checkedThumbColor = Aurora.Mint, checkedTrackColor = Aurora.Violet.copy(alpha = .72f))) } }
 @Composable private fun V2StatusRow(title: String, subtitle: String, good: Boolean) = Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.CheckCircle, null, tint = if (good) Aurora.Mint else Aurora.Muted); Column(Modifier.padding(start = 12.dp)) { Text(title, color = Aurora.Text, fontWeight = FontWeight.SemiBold); Text(subtitle, color = Aurora.Muted, fontSize = 12.sp) } } }
+@Composable private fun V2NavRow(title: String, subtitle: String, onClick: () -> Unit) = Surface(onClick = onClick, color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(title, color = Aurora.Text, fontWeight = FontWeight.SemiBold); Text(subtitle, color = Aurora.Muted, fontSize = 12.sp) }; Text("›", color = Aurora.Mint, fontSize = 24.sp) } }
 @Composable private fun V2BottomBar(tab: V2Tab, onTab: (V2Tab) -> Unit) = Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .7f)), shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp), modifier = Modifier.fillMaxWidth().navigationBarsPadding()) { Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.SpaceEvenly) { V2Tab.entries.forEach { item -> Column(Modifier.clickable { onTab(item) }.padding(horizontal = 8.dp, vertical = 3.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(item.icon, null, tint = if (item == tab) Aurora.Mint else Aurora.Muted, modifier = Modifier.size(22.dp)); Text(item.title, color = if (item == tab) Aurora.Mint else Aurora.Muted, fontSize = 10.sp) } } } }
 
 @Composable

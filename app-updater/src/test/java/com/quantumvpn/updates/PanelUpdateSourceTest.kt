@@ -15,8 +15,19 @@ class PanelUpdateSourceTest {
                 }
                 override fun download(url: String, target: File, expectedBytes: Long, onProgress: (Long) -> Unit) = error("unused")
             }
-            val result = PanelUpdateSource("https://example.org:8443", "com.quantumvpn.debug", http, listOf(abi)).latest(UpdateChannel.Stable)
-            assertEquals("https://example.org:8443/api/app/version?abi=$abi", requested)
+            val result = PanelUpdateSource(
+                "https://example.org:8443",
+                "com.quantumvpn.debug",
+                http,
+                listOf(abi),
+                currentVersionName = "5.6.11",
+                currentVersionCode = 92,
+                deviceId = "device-a",
+            ).latest(UpdateChannel.Stable)
+            assertTrue(requested.startsWith("https://example.org:8443/api/app/version?abi=$abi"))
+            assertTrue(requested.contains("current_version=5.6.11"))
+            assertTrue(requested.contains("current_version_code=92"))
+            assertTrue(requested.contains("bucket="))
             assertEquals(listOf(abi), result.metadata.abi)
             assertEquals(1234L, result.metadata.apkSize)
             assertEquals("5.6.12", result.metadata.versionName)

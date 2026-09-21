@@ -66,12 +66,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 import com.quantumvpn.diagnostics.DiagnosticState
+import com.quantumvpn.diagnostics.SessionTrafficRecord
 import com.quantumvpn.diagnostics.VoluntaryDiagnosticReporter
 import com.quantumvpn.profiles.ProfilesUiState
 import com.quantumvpn.profiles.ProfilesViewModel
 import com.quantumvpn.vpn.RuntimeSelectorGroup
 import com.quantumvpn.vpn.VpnConnectionState
 import com.quantumvpn.vpn.VpnSessionStats
+import com.quantumvpn.vpn.ServerHealthScore
+import com.quantumvpn.vpn.DeadServerQuarantineStore
 import com.quantumvpn.vpn.forServerUi
 import com.quantumvpn.vpn.primaryGroup
 import com.quantumvpn.vpn.UnderlyingServerPing
@@ -134,6 +137,25 @@ fun QuantumVpnAppV2(
     val activeProfile = state.profiles.firstOrNull { it.id == state.settings.activeProfileId } ?: state.profiles.firstOrNull()
     val connected = vpnState is VpnConnectionState.Connected
     val busy = vpnState is VpnConnectionState.Starting || vpnState is VpnConnectionState.Stopping
+    var lastConnectedStats by remember { mutableStateOf<VpnSessionStats?>(null) }
+    LaunchedEffect(connected, sessionStats) {
+        if (connected) {
+            lastConnectedStats = sessionStats
+        } else {
+            lastConnectedStats?.let { finished ->
+                val durationSec = finished.connectedAtEpochMillis
+                    ?.let { ((System.currentTimeMillis() - it) / 1000L).coerceAtLeast(0L) }
+                    ?: 0L
+                viewModel.recordSessionTraffic(
+                    profileName = activeProfile?.name ?: "QuantumVPN",
+                    downloadBytes = finished.downloadTotalBytes,
+                    uploadBytes = finished.uploadTotalBytes,
+                    durationSec = durationSec,
+                )
+            }
+            lastConnectedStats = null
+        }
+    }
     val context = LocalContext.current
     var offlinePings by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     val pingItems = remember(groups) { groups.flatMap { it.items }.distinctBy { it.tag } }
@@ -152,6 +174,8 @@ fun QuantumVpnAppV2(
     }
     val app = context.applicationContext as QuantumVpnApplication
     val policy by app.container.clientPolicyRepository.policy.collectAsState()
+    val trafficHistory by viewModel.sessionTrafficHistory.collectAsState()
+    val reliabilityScores by viewModel.reliabilityScores.collectAsState()
     val block = policy.blockReason(BuildConfig.VERSION_CODE.toLong())
     LaunchedEffect(block, connected) {
         if (block != null && connected) onVpnStop()
@@ -190,14 +214,24 @@ fun QuantumVpnAppV2(
                         },
                         onServers = { tab = V2Tab.Servers },
                     )
-                    V2Tab.Servers -> V2Servers(groups, mainGroup?.tag, mainGroup?.selected, offlinePings, onSelectServer, activeProfile?.updatedAtEpochMillis, state.busy) { viewModel.refreshAllSubscriptionsQuietly() }
-                    V2Tab.Statistics -> V2Statistics(sessionStats, connected)
+                    V2Tab.Servers -> V2Servers(groups, mainGroup?.tag, mainGroup?.selected, offlinePings, onSelectServer, activeProfile?.id, reliabilityScores, activeProfile?.updatedAtEpochMillis, state.busy) { viewModel.refreshAllSubscriptionsQuietly() }
+                    V2Tab.Statistics -> V2Statistics(
+                        stats = sessionStats,
+                        connected = connected,
+                        history = trafficHistory,
+                        diagnostics = diagnostics,
+                        cumulativeBlocked = state.settings.cumulativeBlocked,
+                    )
                     V2Tab.Settings -> V2Settings(
                         adBlock = state.settings.adBlockEnabled,
                         killSwitch = state.settings.blockNonVpnTraffic,
                         diagnostics = diagnostics,
                         theme = state.settings.themeMode,
+                        dynamicColor = state.settings.useDynamicColor,
+                        protectUnknownWifi = state.settings.protectUnknownWifi,
                         onTheme = viewModel::setTheme,
+                        onDynamicColor = viewModel::setUseDynamicColor,
+                        onProtectUnknownWifi = viewModel::setProtectUnknownWifi,
                         updateState = updateState,
                         onCheckUpdate = onCheckUpdate,
                         onAdBlock = viewModel::setAdBlockEnabled,
@@ -323,7 +357,7 @@ private fun V2Home(
 }
 
 @Composable
-private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, selected: String?, offlinePings: Map<String, Int>, onSelect: (String, String) -> Unit, updatedAt: Long?, busy: Boolean, onRefresh: () -> Unit) {
+private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, selected: String?, offlinePings: Map<String, Int>, onSelect: (String, String) -> Unit, profileId: String?, reliabilityScores: Map<String, Int>, updatedAt: Long?, busy: Boolean, onRefresh: () -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("Все") }
     val allServers = groups.flatMap { it.items }
@@ -350,6 +384,42 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
                 ) { Text(option, color = if (filter == option) Aurora.Night else Aurora.Muted, modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp), fontSize = 12.sp) }
             }
         }
+        fun reliability(server: com.quantumvpn.vpn.RuntimeOutboundItem): Int {
+            val owner = groups.firstOrNull { group -> group.items.any { it.tag == server.tag } }
+            val key = if (profileId != null && owner != null) {
+                DeadServerQuarantineStore.serverKey(profileId, owner.tag, server.tag)
+            } else server.tag
+            return reliabilityScores[key] ?: reliabilityScores[server.tag] ?: 50
+        }
+        val bestServer = servers.mapNotNull { server ->
+            (server.pingMillis ?: offlinePings[server.tag])?.let { ping ->
+                Triple(server, ping, ServerHealthScore.combined(ping, reliability(server)))
+            }
+        }.sortedWith(
+            compareByDescending<Triple<com.quantumvpn.vpn.RuntimeOutboundItem, Int, Int>> { it.third }
+                .thenBy { it.second },
+        ).firstOrNull()
+        if (bestServer != null && groupTag != null) {
+            Surface(
+                onClick = {
+                    groups.firstOrNull { group -> group.items.any { it.tag == bestServer.first.tag } }
+                        ?.let { onSelect(it.tag, bestServer.first.tag) }
+                },
+                color = Aurora.Mint.copy(alpha = .13f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .7f)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            ) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("⚡", fontSize = 24.sp)
+                    Column(Modifier.weight(1f).padding(start = 10.dp)) {
+                        Text("Умный автоматический выбор", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                        Text("${bestServer.first.tag} · качество ${bestServer.third}/100", color = Aurora.Muted, fontSize = 12.sp)
+                    }
+                    Text("${bestServer.second} мс", color = Aurora.Mint, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
         if (servers.isEmpty()) Text("Серверы не найдены", color = Aurora.Muted, modifier = Modifier.padding(top = 24.dp))
         servers.forEach { server ->
             Surface(
@@ -364,8 +434,9 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
                         Text(server.tag, color = Aurora.Text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(server.type.uppercase(), color = Aurora.Muted, fontSize = 12.sp)
                     }
+                    val ping = server.pingMillis ?: offlinePings[server.tag]
                     Surface(color = Aurora.Mint.copy(alpha = .12f), border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .65f)), shape = RoundedCornerShape(14.dp)) {
-                        Text((server.pingMillis ?: offlinePings[server.tag])?.let { "$it мс" } ?: "…", color = Aurora.Mint, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                        Text(ping?.let { "$it мс · ${ServerHealthScore.combined(it, reliability(server))}" } ?: "…", color = Aurora.Mint, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
                     }
                 }
             }
@@ -374,7 +445,13 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
 }
 
 @Composable
-private fun V2Statistics(stats: VpnSessionStats, connected: Boolean) {
+private fun V2Statistics(
+    stats: VpnSessionStats,
+    connected: Boolean,
+    history: List<SessionTrafficRecord>,
+    diagnostics: DiagnosticState,
+    cumulativeBlocked: Long,
+) {
     Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Aurora.VioletNight, Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
         V2BrandHeader(if (connected) "Онлайн · соединение защищено" else "Свобода без границ")
         Text("Статистика", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
@@ -401,11 +478,38 @@ private fun V2Statistics(stats: VpnSessionStats, connected: Boolean) {
             V2Metric("Ping", stats.pingMillis?.let { "$it мс" } ?: "—", Modifier.weight(1f))
             V2Metric("DNS-фильтр", stats.adBlockedSessionTotal.toString(), Modifier.weight(1f))
         }
+        Spacer(Modifier.height(14.dp))
+        val network = diagnostics.network
+        Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Состояние подключения", color = Aurora.Text, fontWeight = FontWeight.Bold)
+                Text(if (connected) "VPN-туннель работает" else "VPN выключен", color = if (connected) Aurora.Mint else Aurora.Muted)
+                Text("Сеть: ${network?.transport ?: "—"} · ${if (network?.validated == true) "доступ подтверждён" else "ожидание проверки"}", color = Aurora.Muted, fontSize = 12.sp)
+                Text("Private DNS: ${network?.privateDnsMode ?: "—"}", color = Aurora.Muted, fontSize = 12.sp)
+                diagnostics.lastFailure?.let { Text("Последняя ошибка: ${it.message}", color = Color(0xFFFF9EAF), fontSize = 12.sp) }
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Приватность", color = Aurora.Text, fontWeight = FontWeight.Bold)
+                Text("Заблокировано DNS-фильтром: ${cumulativeBlocked + stats.adBlockedSessionTotal}", color = Aurora.Mint)
+                Text("История адресов и посещённых сайтов не сохраняется", color = Aurora.Muted, fontSize = 12.sp)
+            }
+        }
+        if (history.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Text("Последние сеансы", color = Aurora.Text, fontWeight = FontWeight.Bold)
+            history.take(7).forEach { record ->
+                val total = record.downloadBytes + record.uploadBytes
+                Text("${record.profileName} · ${formatBytes(total)} · ${record.durationSec / 60} мин", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+            }
+        }
     }
 }
 
 @Composable
-private fun V2Settings(adBlock: Boolean, killSwitch: Boolean, diagnostics: DiagnosticState, theme: ThemeMode, onTheme: (ThemeMode) -> Unit, onAdBlock: (Boolean) -> Unit, onKillSwitch: (Boolean) -> Unit, updateState: UpdateState, onCheckUpdate: () -> Unit) {
+private fun V2Settings(adBlock: Boolean, killSwitch: Boolean, diagnostics: DiagnosticState, theme: ThemeMode, dynamicColor: Boolean, protectUnknownWifi: Boolean, onTheme: (ThemeMode) -> Unit, onDynamicColor: (Boolean) -> Unit, onProtectUnknownWifi: (Boolean) -> Unit, onAdBlock: (Boolean) -> Unit, onKillSwitch: (Boolean) -> Unit, updateState: UpdateState, onCheckUpdate: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var logStatus by remember { mutableStateOf("") }
@@ -417,6 +521,8 @@ private fun V2Settings(adBlock: Boolean, killSwitch: Boolean, diagnostics: Diagn
         V2Toggle("DNS и блокировка рекламы", "dns.adguard-dns.com · включается только вместе с VPN", adBlock, onAdBlock)
         Spacer(Modifier.height(10.dp))
         V2Toggle("Kill switch", "Блокировать интернет при разрыве VPN", killSwitch, onKillSwitch)
+        Spacer(Modifier.height(10.dp))
+        V2Toggle("Защита незнакомого Wi-Fi", "После страницы входа предложить включить VPN", protectUnknownWifi, onProtectUnknownWifi)
         Spacer(Modifier.height(18.dp))
         Text("ПРИЛОЖЕНИЕ", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
         V2StatusRow("Диагностика", "Добровольный отчёт", true)
@@ -430,6 +536,8 @@ private fun V2Settings(adBlock: Boolean, killSwitch: Boolean, diagnostics: Diagn
                 }
             }
         }
+        Spacer(Modifier.height(10.dp))
+        V2Toggle("Цвета системы", "Dynamic Color из оформления Android", dynamicColor, onDynamicColor)
         Spacer(Modifier.height(16.dp))
         Text("QuantumVPN ${BuildConfig.VERSION_NAME}", color = Aurora.Muted)
         TextButton(onClick = onCheckUpdate, enabled = updateState !is UpdateState.Checking && updateState !is UpdateState.Downloading) { Text(if (updateState is UpdateState.Checking) "Проверяем…" else "Проверить обновление") }

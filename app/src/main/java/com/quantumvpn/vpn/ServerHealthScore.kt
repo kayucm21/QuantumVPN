@@ -25,4 +25,10 @@ object ServerHealthScore {
         score >= 30 -> "Слабо"
         else -> "Плохо"
     }
+
+    /** Balanced quality used by Smart Auto: live latency plus recent success ratio. */
+    fun combined(pingMillis: Int?, reliabilityScore: Int = 50, failStreak: Int = 0): Int {
+        val latencyScore = score(pingMillis, failStreak)
+        return ((latencyScore * 2 + reliabilityScore.coerceIn(0, 100)) / 3).coerceIn(0, 100)
+    }
 }

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing
 from urllib.request import Request, urlopen
@@ -62,6 +63,31 @@ class OperatorTests(unittest.TestCase):
         self.assertIn(f"APK {self.panel.VERSION}", page)
         self.assertIn(f"/downloads/{self.panel.VERSION}/QuantumVPN-{self.panel.VERSION}-operator-debug-arm64-v8a.apk", page)
         self.assertNotIn("5.6.13", page)
+
+    def test_staged_rollout_holds_devices_outside_percentage(self):
+        token = base64.b64encode(b"test:test").decode()
+        body = b"section=release&rollout_percent=10"
+        with urlopen(Request(self.base + "/operator/policy", data=body, headers={"Authorization": "Basic " + token})) as response:
+            self.assertEqual(response.status, 200)
+        with urlopen(self.base + "/api/app/version?abi=arm64-v8a&bucket=75&current_version=5.6.15&current_version_code=96") as response:
+            info = json.load(response)
+        self.assertFalse(info["rollout_eligible"])
+        self.assertEqual(info["version"], "5.6.15")
+        self.assertEqual(info["version_code"], 96)
+
+    def test_scheduled_maintenance_is_effective_in_policy(self):
+        token = base64.b64encode(b"test:test").decode()
+        now = int(time.time())
+        with closing(self.panel.conn()) as db:
+            db.execute("insert or replace into settings values ('maintenance','0')")
+            db.execute("insert or replace into settings values ('maintenance_schedule_enabled','1')")
+            db.execute("insert or replace into settings values ('maintenance_start',?)", (str(now - 60),))
+            db.execute("insert or replace into settings values ('maintenance_end',?)", (str(now + 60),))
+            db.commit()
+        with urlopen(self.base + "/api/client/policy") as response:
+            policy = json.load(response)
+        self.assertTrue(policy["maintenance"])
+        self.assertFalse(policy["features"]["vpn_connect"])
 
 
 if __name__ == "__main__":

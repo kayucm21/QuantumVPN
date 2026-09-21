@@ -330,6 +330,14 @@ class ProfilesViewModel(
         settingsStore.setAutoConnectOnCellular(enabled)
     }
 
+    fun setProtectUnknownWifi(enabled: Boolean) = operation(markBusy = false) {
+        if (!ClientFeatureGate.features().autoConnect) {
+            showMessage("Автозащита сети отключена оператором.")
+            return@operation
+        }
+        settingsStore.setProtectUnknownWifi(enabled)
+    }
+
     fun setTimeRoutingEnabled(enabled: Boolean) = operation(markBusy = false) {
         if (!ClientFeatureGate.features().vpnSchedule && !ClientFeatureGate.features().routingEditor) {
             showMessage("Расписание / маршруты отключены оператором.")

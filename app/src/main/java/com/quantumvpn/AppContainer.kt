@@ -137,7 +137,13 @@ class AppContainer(
     // app pulls it. Falls back to the existing FTP/GitHub composite when the panel has no
     // release published (or is unreachable).
     val panelUpdateSource = if (BuildConfig.PANEL_UPDATE_BASE_URL.isNotBlank()) {
-        PanelUpdateSource(BuildConfig.PANEL_UPDATE_BASE_URL, appContext.packageName)
+        PanelUpdateSource(
+            baseUrl = BuildConfig.PANEL_UPDATE_BASE_URL,
+            applicationId = appContext.packageName,
+            currentVersionName = BuildConfig.VERSION_NAME,
+            currentVersionCode = BuildConfig.VERSION_CODE.toLong(),
+            deviceId = ClientPolicyRepository.resolveAndroidId(appContext),
+        )
     } else {
         null
     }

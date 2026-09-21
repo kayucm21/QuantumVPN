@@ -79,6 +79,7 @@ data class UiSettings(
     val powerMode: PowerMode = PowerMode.Balanced,
     val serverMode: ServerMode = ServerMode.Standard,
     val autoConnectTrustedWifi: Boolean = false,
+    val protectUnknownWifi: Boolean = true,
     val trustedWifiSsids: String = "",
     val reduceMotion: Boolean = false,
     val appLockEnabled: Boolean = true,
@@ -214,6 +215,7 @@ class UiSettingsStore(
                     ?.let { stored -> ServerMode.entries.firstOrNull { it.name == stored } }
                     ?: ServerMode.Standard,
                 autoConnectTrustedWifi = preferences[AUTO_CONNECT_TRUSTED_WIFI] ?: false,
+                protectUnknownWifi = preferences[PROTECT_UNKNOWN_WIFI] ?: true,
                 trustedWifiSsids = preferences[TRUSTED_WIFI_SSIDS].orEmpty(),
                 reduceMotion = preferences[REDUCE_MOTION] ?: false,
                 appLockEnabled = preferences[APP_LOCK_ENABLED] ?: true,
@@ -408,6 +410,10 @@ class UiSettingsStore(
 
     suspend fun setAutoConnectTrustedWifi(enabled: Boolean) {
         dataStore.edit { it[AUTO_CONNECT_TRUSTED_WIFI] = enabled }
+    }
+
+    suspend fun setProtectUnknownWifi(enabled: Boolean) {
+        dataStore.edit { it[PROTECT_UNKNOWN_WIFI] = enabled }
     }
 
     suspend fun setTrustedWifiSsids(raw: String) {
@@ -774,6 +780,7 @@ class UiSettingsStore(
         val POWER_MODE = stringPreferencesKey("power_mode")
         val SERVER_MODE = stringPreferencesKey("server_mode")
         val AUTO_CONNECT_TRUSTED_WIFI = booleanPreferencesKey("auto_connect_trusted_wifi")
+        val PROTECT_UNKNOWN_WIFI = booleanPreferencesKey("protect_unknown_wifi")
         val TRUSTED_WIFI_SSIDS = stringPreferencesKey("trusted_wifi_ssids")
         val REDUCE_MOTION = booleanPreferencesKey("reduce_motion")
         val APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")

@@ -533,11 +533,18 @@ def promote_scheduled_release(db, now=None):
         "release_schedule_enabled": "0",
     })
     banner = f"Доступно обновление QuantumVPN {version}. Откройте уведомление, чтобы установить новую версию."
-    # Known devices receive a persistent banner; new devices receive it from policy/update APIs.
-    db.execute(
-        "update device_flags set force_banner=?, updated_at=?",
-        (banner[:500], now),
-    )
+    # Known devices receive a persistent banner; create the flag row even when
+    # the device has never used another operator action before.
+    devices = db.execute(
+        "select distinct device from events where kind='policy' and ts>? and device!='' limit 5000",
+        (now - 365 * 86400,),
+    ).fetchall()
+    for (device,) in devices:
+        db.execute(
+            "insert into device_flags(device,force_banner,request_diagnostic,note,updated_at) values (?,?,?,?,?) "
+            "on conflict(device) do update set force_banner=excluded.force_banner, updated_at=excluded.updated_at",
+            (device, banner[:500], 0, f"{version}-release", now),
+        )
     db.execute(
         "insert into events values (?,?,?,?,?)",
         (now, "release_promoted", "operator", "", json.dumps({"version": version, "version_code": code}, ensure_ascii=False)),

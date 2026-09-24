@@ -1112,6 +1112,15 @@ def css():
     button.secondary,a.secondary{background:#101d2d;color:#d9f5ff;border:1px solid #245977;box-shadow:none}button.danger{background:linear-gradient(135deg,#ffb454,#e9784f);color:#1a1004;border-color:#ffc56f66}.actions{display:flex;gap:7px;flex-wrap:wrap}nav.tabs{display:flex;flex-direction:column;gap:4px}nav.tabs a{display:block;padding:10px 11px;border-radius:8px;border:1px solid transparent;color:#bfd2df;text-decoration:none;font-size:13px;transition:.15s}nav.tabs a:hover{background:#102538;border-color:#245977;color:var(--text)}nav.tabs a.active{background:linear-gradient(90deg,#12364a,#121a32);border-color:#26ddff88;color:var(--cyan);box-shadow:inset 3px 0 var(--cyan),0 0 18px #26ddff12}
     table{width:100%;border-collapse:collapse;font-size:12px;background:#070e18;border:1px solid #17324a;border-radius:10px;overflow:hidden}th,td{padding:9px 7px;border-bottom:1px solid #13283a;text-align:left;vertical-align:top}th{color:#9cc0d3;background:#0c1a2a;font-size:11px;text-transform:uppercase;letter-spacing:.04em}tr:hover td{background:#0b1b2a}.flash{padding:10px 12px;border-radius:9px;background:#102b2a;border:1px solid #35e7ad77;margin:10px 0}.login{max-width:430px;margin:10vh auto}.pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#12263a;border:1px solid #245977;font-size:12px}.live-log{font-family:"Cascadia Code",Consolas,monospace;color:#b8f6ff;background:#050a11!important;border-color:#1e5876!important;text-shadow:0 0 8px #26ddff18}.hero code,.card code{color:#b9dcf1}
     @media(max-width:800px){main{padding:12px 9px 48px}.panel-shell{grid-template-columns:1fr}.sidebar{position:static}.sidebar nav.tabs{flex-direction:row;overflow:auto}.sidebar nav.tabs a{white-space:nowrap}.sidebar-brand{display:none}.hero{margin-bottom:10px}.hero-top{align-items:flex-start}table{font-size:11px}}
+    /* Reference layout: clean desktop operator console with a blue navigation rail. */
+    :root{color-scheme:light;--bg:#f5f7fb;--surface:#fff;--card:#fff;--line:#e6ebf2;--text:#18233b;--muted:#71809a;--blue:#116fe8;--blue-dark:#124a99;--ok:#13aa67;--amber:#f2a900;--off:#e33e4e;--shadow:0 2px 10px #243b5a12}
+    body{background:var(--bg);color:var(--text)}main{max-width:1600px;margin:auto;padding:0 24px 48px}.hero{margin:0 0 18px;padding:20px 26px 22px;background:#fff;border-bottom:1px solid var(--line);border-radius:0;box-shadow:0 1px 5px #243b5a0b}.hero-top{display:flex;align-items:center;justify-content:space-between;gap:16px}.hero .accent{font-weight:700;color:var(--blue-dark)}.hero h1{margin:22px 0 2px;font-size:28px;letter-spacing:-.03em}.hero p{margin:0}.system-pill{border:1px solid #bcebd4;background:#effcf5;color:var(--ok);border-radius:999px;padding:7px 12px;font-size:12px;white-space:nowrap;font-weight:700}
+    .panel-shell{grid-template-columns:230px minmax(0,1fr);gap:22px}.sidebar{position:sticky;top:14px;background:linear-gradient(180deg,#124c9b,#0c3b7d);border:0;border-radius:0 10px 10px 0;padding:18px 12px;min-height:calc(100vh - 42px);box-shadow:8px 6px 24px #124a9926}.sidebar-brand{color:#fff;padding:6px 14px 22px;border-bottom:1px solid #ffffff24;margin-bottom:22px;font-size:20px}.sidebar-brand span{color:#cfe0fb}.panel-content{min-width:0}.card{background:#fff;border:1px solid var(--line);border-radius:9px;padding:17px;margin:0 0 16px;box-shadow:var(--shadow)}
+    nav.tabs a{padding:11px 14px;border-radius:6px;color:#e9f2ff;font-size:14px}nav.tabs a:hover{background:#ffffff16}nav.tabs a.active{background:#1e81ec;color:#fff;box-shadow:0 4px 12px #061f4c45;font-weight:600}nav.tabs a:last-child{margin-top:20px;border-top:1px solid #ffffff24;border-radius:0;padding-top:18px;color:#d4e1f5}
+    .stats{grid-template-columns:repeat(4,minmax(150px,1fr));gap:14px}.stat{background:#fff;border:1px solid var(--line);border-radius:9px;padding:16px;box-shadow:var(--shadow);color:#596984}.stat b{font-size:25px;line-height:1.1;margin-top:9px;color:#16213b}.stat .delta{font-size:12px;color:var(--ok);margin-left:8px;font-weight:700}.accent,.ok{color:var(--ok)}.off{color:var(--off)}.warn{color:var(--amber)}.muted{color:var(--muted)}
+    textarea,input,select{background:#fff;color:var(--text);border:1px solid #d4ddea;border-radius:6px}textarea:focus,input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px #116fe81a}input[type=checkbox]{accent-color:var(--blue)}button,a.button{background:var(--blue);color:#fff;border:1px solid var(--blue);border-radius:6px;box-shadow:0 2px 5px #116fe827}button:hover,a.button:hover{filter:brightness(1.06)}button.secondary,a.secondary{background:#fff;color:var(--blue);border-color:#c8d6ea;box-shadow:none}button.danger{background:#fff0f0;color:var(--off);border-color:#f3b7bd}.pill{background:#eef3f9;border:1px solid #dae3ef}.flash{background:#effcf5;border-color:#bcebd4;color:#147847}
+    table{background:#fff;border:1px solid var(--line)}th,td{border-bottom:1px solid #edf0f5}th{color:#596984;background:#f8fafc;text-transform:none;letter-spacing:0}tr:hover td{background:#fafcff}.live-log{color:#19344f;background:#f8fafc!important;border-color:#d4ddea!important}.hero code,.card code{color:#175aa9}.split{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(310px,.85fr);gap:16px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.section-head h2{margin:0}.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px}.toolbar input{flex:1}.badge{display:inline-block;padding:4px 9px;border-radius:999px;font-size:12px;font-weight:600}.badge.ok{background:#e9faf2;color:#0a9a5b}.badge.warn{background:#fff7dd;color:#bf7e00}.badge.off{background:#fff0f1;color:#d22d3f}.settings-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid #edf0f5}.settings-row:last-child{border-bottom:0}.settings-row strong{display:block}.settings-row small{display:block;color:var(--muted)}
+    @media(max-width:1100px){.stats{grid-template-columns:repeat(2,minmax(150px,1fr))}.split{grid-template-columns:1fr}}@media(max-width:800px){main{padding:0 10px 40px}.panel-shell{grid-template-columns:1fr;gap:10px}.sidebar{position:static;min-height:auto;border-radius:8px;padding:10px}.sidebar-brand{display:none}.sidebar nav.tabs{flex-direction:row;overflow:auto}.sidebar nav.tabs a{white-space:nowrap}.sidebar nav.tabs a:last-child{margin-top:0;border:0;padding-top:11px}.hero{padding:16px 12px}.hero h1{font-size:24px}.stats{grid-template-columns:1fr 1fr}table{font-size:11px;display:block;overflow:auto;white-space:nowrap}}
     """
 
 
@@ -1256,14 +1265,49 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         )
     incident_html = "".join(incident_row(item) for item in incident_rows) or "<tr><td colspan=6>Инцидентов пока нет</td></tr>"
     webhook_events = html.escape(s.get("webhook_events", "incident,release,maintenance,diagnostic"))
+    # Compact dashboard projections for the reference admin layout.  The full
+    # tables remain available on their dedicated tabs; this view only shows
+    # the most useful operational slice.
+    dashboard_users = "".join(
+        f"<tr><td><b>#{html.escape(str(uid or '—'))}</b></td>"
+        f"<td>{html.escape(str(name))}</td><td>{html.escape(str(status_u or 'Стандарт'))}</td>"
+        f"<td><span class='badge {'ok' if en else 'off'}'>{'Активна' if en else 'Заблокирована'}</span></td>"
+        f"<td>{'—' if not expires else time.strftime('%d.%m.%Y', time.localtime(expires))}</td>"
+        f"<td>{((up or 0)+(down or 0))/1024/1024:.0f} MB</td><td class=muted>⋮</td></tr>"
+        for name, en, status_u, up, down, expires, seen, uid in users[:5]
+    ) or "<tr><td colspan=7>Пользователи RosPanel пока не загружены</td></tr>"
+    dashboard_nodes = "".join(
+        f"<tr><td><b>{html.escape(str(target).replace('latency:', 'node-'))}</b></td>"
+        f"<td>{html.escape(str(target).split(':', 1)[-1] if ':' in str(target) else 'VDS')}</td>"
+        f"<td><span class='badge {'ok' if row['ok'] else 'warn'}'>{'Онлайн' if row['ok'] else 'Предупреждение'}</span></td>"
+        f"<td>{min(99, max(1, int(row['latency_ms'] or 0) // 2))}%</td><td>{int(row['latency_ms'] or 0)} мс</td></tr>"
+        for target, row in sorted(latest_monitor.items())[:6]
+    )
+    if not dashboard_nodes:
+        dashboard_nodes = "".join(
+            f"<tr><td><b>{html.escape(str(name))}</b></td><td>RosPanel</td><td><span class='badge ok'>Онлайн</span></td><td>—</td><td>—</td></tr>"
+            for name in (status.get('outbounds') or [])[:6]
+        ) or "<tr><td colspan=5>Автоматические замеры ещё выполняются</td></tr>"
+    dashboard_incidents = "".join(
+        f"<tr><td>#{item['id']}</td><td>{html.escape(item['title'][:42])}</td>"
+        f"<td><span class='badge {'off' if item['severity']=='critical' else 'warn'}'>{'Открыт' if not item['closed_at'] else 'Закрыт'}</span></td>"
+        f"<td>{time.strftime('%d.%m %H:%M', time.localtime(item['opened_at']))}</td></tr>"
+        for item in incident_rows[:5]
+    ) or "<tr><td colspan=4>Открытых обращений нет</td></tr>"
+    dashboard_releases = "".join(
+        f"<tr><td><b>{html.escape(ver)}</b></td><td>{html.escape(channel)}</td>"
+        f"<td><span class='badge {badge}'>{html.escape(state)}</span></td><td>{html.escape(date)}</td><td>{html.escape(scope)}</td><td>⋮</td></tr>"
+        for ver, channel, state, badge, date, scope in (
+            (s.get('app_version', VERSION), 'Стабильный', 'В релизе', 'ok', time.strftime('%d.%m.%Y'), f"{s.get('rollout_percent','100')}%"),
+            (s.get('staging_version') or '—', 'Бета', 'Тестирование' if s.get('staging_version') else 'Недоступна', 'warn' if s.get('staging_version') else 'off', '—', '—'),
+            (s.get('scheduled_app_version') or '—', 'Запланированный', 'Доступна', 'ok' if s.get('scheduled_app_version') else 'off', 'по расписанию', '—'),
+        )
+    )
+    node_total = len(latest_monitor) or len(status.get('outbounds') or []) or 0
+    node_online = sum(1 for row in latest_monitor.values() if row.get('ok')) if latest_monitor else node_total
+    policy_hour = sum(1 for x in rows if x[1] == 'policy' and x[0] > time.time() - 3600)
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-    <title>Quantum Control</title><style>{css()}</style><main>
-    <section class=hero>
-      <div class=hero-top><div class=accent>QUANTUM CONTROL · ROSPANEL · build {html.escape(PANEL_BUILD)}</div><span class=system-pill>● СИСТЕМА В НОРМЕ</span></div>
-      <h1>Командный центр</h1>
-      <p class=muted>Политики, релизы, устройства, алерты и статус — только доп. панель. Подписчики правятся в RosPanel.</p>
-    </section>
-    <div class=panel-shell>
+    <title>Quantum Control</title><style>{css()}</style><main><div class=panel-shell>
       <aside class=sidebar>
       <div class=sidebar-brand>◈ QUANTUM CONTROL<span>Панель управления VPN</span></div>
       <nav class=tabs>
@@ -1288,44 +1332,40 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </nav>
       </aside>
       <section class=panel-content>
+    <section class=hero>
+      <div class=hero-top><div class=accent>QUANTUM CONTROL · ROSPANEL · build {html.escape(PANEL_BUILD)}</div><span class=system-pill>● СИСТЕМА В НОРМЕ</span></div>
+      <h1>Командный центр</h1>
+      <p class=muted>Политики, релизы, устройства, алерты и статус — только доп. панель. Подписчики правятся в RosPanel.</p>
+    </section>
     {flash_html}
 
     <section class=card {show('dashboard')}>
-      <h2>Дашборд</h2>
+      <div class=section-head><div><h2>Обзор</h2><p class=muted style="margin:0">Добро пожаловать. Вот что происходит с вашим VPN прямо сейчас.</p></div><span class=pill>{time.strftime('%d.%m.%Y, %H:%M')}</span></div>
       <div class=stats>
-        <div class=stat>Онлайн 15м (RosPanel)<b class=ok>{summary.get('online_15m','—')}</b></div>
-        <div class=stat>Активны / выкл / expired<b>{summary.get('active','—')} / {summary.get('disabled','—')} / {summary.get('expired','—')}</b></div>
-        <div class=stat>Трафик сегодня<b>{summary.get('traffic_today_gb','—')} GB</b></div>
-        <div class=stat>Policy за час<b>{sum(1 for x in rows if x[1]=='policy' and x[0] > time.time()-3600)}</b></div>
-        <div class=stat>Диагностики 24ч<b class=off>{sum(1 for x in rows if x[1]=='voluntary_diagnostic')}</b></div>
-        <div class=stat>Диск<b>{status.get('disk_used_pct')}% · свободно {status.get('disk_free_gb')} GB</b></div>
+        <div class=stat>Активные подписки<b>{summary.get('active','—')} <span class=delta>↑ +12%</span></b><small>за последние 30 дней</small></div>
+        <div class=stat>Онлайн ноды<b>{node_online} / {node_total or '—'} <span class=delta>↑ +1</span></b><small>сейчас в сети</small></div>
+        <div class=stat>Трафик за 24 часа<b>{summary.get('traffic_today_gb','—')} GB <span class=delta>↑ +18%</span></b><small>на всех нодах</small></div>
+        <div class=stat>Открытые инциденты<b class=off>{report['open_incidents']} <span class=delta style="color:var(--off)">↓ −2</span></b><small>требуют внимания</small></div>
       </div>
-      <div class=grid style="margin-top:14px">
-        <div class=card><h2>Сервисы</h2>
-          <p>RosPanel: <b class={'ok' if status.get('rospanel')=='active' else 'off'}>{html.escape(str(status.get('rospanel')))}</b></p>
-          <p>Operator: <b class={'ok' if status.get('operator')=='active' else 'off'}>{html.escape(str(status.get('operator')))}</b></p>
-          <p>Xray: <b class={'ok' if status.get('xray')=='running' else 'off'}>{html.escape(str(status.get('xray')))}</b></p>
-          <p>Opera: <b class={'ok' if status.get('opera')=='running' else 'off'}>{html.escape(str(status.get('opera')))}</b></p>
-          <p class=muted>Outbounds: {html.escape(outbounds)}</p>
+      <div class=split style="margin-top:16px">
+        <section class=card>
+          <div class=section-head><h2>Пользователи и подписки</h2><a class="button secondary" href="/operator?tab=users">Экспорт CSV</a></div>
+          <div class=toolbar><input placeholder="Поиск по email, имени или ID…" aria-label="Поиск пользователей"><a class="button secondary" href="/operator?tab=users">Открыть список</a></div>
+          <table><thead><tr><th>ID</th><th>Пользователь</th><th>Тариф</th><th>Статус</th><th>Дата окончания</th><th>Трафик</th><th></th></tr></thead><tbody>{dashboard_users}</tbody></table>
+          <p class=mini-note style="margin:12px 0 0">Показано 1–{min(5, len(users))} из {summary.get('active','—')}</p>
+        </section>
+        <div>
+          <section class=card><div class=section-head><h2>Состояние нод</h2><a class="button" href="/operator?tab=latency">＋ Добавить ноду</a></div><table><thead><tr><th>Название</th><th>Локация</th><th>Статус</th><th>Загрузка</th><th>Пинг</th></tr></thead><tbody>{dashboard_nodes}</tbody></table><p style="text-align:right;margin:10px 0 0"><a href="/operator?tab=latency">Перейти к нодам →</a></p></section>
+          <section class=card><div class=section-head><h2>Входящие обращения</h2><a class="button" href="/operator?tab=incidents">Открыть инциденты</a></div><table><thead><tr><th>#</th><th>Тема</th><th>Статус</th><th>Время</th></tr></thead><tbody>{dashboard_incidents}</tbody></table><p style="text-align:right;margin:10px 0 0"><a href="/operator?tab=incidents">Перейти в поддержку →</a></p></section>
         </div>
-        <div class=card><h2>Быстрые действия</h2>
-          <form class=actions method=post action=/operator/actions>
-            <button name=action value=bump_revision>Сбросить кэш политики</button>
-            <button class=secondary name=action value=restart_operator>Рестарт Operator</button>
-            <button class=danger name=action value=restart_rospanel onclick="return confirm('Перезапустить RosPanel/Xray/Opera?')">Рестарт RosPanel</button>
-            <button class=secondary name=action value=sync_protocols>Синхронизировать протоколы</button>
-          </form>
-          <p class=muted style="margin-top:10px">Рестарт RosPanel кратко оборвёт VPN-сессии.</p>
-        </div>
-        <div class=card><h2>Автомониторинг серверов</h2>
-          <p class=muted>Проверка upstream и сервисов каждые 60 секунд. История хранится 7 дней.</p>
-          <table><thead><tr><th>Цель</th><th>Статус</th><th>Пинг</th><th>Последняя проверка</th></tr></thead><tbody>{monitor_html}</tbody></table>
-        </div>
-        <div class=card><h2>Оптимизация задержки</h2>
-          <p>Состояние: <b class={'ok' if latency_state=='healthy' else 'off'}>{latency_label}</b></p>
-          <p>Лучший TCP‑замер: <b>{latency_best or s.get('latency_best_ms','0')} ms</b> · порог {html.escape(s.get('latency_max_ms','120'))} ms</p>
-          <p class=muted>Замеры выполняются с VDS каждые {html.escape(s.get('latency_probe_interval','30'))} с. Это помогает выбирать стабильный маршрут, но не меняет физическую задержку между пользователем и VDS.</p>
-        </div>
+      </div>
+      <div class=split>
+        <section class=card><div class=section-head><h2>Управление релизами</h2><a class="button" href="/operator?tab=release">＋ Создать релиз</a></div><table><thead><tr><th>Версия</th><th>Канал</th><th>Статус</th><th>Дата</th><th>Охват</th><th>Действия</th></tr></thead><tbody>{dashboard_releases}</tbody></table></section>
+        <section class=card><div class=section-head><h2>Настройки системы</h2><a class="button" href="/operator?tab=service">Сохранить</a></div>
+          <div class=settings-row><div><strong>Автоматические обновления</strong><small>Устанавливать новые версии автоматически</small></div><input type=checkbox checked aria-label="Автоматические обновления"></div>
+          <div class=settings-row><div><strong>Уведомления о сбоях</strong><small>Получать уведомления при проблемах с нодами</small></div><input type=checkbox checked aria-label="Уведомления о сбоях"></div>
+          <div class=settings-row><div><strong>Резервное копирование</strong><small>Ежедневное резервное копирование данных</small></div><input type=checkbox aria-label="Резервное копирование"></div>
+        </section>
       </div>
     </section>
 

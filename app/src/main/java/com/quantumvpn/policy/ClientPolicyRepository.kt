@@ -122,6 +122,23 @@ class ClientPolicyRepository(
                 },
                 carrierBypass = featuresObj?.optBoolean("carrier_bypass", true) ?: true,
             )
+            val brandingObj = root.optJSONObject("branding")
+            val branding = ClientBranding(
+                name = brandingObj?.optString("name", "QuantumVPN")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.take(48)
+                    ?: "QuantumVPN",
+                tagline = brandingObj?.optString("tagline", "HORIZON GLASS · 2026")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.take(80)
+                    ?: "HORIZON GLASS · 2026",
+                accentHex = brandingObj?.optString("accent_hex", "#3DE7FF")
+                    ?.trim()
+                    ?.takeIf { Regex("#[0-9A-Fa-f]{6}").matches(it) }
+                    ?: "#3DE7FF",
+            )
             return ClientPolicy(
                 platform = root.optString("platform", "android"),
                 announce = root.optString("announce", ""),
@@ -141,6 +158,7 @@ class ClientPolicyRepository(
                 banned = root.optBoolean("banned", false),
                 adsListUrl = root.optString("ads_list_url", ""),
                 adblockLevel = root.optString("adblock_level", ""),
+                branding = branding,
             )
         }
 

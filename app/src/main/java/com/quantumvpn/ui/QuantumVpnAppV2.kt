@@ -76,7 +76,6 @@ import com.quantumvpn.donations.DonationRepository
 import com.quantumvpn.donations.DonationSummary
 import com.quantumvpn.profiles.ProfilesUiState
 import com.quantumvpn.profiles.ProfilesViewModel
-import com.quantumvpn.policy.ClientPolicy
 import com.quantumvpn.vpn.RuntimeSelectorGroup
 import com.quantumvpn.vpn.VpnConnectionState
 import com.quantumvpn.vpn.VpnSessionStats
@@ -86,6 +85,7 @@ import com.quantumvpn.vpn.forServerUi
 import com.quantumvpn.vpn.primaryGroup
 import com.quantumvpn.vpn.UnderlyingServerPing
 import com.quantumvpn.vpn.ServerSwitchEvent
+import com.quantumvpn.policy.ClientPolicy
 
 private enum class V2Tab(val title: String, val icon: ImageVector) {
     Home("Главная", Icons.Default.Home),
@@ -108,6 +108,10 @@ private object Aurora {
     val Border: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF1E4C6B) else Color(0xFFB7CDDE)
     val Danger: Color @Composable get() = Color(0xFFFF7A93)
 }
+
+private fun remoteAccent(value: String): Color = runCatching {
+    Color(android.graphics.Color.parseColor(value))
+}.getOrDefault(Color(0xFF3DE7FF))
 
 /** The production visual shell. It replaces the legacy hub without touching VPN core. */
 @Composable
@@ -204,7 +208,11 @@ fun QuantumVpnAppV2(
         ThemeMode.Dark -> true
         ThemeMode.Light -> false
     }
-    val adaptiveAccent = if (state.settings.useDynamicColor) MaterialTheme.colorScheme.primary else Color(0xFF3DE7FF)
+    val adaptiveAccent = if (state.settings.useDynamicColor) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        remoteAccent(policy.branding.accentHex)
+    }
     CompositionLocalProvider(LocalAuroraDark provides dark, LocalAuroraAccent provides adaptiveAccent) {
     Surface(color = Aurora.Night, modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
         if (policy.maintenance) {
@@ -219,6 +227,7 @@ fun QuantumVpnAppV2(
             Box(Modifier.weight(1f)) {
                 when (tab) {
                     V2Tab.Home -> V2Home(
+                        policy = policy,
                         connected = connected,
                         busy = busy,
                         hasProfile = activeProfile != null,
@@ -254,14 +263,16 @@ fun QuantumVpnAppV2(
                         notifications = !state.settings.quietMode,
                         protectUnknownWifi = state.settings.protectUnknownWifi,
                         travelMode = state.settings.travelModeEnabled,
-                        powerMode = state.settings.powerMode,
                         onTheme = viewModel::setTheme,
                         onDynamicColor = viewModel::setUseDynamicColor,
                         onAutoConnect = viewModel::setAutoConnectOnCellular,
                         onNotifications = { enabled -> viewModel.setQuietMode(!enabled) },
                         onProtectUnknownWifi = viewModel::setProtectUnknownWifi,
                         onTravelMode = viewModel::setTravelModeEnabled,
-                        onPowerMode = viewModel::setPowerMode,
+                        adBlock = state.settings.adBlockEnabled,
+                        killSwitch = state.settings.blockNonVpnTraffic,
+                        onAdBlock = viewModel::setAdBlockEnabled,
+                        onKillSwitch = viewModel::setBlockNonVpnTraffic,
                     )
                 }
             }
@@ -353,6 +364,7 @@ private fun serverRegion(name: String): String {
 
 @Composable
 private fun V2Home(
+    policy: ClientPolicy,
     connected: Boolean, busy: Boolean, hasProfile: Boolean, server: String, ping: Int?, adBlock: Boolean, privacyScore: Int, stats: VpnSessionStats,
     onConnect: () -> Unit, onServers: () -> Unit, onSettings: () -> Unit,
 ) {
@@ -365,10 +377,9 @@ private fun V2Home(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Row {
-                        Text("Quantum", color = Aurora.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                        Text("VPN", color = Aurora.Mint, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Text(policy.branding.name, color = Aurora.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     }
-                    Text("HORIZON GLASS · 2026", color = Aurora.Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
+                    Text(policy.branding.tagline, color = Aurora.Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
                 }
                 Surface(onClick = onSettings, shape = CircleShape, color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), modifier = Modifier.size(42.dp)) {
                     Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Settings, null, tint = Aurora.Mint) }
@@ -649,14 +660,16 @@ private fun V2Settings(
     notifications: Boolean,
     protectUnknownWifi: Boolean,
     travelMode: Boolean,
-    powerMode: PowerMode,
+    adBlock: Boolean,
+    killSwitch: Boolean,
     onTheme: (ThemeMode) -> Unit,
     onDynamicColor: (Boolean) -> Unit,
     onAutoConnect: (Boolean) -> Unit,
     onNotifications: (Boolean) -> Unit,
     onProtectUnknownWifi: (Boolean) -> Unit,
     onTravelMode: (Boolean) -> Unit,
-    onPowerMode: (PowerMode) -> Unit,
+    onAdBlock: (Boolean) -> Unit,
+    onKillSwitch: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -739,9 +752,10 @@ private fun V2Settings(
         Spacer(Modifier.height(10.dp))
         V2Toggle("Режим поездки", "Защита роуминга, автообход и быстрый failover", travelMode, onTravelMode)
         Spacer(Modifier.height(10.dp))
-        V2Toggle("Умная батарея", "Снижение фоновой активности без потери защиты", powerMode == PowerMode.Battery) { enabled ->
-            onPowerMode(if (enabled) PowerMode.Battery else PowerMode.Balanced)
-        }
+        Text("Безопасность", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
+        V2Toggle("Блокировка рекламы", "DNS-фильтры работают только во время VPN-сессии", adBlock, onAdBlock)
+        Spacer(Modifier.height(10.dp))
+        V2Toggle("Аварийное отключение", "Блокировать трафик при разрыве VPN", killSwitch, onKillSwitch)
         Spacer(Modifier.height(10.dp))
         V2NavRow(
             "Центр уведомлений",

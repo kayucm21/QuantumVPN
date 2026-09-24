@@ -16,6 +16,16 @@ data class ClientFeatureFlags(
     val carrierBypass: Boolean = true,
 )
 
+/** Small, signed-by-transport branding payload controlled by the operator panel.
+ * It deliberately contains presentation-only values; no credentials or tracking
+ * settings are accepted from the remote config.
+ */
+data class ClientBranding(
+    val name: String = "QuantumVPN",
+    val tagline: String = "HORIZON GLASS · 2026",
+    val accentHex: String = "#3DE7FF",
+)
+
 data class ClientPolicy(
     val platform: String = "android",
     val announce: String = "",
@@ -35,6 +45,7 @@ data class ClientPolicy(
     val banned: Boolean = false,
     val adsListUrl: String = "",
     val adblockLevel: String = "",
+    val branding: ClientBranding = ClientBranding(),
 ) {
     fun activeAnnounce(nowEpochSec: Long = System.currentTimeMillis() / 1000): String {
         if (announce.isBlank()) return ""

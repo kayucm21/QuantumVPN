@@ -46,10 +46,10 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://tepacom.o190.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://tepacom.o190.com:8443").rstrip("/")
-PANEL_BUILD = "5.9.2"
-VERSION = "5.9.2"
-VERSION_CODE = 117
-DEFAULT_NOTE = "QuantumVPN 5.9.2: Horizon Glass 2026, роли администраторов и безопасные резервные копии."
+PANEL_BUILD = "5.9.3"
+VERSION = "5.9.3"
+VERSION_CODE = 118
+DEFAULT_NOTE = "QuantumVPN 5.9.3: удалённое оформление, живой мониторинг и безопасные обновления."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()
@@ -257,6 +257,9 @@ def conn():
                 "feature_block_open_wifi": "0",
                 "feature_selfsteal": "1",
                 "feature_ab_json": "{}",
+                "brand_name": "QuantumVPN",
+                "brand_tagline": "HORIZON GLASS · 2026",
+                "brand_accent": "#3DE7FF",
                 "nodes_recommended": "",
                 "nodes_forbidden": "",
                 "config_revision": "1",
@@ -1107,6 +1110,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a href="/operator?tab=dashboard">Дашборд</a>
         <a href="/operator?tab=service">Сервис</a>
         <a href="/operator?tab=features">Фичи</a>
+        <a href="/operator?tab=branding">Оформление</a>
         <a href="/operator?tab=release">Релизы</a>
         <a href="/operator?tab=donations">Пожертвования</a>
         <a href="/operator?tab=devices">Устройства</a>
@@ -1210,6 +1214,25 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label>feature_ab_json<textarea name=feature_ab_json rows=10>{html.escape(s.get('feature_ab_json','{{}}'))}</textarea></label>
         <button>Сохранить A/B</button>
       </form>
+    </section>
+
+    <section class=grid {show('branding')}>
+      <form class=card method=post action=/operator/policy><input type=hidden name=section value=branding>
+        <h2>Удалённое оформление</h2>
+        <p class=muted>Изменения применяются после следующего опроса политики и не требуют пересборки APK.</p>
+        <label>Название приложения<input name=brand_name maxlength=48 value="{html.escape(s.get('brand_name','QuantumVPN'))}"></label>
+        <label>Подзаголовок<input name=brand_tagline maxlength=80 value="{html.escape(s.get('brand_tagline','HORIZON GLASS · 2026'))}"></label>
+        <label>Акцентный цвет<input name=brand_accent pattern="#[0-9A-Fa-f]{{6}}" value="{html.escape(s.get('brand_accent','#3DE7FF'))}"></label>
+        <button>Сохранить оформление</button>
+      </form>
+      <section class=card>
+        <h2>Предпросмотр</h2>
+        <div style="padding:22px;border-radius:18px;background:#071526;border:1px solid {html.escape(s.get('brand_accent','#3DE7FF'))}">
+          <strong style="font-size:1.35rem">{html.escape(s.get('brand_name','QuantumVPN'))}</strong>
+          <p class=muted>{html.escape(s.get('brand_tagline','HORIZON GLASS · 2026'))}</p>
+          <span class=pill style="color:{html.escape(s.get('brand_accent','#3DE7FF'))}">config_revision {html.escape(s.get('config_revision','1'))}</span>
+        </div>
+      </section>
     </section>
 
     <section class=grid {show('latency')}>
@@ -1707,6 +1730,11 @@ class App(BaseHTTPRequestHandler):
                 "update_notifications": True,
                 "config_revision": int(s.get("config_revision", "1") or 1),
                 "features": features,
+                "branding": {
+                    "name": (s.get("brand_name") or "QuantumVPN")[:48],
+                    "tagline": (s.get("brand_tagline") or "HORIZON GLASS · 2026")[:80],
+                    "accent_hex": (s.get("brand_accent") or "#3DE7FF")[:7],
+                },
                 "nodes_recommended": [x.strip() for x in (s.get("nodes_recommended") or "").split(",") if x.strip()],
                 "nodes_forbidden": [x.strip() for x in (s.get("nodes_forbidden") or "").split(",") if x.strip()],
                 "latency_optimization": {
@@ -2251,6 +2279,18 @@ class App(BaseHTTPRequestHandler):
             except Exception:
                 return self.reply(400, '{"error":"invalid_ab_json"}')
             values = {"feature_ab_json": raw[:4000]}
+        elif section == "branding":
+            tab = "branding"
+            name = form.get("brand_name", ["QuantumVPN"])[0].strip()[:48]
+            tagline = form.get("brand_tagline", ["HORIZON GLASS · 2026"])[0].strip()[:80]
+            accent = form.get("brand_accent", ["#3DE7FF"])[0].strip().upper()
+            if not name or not tagline or not re.fullmatch(r"#[0-9A-F]{6}", accent):
+                return self.reply(400, '{"error":"invalid_branding"}')
+            values = {
+                "brand_name": name,
+                "brand_tagline": tagline,
+                "brand_accent": accent,
+            }
         elif section == "latency":
             tab = "latency"
             try:
@@ -2296,7 +2336,7 @@ class App(BaseHTTPRequestHandler):
         else:
             return self.reply(400, '{"error":"unknown_section"}')
 
-        if section in ("service", "features", "nodes", "ab", "latency", "release") and any(current.get(k) != v for k, v in values.items()):
+        if section in ("service", "features", "nodes", "ab", "branding", "latency", "release") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)
         changes = {k: {"before": current.get(k), "after": v} for k, v in values.items() if current.get(k) != v}
         set_settings(db, values)

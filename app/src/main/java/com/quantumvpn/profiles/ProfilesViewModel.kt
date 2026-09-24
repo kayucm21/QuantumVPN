@@ -338,6 +338,16 @@ class ProfilesViewModel(
         settingsStore.setProtectUnknownWifi(enabled)
     }
 
+    fun setTravelModeEnabled(enabled: Boolean) = operation(markBusy = false) {
+        if (!ClientFeatureGate.features().autoConnect) {
+            showMessage("Режим поездки отключён оператором.")
+            return@operation
+        }
+        settingsStore.setTravelModeEnabled(enabled)
+        settingsAuditStore.append("travelMode", enabled.toString())
+        showTip(if (enabled) "Режим поездки включён: защита сетей и автообход активны." else "Режим поездки выключен.")
+    }
+
     fun setTimeRoutingEnabled(enabled: Boolean) = operation(markBusy = false) {
         if (!ClientFeatureGate.features().vpnSchedule && !ClientFeatureGate.features().routingEditor) {
             showMessage("Расписание / маршруты отключены оператором.")

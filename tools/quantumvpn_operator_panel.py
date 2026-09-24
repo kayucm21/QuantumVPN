@@ -45,10 +45,10 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://tepacom.o190.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://tepacom.o190.com:8443").rstrip("/")
-PANEL_BUILD = "5.8.0"
-VERSION = "5.8.0"
-VERSION_CODE = 114
-DEFAULT_NOTE = "QuantumVPN 5.8.0: Smart Connect, авто-переход Wi‑Fi/LTE, центр уведомлений и Aurora Glass."
+PANEL_BUILD = "5.9.0"
+VERSION = "5.9.0"
+VERSION_CODE = 115
+DEFAULT_NOTE = "QuantumVPN 5.9.0: Horizon Glass, индекс приватности, режим поездки и живая карта серверов."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()
@@ -202,6 +202,13 @@ def conn():
                 "app_version": VERSION,
                 "app_version_code": str(VERSION_CODE),
                 "app_changelog": DEFAULT_NOTE,
+                "release_schedule_enabled": "0",
+                "release_publish_at": "0",
+                "scheduled_app_version": "",
+                "scheduled_app_version_code": "0",
+                "scheduled_rollout_percent": "100",
+                "scheduled_app_changelog": "",
+                "scheduled_min_version_code": "0",
                 "min_version_code": "0",
                 "force_update_message": "Доступна обязательная обновлённая версия QuantumVPN.",
                 "feature_vpn_connect": "1",
@@ -497,6 +504,58 @@ def health_worker():
         except Exception:
             pass
         time.sleep(60)
+
+
+def promote_scheduled_release(db, now=None):
+    """Promote a pre-uploaded release at its exact epoch without exposing it early."""
+    s = settings(db)
+    if not enabled(s, "release_schedule_enabled", False):
+        return False
+    publish_at = int(s.get("release_publish_at", "0") or 0)
+    version = (s.get("scheduled_app_version") or "").strip()
+    code = int(s.get("scheduled_app_version_code", "0") or 0)
+    now = int(time.time()) if now is None else int(now)
+    if publish_at <= 0 or publish_at > now or not version or code <= 0:
+        return False
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        return False
+    rollout = max(1, min(100, int(s.get("scheduled_rollout_percent", "100") or 100)))
+    note = s.get("scheduled_app_changelog") or DEFAULT_NOTE
+    min_code = max(0, int(s.get("scheduled_min_version_code", "0") or 0))
+    set_settings(db, {
+        "app_version": version,
+        "app_version_code": str(code),
+        "rollout_percent": str(rollout),
+        "app_changelog": note[:1000],
+        "min_version_code": str(min_code),
+        "update_notifications_enabled": "1",
+        "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
+        "release_schedule_enabled": "0",
+    })
+    banner = f"Доступно обновление QuantumVPN {version}. Откройте уведомление, чтобы установить новую версию."
+    # Known devices receive a persistent banner; new devices receive it from policy/update APIs.
+    db.execute(
+        "update device_flags set force_banner=?, updated_at=?",
+        (banner[:500], now),
+    )
+    db.execute(
+        "insert into events values (?,?,?,?,?)",
+        (now, "release_promoted", "operator", "", json.dumps({"version": version, "version_code": code}, ensure_ascii=False)),
+    )
+    db.commit()
+    release_info.cache_clear()
+    return True
+
+
+def scheduled_release_worker():
+    while True:
+        try:
+            db = conn()
+            promote_scheduled_release(db)
+            db.close()
+        except Exception:
+            pass
+        time.sleep(20)
 
 
 def telegram_send(s, text: str):
@@ -865,6 +924,13 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label>Сообщение force-update<textarea name=force_update_message>{html.escape(s.get('force_update_message',''))}</textarea></label>
         <label>Rollout %<input type=number min=1 max=100 name=rollout_percent value="{html.escape(s.get('rollout_percent','100'))}"></label>
         <label>Changelog / note<textarea name=app_changelog>{html.escape(s.get('app_changelog',''))}</textarea></label>
+        <div class=notice><b>Запланированный релиз</b><br><span class=muted>APK можно загрузить заранее. До указанного времени клиентам остаётся доступна текущая версия.</span></div>
+        <label><input type=checkbox name=release_schedule_enabled {checked('release_schedule_enabled')}> Автоматически опубликовать по расписанию</label>
+        <label>Время публикации (Unix epoch, МСК)<input name=release_publish_at value="{html.escape(s.get('release_publish_at','0'))}"></label>
+        <label>Версия по расписанию<input name=scheduled_app_version value="{html.escape(s.get('scheduled_app_version',''))}"></label>
+        <label>versionCode по расписанию<input name=scheduled_app_version_code value="{html.escape(s.get('scheduled_app_version_code','0'))}"></label>
+        <label>Rollout по расписанию %<input type=number min=1 max=100 name=scheduled_rollout_percent value="{html.escape(s.get('scheduled_rollout_percent','100'))}"></label>
+        <label>Changelog запланированной версии<textarea name=scheduled_app_changelog>{html.escape(s.get('scheduled_app_changelog',''))}</textarea></label>
         <button>Сохранить релиз</button>
       </form>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=staging>
@@ -1743,6 +1809,9 @@ class App(BaseHTTPRequestHandler):
                 rollout = max(1, min(100, int(form.get("rollout_percent", ["100"])[0])))
                 vc = int(form.get("app_version_code", [str(VERSION_CODE)])[0])
                 min_vc = max(0, int(form.get("min_version_code", ["0"])[0]))
+                scheduled_vc = max(0, int(form.get("scheduled_app_version_code", ["0"])[0]))
+                scheduled_rollout = max(1, min(100, int(form.get("scheduled_rollout_percent", ["100"])[0])))
+                publish_at = max(0, int(form.get("release_publish_at", ["0"])[0] or 0))
             except Exception:
                 return self.reply(400, '{"error":"invalid_release"}')
             values = {
@@ -1752,6 +1821,12 @@ class App(BaseHTTPRequestHandler):
                 "force_update_message": form.get("force_update_message", [""])[0][:400],
                 "rollout_percent": str(rollout),
                 "app_changelog": form.get("app_changelog", [""])[0][:1000],
+                "release_schedule_enabled": "1" if "release_schedule_enabled" in form else "0",
+                "release_publish_at": str(publish_at),
+                "scheduled_app_version": form.get("scheduled_app_version", [""])[0][:32],
+                "scheduled_app_version_code": str(scheduled_vc),
+                "scheduled_rollout_percent": str(scheduled_rollout),
+                "scheduled_app_changelog": form.get("scheduled_app_changelog", [""])[0][:1000],
             }
         elif section == "staging":
             tab = "release"
@@ -1816,7 +1891,7 @@ class App(BaseHTTPRequestHandler):
         else:
             return self.reply(400, '{"error":"unknown_section"}')
 
-        if section in ("service", "features", "nodes", "ab") and any(current.get(k) != v for k, v in values.items()):
+        if section in ("service", "features", "nodes", "ab", "release") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)
         changes = {k: {"before": current.get(k), "after": v} for k, v in values.items() if current.get(k) != v}
         set_settings(db, values)
@@ -1834,6 +1909,7 @@ def main():
     bind = os.environ.get("QV_BIND", "0.0.0.0")
     threading.Thread(target=alert_worker, daemon=True).start()
     threading.Thread(target=health_worker, daemon=True).start()
+    threading.Thread(target=scheduled_release_worker, daemon=True).start()
     try:
         OperatorHTTPServer.request_queue_size = int(os.environ.get("QV_BACKLOG", "512"))
     except Exception:

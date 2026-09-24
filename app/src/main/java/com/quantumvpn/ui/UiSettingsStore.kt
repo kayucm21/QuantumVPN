@@ -80,6 +80,8 @@ data class UiSettings(
     val serverMode: ServerMode = ServerMode.Standard,
     val autoConnectTrustedWifi: Boolean = false,
     val protectUnknownWifi: Boolean = true,
+    /** Travel mode keeps failover and unknown-network protection ready for roaming. */
+    val travelModeEnabled: Boolean = false,
     val trustedWifiSsids: String = "",
     val reduceMotion: Boolean = false,
     val appLockEnabled: Boolean = true,
@@ -216,6 +218,7 @@ class UiSettingsStore(
                     ?: ServerMode.Standard,
                 autoConnectTrustedWifi = preferences[AUTO_CONNECT_TRUSTED_WIFI] ?: false,
                 protectUnknownWifi = preferences[PROTECT_UNKNOWN_WIFI] ?: true,
+                travelModeEnabled = preferences[TRAVEL_MODE] ?: false,
                 trustedWifiSsids = preferences[TRUSTED_WIFI_SSIDS].orEmpty(),
                 reduceMotion = preferences[REDUCE_MOTION] ?: false,
                 appLockEnabled = preferences[APP_LOCK_ENABLED] ?: true,
@@ -414,6 +417,16 @@ class UiSettingsStore(
 
     suspend fun setProtectUnknownWifi(enabled: Boolean) {
         dataStore.edit { it[PROTECT_UNKNOWN_WIFI] = enabled }
+    }
+
+    suspend fun setTravelModeEnabled(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[TRAVEL_MODE] = enabled
+            if (enabled) {
+                preferences[AUTO_FAILOVER] = true
+                preferences[PROTECT_UNKNOWN_WIFI] = true
+            }
+        }
     }
 
     suspend fun setTrustedWifiSsids(raw: String) {
@@ -781,6 +794,7 @@ class UiSettingsStore(
         val SERVER_MODE = stringPreferencesKey("server_mode")
         val AUTO_CONNECT_TRUSTED_WIFI = booleanPreferencesKey("auto_connect_trusted_wifi")
         val PROTECT_UNKNOWN_WIFI = booleanPreferencesKey("protect_unknown_wifi")
+        val TRAVEL_MODE = booleanPreferencesKey("travel_mode")
         val TRUSTED_WIFI_SSIDS = stringPreferencesKey("trusted_wifi_ssids")
         val REDUCE_MOTION = booleanPreferencesKey("reduce_motion")
         val APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")

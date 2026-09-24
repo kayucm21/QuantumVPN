@@ -1,0 +1,3 @@
+version=5.9.0
+versionCode=115
+features=horizon-glass,privacy-index,travel-mode,live-server-map,smart-battery,smart-notifications,server-timeline,scheduled-release

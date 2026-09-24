@@ -91,6 +91,7 @@ import com.quantumvpn.vpn.DeadServerQuarantineStore
 import com.quantumvpn.vpn.forServerUi
 import com.quantumvpn.vpn.primaryGroup
 import com.quantumvpn.vpn.UnderlyingServerPing
+import com.quantumvpn.vpn.ServerSwitchEvent
 
 private enum class V2Tab(val title: String, val icon: ImageVector) {
     Home("Главная", Icons.Default.Home),
@@ -189,7 +190,16 @@ fun QuantumVpnAppV2(
     val app = context.applicationContext as QuantumVpnApplication
     val policy by app.container.clientPolicyRepository.policy.collectAsState()
     val trafficHistory by viewModel.sessionTrafficHistory.collectAsState()
+    val switchHistory by viewModel.switchHistory.collectAsState()
     val reliabilityScores by viewModel.reliabilityScores.collectAsState()
+    val privacyScore = PrivacyScore.calculate(
+        vpnConnected = connected,
+        adBlockEnabled = state.settings.adBlockEnabled,
+        killSwitchEnabled = state.settings.blockNonVpnTraffic,
+        secureDnsEnabled = state.settings.adBlockOnlineDns || state.settings.dnsMode != com.quantumvpn.config.DnsMode.FromJson,
+        autoFailoverEnabled = state.settings.autoFailoverEnabled,
+        unknownWifiProtection = state.settings.protectUnknownWifi,
+    )
     val block = policy.blockReason(BuildConfig.VERSION_CODE.toLong())
     LaunchedEffect(block, connected) {
         if (block != null && connected) onVpnStop()
@@ -219,6 +229,7 @@ fun QuantumVpnAppV2(
                         server = selected?.tag ?: "Автоматический сервер",
                         ping = selected?.pingMillis ?: selected?.tag?.let(offlinePings::get),
                         adBlock = state.settings.adBlockEnabled,
+                        privacyScore = privacyScore,
                         stats = sessionStats,
                         onConnect = {
                             val id = activeProfile?.id
@@ -234,6 +245,7 @@ fun QuantumVpnAppV2(
                         stats = sessionStats,
                         connected = connected,
                         history = trafficHistory,
+                        switchHistory = switchHistory,
                         diagnostics = diagnostics,
                         cumulativeBlocked = state.settings.cumulativeBlocked,
                     )
@@ -245,11 +257,15 @@ fun QuantumVpnAppV2(
                         autoConnect = state.settings.autoConnectOnCellular,
                         notifications = !state.settings.quietMode,
                         protectUnknownWifi = state.settings.protectUnknownWifi,
+                        travelMode = state.settings.travelModeEnabled,
+                        powerMode = state.settings.powerMode,
                         onTheme = viewModel::setTheme,
                         onDynamicColor = viewModel::setUseDynamicColor,
                         onAutoConnect = viewModel::setAutoConnectOnCellular,
                         onNotifications = { enabled -> viewModel.setQuietMode(!enabled) },
                         onProtectUnknownWifi = viewModel::setProtectUnknownWifi,
+                        onTravelMode = viewModel::setTravelModeEnabled,
+                        onPowerMode = viewModel::setPowerMode,
                     )
                 }
             }
@@ -341,7 +357,7 @@ private fun serverRegion(name: String): String {
 
 @Composable
 private fun V2Home(
-    connected: Boolean, busy: Boolean, hasProfile: Boolean, server: String, ping: Int?, adBlock: Boolean, stats: VpnSessionStats,
+    connected: Boolean, busy: Boolean, hasProfile: Boolean, server: String, ping: Int?, adBlock: Boolean, privacyScore: Int, stats: VpnSessionStats,
     onConnect: () -> Unit, onServers: () -> Unit, onSettings: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Color(0xFF071A2C), Color(0xFF040B16))))) {
@@ -415,6 +431,21 @@ private fun V2Home(
                 Spacer(Modifier.height(12.dp))
                 Text("DNS-фильтр активен после подключения", color = Aurora.Muted, fontSize = 12.sp)
             }
+            Spacer(Modifier.height(12.dp))
+            Surface(
+                color = Aurora.Glass.copy(alpha = .9f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .45f)),
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Индекс приватности", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                        Text(PrivacyScore.label(privacyScore), color = Aurora.Muted, fontSize = 12.sp)
+                    }
+                    Text("$privacyScore/100", color = Aurora.Mint, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                }
+            }
             if (!hasProfile) {
                 Spacer(Modifier.height(10.dp))
                 Text("Загружаем серверы…", color = Aurora.Mint, fontSize = 12.sp)
@@ -449,6 +480,23 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
             TextButton(onClick = onRefresh, enabled = !busy) { Text("Обновить пинг", color = Aurora.Mint) }
         }
         Text(updatedAt?.let { "Список · " + java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it)) } ?: "Загружаем список…", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(bottom = 12.dp))
+        Surface(
+            color = Aurora.Glass.copy(alpha = .92f),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .42f)),
+            shape = RoundedCornerShape(22.dp),
+            modifier = Modifier.fillMaxWidth().height(150.dp).padding(bottom = 12.dp),
+        ) {
+            Box {
+                Globe3DBackdrop(Modifier.fillMaxSize(), pulse = true, reduceMotion = false, countryCode = null)
+                Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Живая карта серверов", color = Aurora.Text, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Text("● LIVE", color = Aurora.Mint, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Text("${servers.size} точек · пинг обновляется каждые 20 секунд", color = Aurora.Muted, fontSize = 12.sp)
+                }
+            }
+        }
         OutlinedTextField(
             value = query, onValueChange = { query = it }, singleLine = true,
             label = { Text("Найти страну или сервер") }, modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
@@ -527,6 +575,7 @@ private fun V2Statistics(
     stats: VpnSessionStats,
     connected: Boolean,
     history: List<SessionTrafficRecord>,
+    switchHistory: List<ServerSwitchEvent>,
     diagnostics: DiagnosticState,
     cumulativeBlocked: Long,
 ) {
@@ -577,6 +626,14 @@ private fun V2Statistics(
                 Text("${record.profileName} · ${formatBytes(total)} · ${record.durationSec / 60} мин", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
             }
         }
+        if (switchHistory.isNotEmpty()) {
+            Spacer(Modifier.height(18.dp))
+            Text("История смены серверов", color = Aurora.Text, fontWeight = FontWeight.Bold)
+            switchHistory.take(6).forEach { event ->
+                val date = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(java.util.Date(event.epochMillis))
+                Text("$date · ${event.outboundTag}", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+            }
+        }
     }
 }
 
@@ -589,11 +646,15 @@ private fun V2Settings(
     autoConnect: Boolean,
     notifications: Boolean,
     protectUnknownWifi: Boolean,
+    travelMode: Boolean,
+    powerMode: PowerMode,
     onTheme: (ThemeMode) -> Unit,
     onDynamicColor: (Boolean) -> Unit,
     onAutoConnect: (Boolean) -> Unit,
     onNotifications: (Boolean) -> Unit,
     onProtectUnknownWifi: (Boolean) -> Unit,
+    onTravelMode: (Boolean) -> Unit,
+    onPowerMode: (PowerMode) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -673,6 +734,12 @@ private fun V2Settings(
         V2Toggle("Уведомления", "Показывать статус соединения", notifications, onNotifications)
         Spacer(Modifier.height(10.dp))
         V2Toggle("Защита незнакомого Wi‑Fi", "Предложить VPN после страницы входа", protectUnknownWifi, onProtectUnknownWifi)
+        Spacer(Modifier.height(10.dp))
+        V2Toggle("Режим поездки", "Защита роуминга, автообход и быстрый failover", travelMode, onTravelMode)
+        Spacer(Modifier.height(10.dp))
+        V2Toggle("Умная батарея", "Снижение фоновой активности без потери защиты", powerMode == PowerMode.Battery) { enabled ->
+            onPowerMode(if (enabled) PowerMode.Battery else PowerMode.Balanced)
+        }
         Spacer(Modifier.height(10.dp))
         V2NavRow(
             "Центр уведомлений",

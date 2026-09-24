@@ -14,6 +14,10 @@ data class ClientFeatureFlags(
     val safeMode: Boolean = true,
     val stealthMode: Boolean = true,
     val carrierBypass: Boolean = true,
+    val widgets: Boolean = true,
+    val changelog: Boolean = true,
+    val diagnostics: Boolean = true,
+    val timeline: Boolean = true,
 )
 
 /** Small, signed-by-transport branding payload controlled by the operator panel.

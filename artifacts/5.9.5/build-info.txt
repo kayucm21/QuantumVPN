@@ -1,0 +1,4 @@
+version=5.9.5
+versionCode=120
+features=manual-server-selection,session-timeline,local-changelog,voluntary-diagnostics,remote-feature-flags,operator-fleet-center,operator-backup-download
+schedule=unchanged

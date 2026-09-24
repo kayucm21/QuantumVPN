@@ -264,6 +264,7 @@ fun QuantumVpnAppV2(
                         switchHistory = switchHistory,
                         diagnostics = diagnostics,
                         cumulativeBlocked = state.settings.cumulativeBlocked,
+                        showTimeline = policy.features.timeline,
                     )
                     V2Tab.Settings -> V2Settings(
                         diagnostics = diagnostics,
@@ -484,11 +485,11 @@ private fun V2Home(
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("🌐", fontSize = 22.sp)
                     Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                        Text("Лучший сервер", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
-                        Text("Автовыбор · Низкий пинг", color = Aurora.Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("Текущий сервер", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                        Text(server, color = Aurora.Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Surface(color = Color(0xFF2EE59D).copy(alpha = .18f), shape = RoundedCornerShape(999.dp)) {
-                        Text(ping?.let { "$it мс" } ?: "авто", color = Color(0xFF2EE59D), fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                        Text(ping?.let { "$it мс" } ?: "—", color = Color(0xFF2EE59D), fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     }
                 }
             }
@@ -624,35 +625,6 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
             } else server.tag
             return reliabilityScores[key] ?: reliabilityScores[server.tag] ?: 50
         }
-        val bestServer = servers.mapNotNull { server ->
-            (server.pingMillis ?: offlinePings[server.tag])?.let { ping ->
-                Triple(server, ping, ServerHealthScore.combined(ping, reliability(server)))
-            }
-        }.sortedWith(
-            compareByDescending<Triple<com.quantumvpn.vpn.RuntimeOutboundItem, Int, Int>> { it.third }
-                .thenBy { it.second },
-        ).firstOrNull()
-        if (bestServer != null && groupTag != null) {
-            Surface(
-                onClick = {
-                    groups.firstOrNull { group -> group.items.any { it.tag == bestServer.first.tag } }
-                        ?.let { onSelect(it.tag, bestServer.first.tag) }
-                },
-                color = Aurora.Mint.copy(alpha = .13f),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .7f)),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-            ) {
-                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("⚡", fontSize = 24.sp)
-                    Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                        Text("Умный автоматический выбор", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
-                        Text("${bestServer.first.tag} · качество ${bestServer.third}/100", color = Aurora.Muted, fontSize = 12.sp)
-                    }
-                    Text("${bestServer.second} мс", color = Aurora.Mint, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
         if (servers.isEmpty()) Text("Серверы не найдены", color = Aurora.Muted, modifier = Modifier.padding(top = 24.dp))
         servers.forEach { server ->
             Surface(
@@ -685,6 +657,7 @@ private fun V2Statistics(
     switchHistory: List<ServerSwitchEvent>,
     diagnostics: DiagnosticState,
     cumulativeBlocked: Long,
+    showTimeline: Boolean,
 ) {
     Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -724,8 +697,8 @@ private fun V2Statistics(
         Spacer(Modifier.height(6.dp))
         Text("Общий трафик  ${formatBytes(stats.downloadTotalBytes + stats.uploadTotalBytes)}", color = Aurora.Muted, fontSize = 13.sp)
         Spacer(Modifier.height(6.dp))
-        Text("Сессий сегодня  ${history.size}", color = Aurora.Muted, fontSize = 13.sp)
-        if (history.isNotEmpty()) {
+        if (showTimeline) Text("Сессий сегодня  ${history.size}", color = Aurora.Muted, fontSize = 13.sp)
+        if (showTimeline && history.isNotEmpty()) {
             Spacer(Modifier.height(14.dp))
             Text("Последние сеансы", color = Aurora.Text, fontWeight = FontWeight.Bold)
             history.take(7).forEach { record ->
@@ -733,7 +706,7 @@ private fun V2Statistics(
                 Text("${record.profileName} · ${formatBytes(total)} · ${record.durationSec / 60} мин", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
             }
         }
-        if (switchHistory.isNotEmpty()) {
+        if (showTimeline && switchHistory.isNotEmpty()) {
             Spacer(Modifier.height(18.dp))
             Text("История смены серверов", color = Aurora.Text, fontWeight = FontWeight.Bold)
             switchHistory.take(6).forEach { event ->
@@ -812,6 +785,21 @@ private fun V2Settings(
             Text("О приложении", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
             Text("QuantumVPN ${BuildConfig.VERSION_NAME}", color = Aurora.Mint, modifier = Modifier.padding(top = 12.dp))
             Text("Liquid Glass Orbit · защита соединения", color = Aurora.Muted, modifier = Modifier.padding(top = 6.dp))
+            if (policy.features.changelog) {
+                Spacer(Modifier.height(22.dp))
+                Text("Что нового", color = Aurora.Text, fontWeight = FontWeight.Bold)
+                LocalChangelog.entries.take(3).forEach { entry ->
+                    Spacer(Modifier.height(10.dp))
+                    Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(14.dp)) {
+                            Text("Версия ${entry.version}", color = Aurora.Mint, fontWeight = FontWeight.SemiBold)
+                            entry.bullets.take(3).forEach { bullet ->
+                                Text("• $bullet", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
+                            }
+                        }
+                    }
+                }
+            }
         }
         return
     }
@@ -865,11 +853,11 @@ private fun V2Settings(
             onClick = { notificationsOpen = true },
         )
         Spacer(Modifier.height(10.dp))
-        V2Toggle("Диагностика сети", "Помогать улучшать стабильность (добровольно)", true) { }
+        if (policy.features.diagnostics) V2Toggle("Диагностика сети", "Помогать улучшать стабильность (добровольно)", true) { }
         Spacer(Modifier.height(18.dp))
         V2NavRow("Пожертвование", "Поддержать проект через ЮMoney · история сборов", onClick = { donateOpen = true })
         Spacer(Modifier.height(10.dp))
-        V2NavRow("Отправить логи", "Добровольный диагностический отчёт", onClick = {
+        if (policy.features.diagnostics) V2NavRow("Отправить логи", "Добровольный диагностический отчёт", onClick = {
             scope.launch {
                 logStatus = "Отправка…"
                 logStatus = if (VoluntaryDiagnosticReporter(context).send(diagnostics).isSuccess) {

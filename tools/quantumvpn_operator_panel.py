@@ -46,10 +46,10 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://tepacom.o190.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://tepacom.o190.com:8443").rstrip("/")
-PANEL_BUILD = "5.9.4"
-VERSION = "5.9.4"
-VERSION_CODE = 119
-DEFAULT_NOTE = "QuantumVPN 5.9.4: центр уведомлений, экран приватности и новый onboarding."
+PANEL_BUILD = "5.9.5"
+VERSION = "5.9.5"
+VERSION_CODE = 120
+DEFAULT_NOTE = "QuantumVPN 5.9.5: центр флота, история сессий и удалённые флаги."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()
@@ -268,6 +268,10 @@ def conn():
                 "feature_kill_switch": "0",
                 "feature_block_open_wifi": "0",
                 "feature_selfsteal": "1",
+                "feature_widgets": "1",
+                "feature_changelog": "1",
+                "feature_diagnostics": "1",
+                "feature_timeline": "1",
                 "feature_ab_json": "{}",
                 "brand_name": "QuantumVPN",
                 "brand_tagline": "HORIZON GLASS · 2026",
@@ -1270,6 +1274,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <aside class=sidebar>
       <nav class=tabs>
         <a href="/operator?tab=dashboard">Дашборд</a>
+        <a href="/operator?tab=fleet">Центр флота</a>
         <a href="/operator?tab=service">Сервис</a>
         <a href="/operator?tab=features">Фичи</a>
         <a href="/operator?tab=branding">Оформление</a>
@@ -1330,6 +1335,32 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </div>
     </section>
 
+    <section class=card {show('fleet')}>
+      <h2>Центр флота</h2>
+      <p class=muted>Единая сводка по приложениям, подписчикам, обновлениям и состоянию VDS.</p>
+      <div class=stats>
+        <div class=stat>Активные подписки<b class=ok>{summary.get('active','—')}</b></div>
+        <div class=stat>Устройства за 24ч<b>{report['devices_seen']}</b></div>
+        <div class=stat>Production<b>{html.escape(s.get('app_version', VERSION))} · {html.escape(s.get('app_version_code', str(VERSION_CODE)))}</b></div>
+        <div class=stat>Rollout<b>{html.escape(s.get('rollout_percent','100'))}%</b></div>
+        <div class=stat>Инциденты<b class={'off' if report['open_incidents'] else 'ok'}>{report['open_incidents']}</b></div>
+        <div class=stat>Лучший TCP‑пинг<b>{latency_best or s.get('latency_best_ms','0')} ms</b></div>
+      </div>
+      <div class=grid style="margin-top:14px">
+        <section class=card><h2>Каналы обновлений</h2>
+          <p>Production: <b>{html.escape(s.get('app_version', VERSION))}</b></p>
+          <p>Staging: <b>{html.escape(s.get('staging_version') or 'выключен')}</b></p>
+          <p>По расписанию: <b>{html.escape(s.get('scheduled_app_version') or 'нет')}</b></p>
+          <p>Оповещения: <b class=ok>всегда включены</b></p>
+          <a class="button secondary" href="/operator?tab=release">Открыть центр обновлений</a>
+        </section>
+        <section class=card><h2>Быстрые переходы</h2>
+          <div class=actions><a class="button secondary" href="/operator?tab=devices">Устройства</a><a class="button secondary" href="/operator?tab=incidents">Инциденты</a><a class="button secondary" href="/operator?tab=logs">Живые логи</a><a class="button secondary" href="/operator?tab=latency">Пинг VDS</a></div>
+          <p class=muted style="margin-top:12px">Удалённые флаги применяются после следующего опроса политики и не требуют новой сборки APK.</p>
+        </section>
+      </div>
+    </section>
+
     <section class=grid {show('service')}>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=service>
         <h2>Сервис и объявления</h2>
@@ -1371,6 +1402,10 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label><input type=checkbox name=feature_kill_switch {checked('feature_kill_switch')}> Kill-switch</label>
         <label><input type=checkbox name=feature_block_open_wifi {checked('feature_block_open_wifi')}> Блок открытого Wi‑Fi</label>
         <label><input type=checkbox name=feature_selfsteal {checked('feature_selfsteal')}> Selfsteal — защита маршрутизации / маскировка TLS</label>
+        <label><input type=checkbox name=feature_widgets {checked('feature_widgets')}> Виджеты и быстрые действия</label>
+        <label><input type=checkbox name=feature_changelog {checked('feature_changelog')}> История изменений в приложении</label>
+        <label><input type=checkbox name=feature_diagnostics {checked('feature_diagnostics')}> Добровольная диагностика и отправка логов</label>
+        <label><input type=checkbox name=feature_timeline {checked('feature_timeline')}> История сессий и смены серверов</label>
         <p class=muted>Оповещения о новой версии всегда включены и рассылаются фоном каждые ~15 минут.</p>
         <button>Сохранить</button>
       </form>
@@ -1559,7 +1594,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label>Chat ID<input name=telegram_chat_id value="{html.escape(s.get('telegram_chat_id',''))}"></label>
         <div class=actions><button>Сохранить</button>
         <button class=secondary formaction=/operator/actions name=action value=telegram_test>Тест сообщения</button>
-        <button class=secondary formaction=/operator/actions name=action value=backup_now>Создать backup сейчас</button></div>
+        <button class=secondary formaction=/operator/actions name=action value=backup_now>Создать backup сейчас</button>
+        <a class="button secondary" href="/operator/backup.zip">Скачать backup</a></div>
         <p class=muted>Архив содержит SQLite-конфигурацию, настройки панели и ключ сессии. Передача выполняется только в указанный Telegram-чат.</p>
       </form>
     </section>
@@ -1937,6 +1973,10 @@ class App(BaseHTTPRequestHandler):
                 "block_open_wifi": enabled(s, "feature_block_open_wifi"),
                 "selfsteal": enabled(s, "feature_selfsteal"),
                 "stealth_mode": enabled(s, "feature_selfsteal"),
+                "widgets": enabled(s, "feature_widgets"),
+                "changelog": enabled(s, "feature_changelog"),
+                "diagnostics": enabled(s, "feature_diagnostics"),
+                "timeline": enabled(s, "feature_timeline"),
             }
             features.update(ab_features(s, bucket))
             fl = db.execute(
@@ -2047,6 +2087,25 @@ class App(BaseHTTPRequestHandler):
                 "text/plain; charset=utf-8",
                 {"Content-Disposition": 'attachment; filename="quantum-control-report.txt"'},
             )
+
+        if path == "/operator/backup.zip":
+            adm = self.admin()
+            if not adm or not self.require_role(adm, "operator"):
+                return
+            archive = create_backup_archive()
+            try:
+                with open(archive, "rb") as stream:
+                    payload = stream.read()
+                audit(db, adm.get("user", "unknown"), adm.get("ip", ""), "backup_download", {"file": os.path.basename(archive)})
+                db.commit()
+                return self.reply(
+                    200,
+                    payload,
+                    "application/zip",
+                    {"Content-Disposition": f'attachment; filename="{os.path.basename(archive)}"'},
+                )
+            except OSError:
+                return self.reply(500, "Backup unavailable", "text/plain; charset=utf-8")
 
         if path == "/operator/live":
             adm = self.admin(require_login_page=False)
@@ -2574,6 +2633,10 @@ class App(BaseHTTPRequestHandler):
                     "feature_kill_switch",
                     "feature_block_open_wifi",
                     "feature_selfsteal",
+                    "feature_widgets",
+                    "feature_changelog",
+                    "feature_diagnostics",
+                    "feature_timeline",
                 )
             }
         elif section == "ab":

@@ -121,6 +121,10 @@ class ClientPolicyRepository(
                     stealth || selfsteal
                 },
                 carrierBypass = featuresObj?.optBoolean("carrier_bypass", true) ?: true,
+                widgets = featuresObj?.optBoolean("widgets", true) ?: true,
+                changelog = featuresObj?.optBoolean("changelog", true) ?: true,
+                diagnostics = featuresObj?.optBoolean("diagnostics", true) ?: true,
+                timeline = featuresObj?.optBoolean("timeline", true) ?: true,
             )
             val brandingObj = root.optJSONObject("branding")
             val branding = ClientBranding(

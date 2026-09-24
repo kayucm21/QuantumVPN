@@ -1100,25 +1100,18 @@ def parse_multipart(handler):
 
 def css():
     return """
-    :root{color-scheme:dark;--bg:#050b16;--card:#0a192ae8;--line:#21546a;--text:#eaf7ff;--muted:#9ab0bf;--ok:#38efab;--off:#ff9aa7;--accent:#31dda0}
-    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#103b47,#050b16 55%);color:var(--text);font:15px/1.45 "Segoe UI",system-ui,sans-serif}
-    main{max-width:1440px;margin:auto;padding:24px 16px 72px}.hero,.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 16px 40px #0004}
-    .hero{background:linear-gradient(135deg,#0d3140,#091222)}h1{margin:4px 0;font-size:30px}h2{margin:0 0 12px;font-size:18px}
-    .accent,.ok{color:var(--ok)}.off{color:var(--off)}.warn{color:#ffd27f}.muted{color:var(--muted)}
-    .panel-shell{display:grid;grid-template-columns:220px minmax(0,1fr);gap:14px;align-items:start}.sidebar{position:sticky;top:14px;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:12px;box-shadow:0 16px 40px #0004}.panel-content{min-width:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}.grid .card{margin:0}
-    .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.stat{background:#07121f;border:1px solid #1d3546;border-radius:14px;padding:12px}
-    .stat b{display:block;font-size:22px;margin-top:4px}label{display:block;margin:10px 0}
-    textarea,input,select{width:100%;background:#07121f;color:var(--text);border:1px solid #285368;border-radius:10px;padding:10px}
-    input[type=checkbox]{width:auto;accent-color:var(--accent)}
-    button,a.button{display:inline-block;background:linear-gradient(135deg,#31dda0,#3298ef);color:#041019;border:0;border-radius:11px;padding:10px 14px;font-weight:800;text-decoration:none;cursor:pointer}
-    button.secondary,a.secondary{background:#123247;color:#dff6ff;border:1px solid #2a5b73}
-    button.danger{background:linear-gradient(135deg,#ff7b8a,#ef4d6a);color:#18040a}
-    .actions{display:flex;gap:8px;flex-wrap:wrap}nav.tabs{display:flex;flex-direction:column;gap:6px}
-    nav.tabs a{display:block;padding:10px 12px;border-radius:11px;border:1px solid transparent;color:#dff6ff;text-decoration:none;font-size:13px}nav.tabs a:hover{background:#123247;border-color:#2a5b73}
-    table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 6px;border-bottom:1px solid #1d3546;text-align:left;vertical-align:top}
-    .flash{padding:10px 12px;border-radius:12px;background:#113528;border:1px solid #2f7a58;margin:10px 0}
-    .login{max-width:420px;margin:10vh auto}.pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#123247;font-size:12px}
-    @media(max-width:800px){main{padding:16px 10px}.panel-shell{grid-template-columns:1fr}.sidebar{position:static}.sidebar nav.tabs{flex-direction:row;overflow:auto}.sidebar nav.tabs a{white-space:nowrap}.hero{margin-bottom:10px}table{font-size:11px}}
+    :root{color-scheme:dark;--bg:#070a11;--surface:#0b111c;--card:#0c1522e8;--line:#18354d;--line2:#245977;--text:#e8f7ff;--muted:#8ba3b5;--cyan:#26ddff;--violet:#9b7bff;--amber:#ffb454;--ok:#35e7ad;--off:#ff718a}
+    *{box-sizing:border-box}body{margin:0;background-color:var(--bg);background-image:linear-gradient(#0b1723 1px,transparent 1px),linear-gradient(90deg,#0b1723 1px,transparent 1px),radial-gradient(circle at 72% -12%,#123c52 0,transparent 38%),radial-gradient(circle at 6% 90%,#17102c 0,transparent 30%);background-size:32px 32px,32px 32px,auto,auto;color:var(--text);font:14px/1.45 "Segoe UI",system-ui,sans-serif}
+    main{max-width:1560px;margin:auto;padding:18px 18px 64px}.hero,.card{background:linear-gradient(145deg,#0d1827f2,#09111df2);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 18px 60px #0008, inset 0 1px #ffffff0a}
+    .hero{position:relative;overflow:hidden;background:linear-gradient(120deg,#0d1d2b,#0a101b 62%,#17112c)}.hero:after{content:"";position:absolute;inset:auto -10% -70% 35%;height:220px;background:radial-gradient(ellipse,#26ddff22,transparent 68%);pointer-events:none}.hero-top{display:flex;align-items:center;justify-content:space-between;gap:12px}.system-pill{border:1px solid #35e7ad66;background:#35e7ad12;color:var(--ok);border-radius:999px;padding:6px 11px;font-size:12px;white-space:nowrap}.sidebar-brand{font-weight:800;letter-spacing:.04em;color:var(--text);padding:8px 10px 14px;border-bottom:1px solid var(--line);margin-bottom:10px}.sidebar-brand span{display:block;color:var(--muted);font-size:11px;font-weight:500;letter-spacing:0;margin-top:3px}h1{margin:5px 0;font-size:28px;letter-spacing:-.02em}h2{margin:0 0 11px;font-size:17px;letter-spacing:.01em}
+    .accent,.ok{color:var(--ok)}.off{color:var(--off)}.warn{color:var(--amber)}.muted{color:var(--muted)}
+    .panel-shell{display:grid;grid-template-columns:232px minmax(0,1fr);gap:14px;align-items:start}.sidebar{position:sticky;top:12px;background:#080f1aeF;border:1px solid #1b4260;border-radius:14px;padding:10px;box-shadow:0 20px 60px #0009}.panel-content{min-width:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.grid .card{margin:0}
+    .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:9px}.stat{background:#080f19;border:1px solid #17324a;border-radius:10px;padding:11px;box-shadow:inset 0 0 24px #26ddff05}.stat b{display:block;font-size:21px;margin-top:4px;color:var(--text)}
+    label{display:block;margin:10px 0}textarea,input,select{width:100%;background:#070d16;color:var(--text);border:1px solid #21455f;border-radius:8px;padding:10px;outline:none}textarea:focus,input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px #26ddff14}input[type=checkbox]{width:auto;accent-color:var(--cyan)}
+    button,a.button{display:inline-block;background:linear-gradient(135deg,#26ddff,#6e76ff);color:#061019;border:1px solid #74eaff66;border-radius:8px;padding:9px 13px;font-weight:800;text-decoration:none;cursor:pointer;box-shadow:0 5px 18px #26ddff1c}button:hover,a.button:hover{filter:brightness(1.13);transform:translateY(-1px)}
+    button.secondary,a.secondary{background:#101d2d;color:#d9f5ff;border:1px solid #245977;box-shadow:none}button.danger{background:linear-gradient(135deg,#ffb454,#e9784f);color:#1a1004;border-color:#ffc56f66}.actions{display:flex;gap:7px;flex-wrap:wrap}nav.tabs{display:flex;flex-direction:column;gap:4px}nav.tabs a{display:block;padding:10px 11px;border-radius:8px;border:1px solid transparent;color:#bfd2df;text-decoration:none;font-size:13px;transition:.15s}nav.tabs a:hover{background:#102538;border-color:#245977;color:var(--text)}nav.tabs a.active{background:linear-gradient(90deg,#12364a,#121a32);border-color:#26ddff88;color:var(--cyan);box-shadow:inset 3px 0 var(--cyan),0 0 18px #26ddff12}
+    table{width:100%;border-collapse:collapse;font-size:12px;background:#070e18;border:1px solid #17324a;border-radius:10px;overflow:hidden}th,td{padding:9px 7px;border-bottom:1px solid #13283a;text-align:left;vertical-align:top}th{color:#9cc0d3;background:#0c1a2a;font-size:11px;text-transform:uppercase;letter-spacing:.04em}tr:hover td{background:#0b1b2a}.flash{padding:10px 12px;border-radius:9px;background:#102b2a;border:1px solid #35e7ad77;margin:10px 0}.login{max-width:430px;margin:10vh auto}.pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#12263a;border:1px solid #245977;font-size:12px}.live-log{font-family:"Cascadia Code",Consolas,monospace;color:#b8f6ff;background:#050a11!important;border-color:#1e5876!important;text-shadow:0 0 8px #26ddff18}.hero code,.card code{color:#b9dcf1}
+    @media(max-width:800px){main{padding:12px 9px 48px}.panel-shell{grid-template-columns:1fr}.sidebar{position:static}.sidebar nav.tabs{flex-direction:row;overflow:auto}.sidebar nav.tabs a{white-space:nowrap}.sidebar-brand{display:none}.hero{margin-bottom:10px}.hero-top{align-items:flex-start}table{font-size:11px}}
     """
 
 
@@ -1266,30 +1259,31 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <title>Quantum Control</title><style>{css()}</style><main>
     <section class=hero>
-      <div class=accent>QUANTUM CONTROL · ROSPANEL · build {html.escape(PANEL_BUILD)}</div>
-      <h1>Управление приложением</h1>
+      <div class=hero-top><div class=accent>QUANTUM CONTROL · ROSPANEL · build {html.escape(PANEL_BUILD)}</div><span class=system-pill>● СИСТЕМА В НОРМЕ</span></div>
+      <h1>Командный центр</h1>
       <p class=muted>Политики, релизы, устройства, алерты и статус — только доп. панель. Подписчики правятся в RosPanel.</p>
     </section>
     <div class=panel-shell>
       <aside class=sidebar>
+      <div class=sidebar-brand>◈ QUANTUM CONTROL<span>Панель управления VPN</span></div>
       <nav class=tabs>
-        <a href="/operator?tab=dashboard">Дашборд</a>
-        <a href="/operator?tab=fleet">Центр флота</a>
-        <a href="/operator?tab=service">Сервис</a>
-        <a href="/operator?tab=features">Фичи</a>
-        <a href="/operator?tab=branding">Оформление</a>
-        <a href="/operator?tab=release">Релизы</a>
-        <a href="/operator?tab=donations">Пожертвования</a>
-        <a href="/operator?tab=devices">Устройства</a>
-        <a href="/operator?tab=users">Юзеры</a>
-        <a href="/operator?tab=incidents">Инциденты</a>
-        <a href="/operator?tab=reports">Отчёты</a>
-        <a href="/operator?tab=integrations">Интеграции</a>
-        <a href="/operator?tab=security">Безопасность</a>
-        <a href="/operator?tab=latency">Задержка</a>
+        <a class="{'active' if section == 'dashboard' else ''}" href="/operator?tab=dashboard">Командный центр</a>
+        <a class="{'active' if section == 'fleet' else ''}" href="/operator?tab=fleet">Центр флота</a>
+        <a class="{'active' if section == 'service' else ''}" href="/operator?tab=service">Сервис</a>
+        <a class="{'active' if section == 'features' else ''}" href="/operator?tab=features">Флаги</a>
+        <a class="{'active' if section == 'branding' else ''}" href="/operator?tab=branding">Оформление</a>
+        <a class="{'active' if section == 'release' else ''}" href="/operator?tab=release">Релизы</a>
+        <a class="{'active' if section == 'donations' else ''}" href="/operator?tab=donations">Пожертвования</a>
+        <a class="{'active' if section == 'devices' else ''}" href="/operator?tab=devices">Устройства</a>
+        <a class="{'active' if section == 'users' else ''}" href="/operator?tab=users">Пользователи</a>
+        <a class="{'active' if section == 'incidents' else ''}" href="/operator?tab=incidents">Инциденты</a>
+        <a class="{'active' if section == 'reports' else ''}" href="/operator?tab=reports">Отчёты</a>
+        <a class="{'active' if section == 'integrations' else ''}" href="/operator?tab=integrations">Интеграции</a>
+        <a class="{'active' if section == 'security' else ''}" href="/operator?tab=security">Безопасность</a>
+        <a class="{'active' if section == 'latency' else ''}" href="/operator?tab=latency">Задержка VDS</a>
         {('<a href="/operator?tab=admins">Администраторы</a>' if role_at_least(actor_role, 'owner') else '')}
-        <a href="/operator?tab=audit">Аудит</a>
-        <a href="/operator?tab=logs">Живые логи</a>
+        <a class="{'active' if section == 'audit' else ''}" href="/operator?tab=audit">Аудит</a>
+        <a class="{'active' if section == 'logs' else ''}" href="/operator?tab=logs">Живые логи</a>
         <a href="/operator/logout">Выход</a>
       </nav>
       </aside>
@@ -1617,7 +1611,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
 
     <section class=card {show('logs')}>
       <div class=actions style="justify-content:space-between;align-items:center"><div><h2 style="margin-bottom:4px">Живые логи</h2><p class=muted style="margin:0">Поток событий панели в реальном времени. История не обновляет страницу и хранится по текущим правилам очистки.</p></div><span id=live-state class=pill>Подключение…</span></div>
-      <pre id=live-log style="min-height:280px;max-height:560px;overflow:auto;background:#030812;border:1px solid #1d3546;border-radius:12px;padding:14px;margin-top:14px;white-space:pre-wrap">Ожидание событий…</pre>
+      <pre id=live-log class=live-log style="min-height:280px;max-height:560px;overflow:auto;background:#030812;border:1px solid #1d3546;border-radius:12px;padding:14px;margin-top:14px;white-space:pre-wrap">Ожидание событий…</pre>
     </section>
 
     <section class=card {show('audit')}>

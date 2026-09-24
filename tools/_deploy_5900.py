@@ -13,7 +13,7 @@ password = os.environ.get("QVPN_VDS_PASSWORD")
 if not password:
     raise SystemExit("QVPN_VDS_PASSWORD is required")
 root = Path(__file__).resolve().parents[1]
-version = "5.9.1"
+version = "5.9.2"
 
 def connect():
     for attempt in range(6):

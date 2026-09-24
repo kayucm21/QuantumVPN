@@ -19,6 +19,7 @@ import struct
 import subprocess
 import threading
 import time
+import zipfile
 from collections import defaultdict, deque
 from email.parser import BytesParser
 from email.policy import default as email_default
@@ -45,10 +46,10 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://tepacom.o190.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://tepacom.o190.com:8443").rstrip("/")
-PANEL_BUILD = "5.9.1"
-VERSION = "5.9.1"
-VERSION_CODE = 116
-DEFAULT_NOTE = "QuantumVPN 5.9.1: Horizon Glass 2026 с адаптивными цветами и живой стеклянной навигацией."
+PANEL_BUILD = "5.9.2"
+VERSION = "5.9.2"
+VERSION_CODE = 117
+DEFAULT_NOTE = "QuantumVPN 5.9.2: Horizon Glass 2026, роли администраторов и безопасные резервные копии."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()
@@ -61,6 +62,35 @@ _ALERT_STATE = {"last": {}, "lock": threading.Lock()}
 
 def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+PASSWORD_ITERATIONS = 180_000
+
+
+def password_hash(raw: str) -> str:
+    """Return a salted PBKDF2 password record suitable for the local panel DB."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", (raw or "").encode("utf-8"), salt, PASSWORD_ITERATIONS
+    )
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${b64url(salt)}${b64url(digest)}"
+
+
+def password_ok(raw: str, encoded: str) -> bool:
+    try:
+        scheme, rounds, salt, expected = encoded.split("$", 3)
+        if scheme != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", (raw or "").encode("utf-8"), base64.urlsafe_b64decode(salt + "=="), int(rounds)
+        )
+        return hmac.compare_digest(b64url(digest), expected)
+    except Exception:
+        return False
+
+
+def normal_role(role: str) -> str:
+    return role if role in ("owner", "operator", "viewer") else "viewer"
 
 
 def session_secret() -> bytes:
@@ -174,6 +204,14 @@ def conn():
                     latency_ms integer not null default 0,
                     detail text not null default ''
                 );
+                create table if not exists admin_users (
+                    username text primary key,
+                    password_hash text not null,
+                    role text not null default 'operator',
+                    enabled integer not null default 1,
+                    created_at integer not null default 0,
+                    updated_at integer not null default 0
+                );
                 create index if not exists idx_events_device on events(device);
                 create index if not exists idx_events_kind_ts on events(kind, ts);
                 create index if not exists idx_events_ts on events(ts);
@@ -228,6 +266,7 @@ def conn():
                 "telegram_bot_token": "",
                 "telegram_chat_id": "",
                 "telegram_alerts_enabled": "0",
+                "telegram_backups_enabled": "0",
                 "rate_limit_per_min": "120",
             }
             for key, value in defaults.items():
@@ -243,6 +282,14 @@ def conn():
                     "Технические работы. Извините за неудобства.",
                 ),
             )
+            # Migrate the environment administrator into the RBAC table once.
+            # The legacy Basic Auth credentials remain valid for compatibility,
+            # but passwords are never stored in plaintext in the database.
+            if db.execute("select count(*) from admin_users").fetchone()[0] == 0:
+                db.execute(
+                    "insert into admin_users(username,password_hash,role,enabled,created_at,updated_at) values (?,?,?,?,?,?)",
+                    (USER, password_hash(PASSWORD), "owner", 1, now, now),
+                )
             _DB_READY = True
         if now - _LAST_EVENT_CLEANUP >= 3600:
             db.execute("delete from events where ts < ?", (now - 14 * 86400,))
@@ -306,6 +353,48 @@ def basic_auth_ok(header: str) -> bool:
         return base64.b64decode(header.split()[1]).decode() == f"{USER}:{PASSWORD}"
     except Exception:
         return False
+
+
+def basic_auth_credentials(header: str):
+    try:
+        scheme, encoded = header.split(None, 1)
+        if scheme.lower() != "basic":
+            return None
+        raw = base64.b64decode(encoded).decode("utf-8")
+        username, password = raw.split(":", 1)
+        return username, password
+    except Exception:
+        return None
+
+
+def find_admin(db, username: str):
+    row = db.execute(
+        "select username,password_hash,role,enabled from admin_users where username=?",
+        (username,),
+    ).fetchone()
+    if not row or not int(row[3]):
+        return None
+    return {"username": row[0], "password_hash": row[1], "role": normal_role(row[2])}
+
+
+def authenticate_admin(db, username: str, password: str):
+    row = find_admin(db, username)
+    if row and password_ok(password, row["password_hash"]):
+        return row
+    # Keep the environment credentials as a break-glass path if the database
+    # was restored from an older release and has not been migrated yet.
+    if (
+        not db.execute("select 1 from admin_users limit 1").fetchone()
+        and hmac.compare_digest(username or "", USER)
+        and hmac.compare_digest(password or "", PASSWORD)
+    ):
+        return {"username": USER, "role": "owner", "password_hash": ""}
+    return None
+
+
+def role_at_least(role: str, required: str) -> bool:
+    levels = {"viewer": 0, "operator": 1, "owner": 2}
+    return levels.get(normal_role(role), 0) >= levels.get(required, 2)
 
 
 def ip_allowed(ip: str, s: dict) -> bool:
@@ -582,6 +671,111 @@ def telegram_send(s, text: str):
         return False
 
 
+def telegram_send_document(s, path: str, caption: str = ""):
+    """Upload one backup archive to the configured Telegram chat."""
+    token = (s.get("telegram_bot_token") or "").strip()
+    chat = (s.get("telegram_chat_id") or "").strip()
+    if not token or not chat or not os.path.isfile(path):
+        return False
+    try:
+        boundary = "----QuantumVPN" + secrets.token_hex(12)
+        with open(path, "rb") as stream:
+            payload = stream.read()
+        filename = os.path.basename(path)
+        chunks = []
+        def field(name, value):
+            chunks.append(f"--{boundary}\r\n".encode())
+            chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+            chunks.append(str(value).encode())
+            chunks.append(b"\r\n")
+        field("chat_id", chat)
+        field("caption", caption[:900])
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(
+            f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'
+            "Content-Type: application/zip\r\n\r\n".encode()
+        )
+        chunks.append(payload)
+        chunks.append(b"\r\n")
+        chunks.append(f"--{boundary}--\r\n".encode())
+        req = Request(
+            f"https://api.telegram.org/bot{token}/sendDocument",
+            data=b"".join(chunks),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with urlopen(req, timeout=30) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
+def create_backup_archive():
+    """Create a consistent, local operator backup without touching the live DB."""
+    folder = os.path.join(ROOT, "backups")
+    os.makedirs(folder, exist_ok=True)
+    stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    archive = os.path.join(folder, f"quantum-control-{stamp}.zip")
+    temp_db = os.path.join(folder, f".operator-{stamp}.db")
+    source = sqlite3.connect(DB, timeout=30)
+    try:
+        target = sqlite3.connect(temp_db)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+    try:
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            bundle.write(temp_db, "operator.db")
+            secret = os.path.join(ROOT, "session.secret")
+            if os.path.isfile(secret):
+                bundle.write(secret, "session.secret")
+            bundle.writestr(
+                "backup-info.json",
+                json.dumps({"created_at": int(time.time()), "panel_build": PANEL_BUILD}, ensure_ascii=False),
+            )
+    finally:
+        try:
+            os.remove(temp_db)
+        except OSError:
+            pass
+    # Keep seven days locally; Telegram remains the remote copy.
+    cutoff = time.time() - 7 * 86400
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        if name.endswith(".zip") and os.path.getmtime(path) < cutoff:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return archive
+
+
+def hourly_backup_worker():
+    """Send a database/session backup once per wall-clock hour when enabled."""
+    while True:
+        try:
+            now = int(time.time())
+            next_hour = ((now // 3600) + 1) * 3600
+            time.sleep(max(5, next_hour - now))
+            db = conn()
+            s = settings(db)
+            if enabled(s, "telegram_backups_enabled", False):
+                archive = create_backup_archive()
+                ok = telegram_send_document(
+                    s,
+                    archive,
+                    f"Quantum Control: часовая резервная копия {time.strftime('%Y-%m-%d %H:%M UTC')}",
+                )
+                audit(db, "system", "127.0.0.1", "hourly_backup", {"ok": ok, "file": os.path.basename(archive)})
+                db.commit()
+            db.close()
+        except Exception:
+            time.sleep(30)
+
+
 def alert_worker():
     while True:
         try:
@@ -725,7 +919,7 @@ def render_login(error=""):
     </form></section></main>"""
 
 
-def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None):
+def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner"):
     checked = lambda key: "checked" if s.get(key) == "1" else ""
     events = "".join(
         f"<tr><td>{time.strftime('%d.%m %H:%M', time.localtime(x[0]))}</td><td>{html.escape(x[1])}</td>"
@@ -753,6 +947,12 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         f"<td>{html.escape(a[2])}</td><td>{html.escape(a[3])}</td><td><code>{html.escape(a[4][:500])}</code></td></tr>"
         for a in audit_rows
     ) or "<tr><td colspan=5>Аудит пуст</td></tr>"
+    admin_html = "".join(
+        f"<tr><td>{html.escape(str(a[0]))}</td><td>{html.escape(normal_role(a[1]))}</td>"
+        f"<td class={'ok' if a[2] else 'off'}>{'включён' if a[2] else 'выключен'}</td>"
+        f"<td>{time.strftime('%d.%m.%Y %H:%M', time.localtime(a[3])) if a[3] else '—'}</td></tr>"
+        for a in (admin_rows or [])
+    ) or "<tr><td colspan=4>Администраторы не настроены</td></tr>"
     devices_html = "".join(
         f"<tr><td><a href='/operator?tab=devices&q={quote(d[0])}'>{html.escape(d[0])}</a></td>"
         f"<td>{html.escape(d[1])}</td><td>{time.strftime('%d.%m %H:%M', time.localtime(d[2])) if d[2] else '—'}</td>"
@@ -832,6 +1032,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a href="/operator?tab=devices">Устройства</a>
         <a href="/operator?tab=users">Юзеры</a>
         <a href="/operator?tab=security">Безопасность</a>
+        {('<a href="/operator?tab=admins">Администраторы</a>' if role_at_least(actor_role, 'owner') else '')}
         <a href="/operator?tab=audit">Аудит</a>
         <a href="/operator/logs.txt">Логи</a>
         <a href="/operator/logout">Выход</a>
@@ -1019,11 +1220,29 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=telegram>
         <h2>Telegram алерты</h2>
         <label><input type=checkbox name=telegram_alerts_enabled {checked('telegram_alerts_enabled')}> Включить</label>
+        <label><input type=checkbox name=telegram_backups_enabled {checked('telegram_backups_enabled')}> Резервная копия каждый час</label>
         <label>Bot token<input name=telegram_bot_token value="{html.escape(s.get('telegram_bot_token',''))}" autocomplete=off></label>
         <label>Chat ID<input name=telegram_chat_id value="{html.escape(s.get('telegram_chat_id',''))}"></label>
         <div class=actions><button>Сохранить</button>
-        <button class=secondary formaction=/operator/actions name=action value=telegram_test>Тест сообщения</button></div>
+        <button class=secondary formaction=/operator/actions name=action value=telegram_test>Тест сообщения</button>
+        <button class=secondary formaction=/operator/actions name=action value=backup_now>Создать backup сейчас</button></div>
+        <p class=muted>Архив содержит SQLite-конфигурацию, настройки панели и ключ сессии. Передача выполняется только в указанный Telegram-чат.</p>
       </form>
+    </section>
+
+    <section class=grid {show('admins')}>
+      <form class=card method=post action=/operator/admins>
+        <h2>Роли администраторов</h2>
+        <p class=muted>Owner — всё управление; operator — настройки и релизы; viewer — только просмотр.</p>
+        <label>Логин<input name=username required autocomplete=off></label>
+        <label>Новый пароль<input type=password name=password minlength=10 required autocomplete=new-password></label>
+        <label>Роль<select name=role><option value=operator>operator</option><option value=viewer>viewer</option><option value=owner>owner</option></select></label>
+        <label><input type=checkbox name=enabled checked> Учётная запись включена</label>
+        <button>Сохранить администратора</button>
+      </form>
+      <section class=card><h2>Учётные записи</h2>
+        <table><thead><tr><th>Логин</th><th>Роль</th><th>Состояние</th><th>Изменён</th></tr></thead><tbody>{admin_html}</tbody></table>
+      </section>
     </section>
 
     <section class=card {show('audit')}>
@@ -1133,10 +1352,15 @@ class App(BaseHTTPRequestHandler):
             self.reply(403, "IP not allowed", "text/plain; charset=utf-8")
             return None
         sess = self.cookie_session()
-        if sess and sess.get("u") == USER:
-            return {"user": USER, "db": db, "s": s, "ip": ip}
-        if basic_auth_ok(self.headers.get("Authorization", "")):
-            return {"user": USER, "db": db, "s": s, "ip": ip, "basic": True}
+        if sess:
+            identity = find_admin(db, str(sess.get("u") or ""))
+            if identity:
+                return {"user": identity["username"], "role": identity["role"], "db": db, "s": s, "ip": ip}
+        credentials = basic_auth_credentials(self.headers.get("Authorization", ""))
+        if credentials:
+            identity = authenticate_admin(db, credentials[0], credentials[1])
+            if identity:
+                return {"user": identity["username"], "role": identity["role"], "db": db, "s": s, "ip": ip, "basic": True}
         if require_login_page and self.path.startswith("/operator") and not self.path.startswith("/operator/login"):
             self.reply(200, render_login(), "text/html; charset=utf-8")
             return None
@@ -1144,6 +1368,14 @@ class App(BaseHTTPRequestHandler):
         self.send_header("WWW-Authenticate", 'Basic realm="QuantumControl"')
         self.end_headers()
         return None
+
+    def require_role(self, adm, required="operator"):
+        if role_at_least(adm.get("role", "viewer"), required):
+            return True
+        self.reply(403, "Недостаточно прав для этой операции", "text/plain; charset=utf-8")
+        audit(adm["db"], adm.get("user", "unknown"), adm.get("ip", ""), "permission_denied", {"required": required, "role": adm.get("role")})
+        adm["db"].commit()
+        return False
 
     def current_release(self, s, channel="production"):
         if channel == "staging" and enabled(s, "staging_enabled", False):
@@ -1424,6 +1656,11 @@ class App(BaseHTTPRequestHandler):
             tab = query.get("tab", ["dashboard"])[0]
             q = query.get("q", [""])[0]
             flash = query.get("flash", [""])[0]
+            if tab == "admins" and not role_at_least(adm.get("role", "viewer"), "owner"):
+                return self.reply(403, "Только owner может управлять администраторами", "text/plain; charset=utf-8")
+            admin_rows = db.execute(
+                "select username,role,enabled,updated_at from admin_users order by username"
+            ).fetchall()
             empty_summary = {"active": 0, "disabled": 0, "expired": 0, "online_15m": 0, "traffic_today_gb": 0.0, "ok": False}
             empty_status = {"rospanel": "—", "operator": "—", "xray": "—", "opera": "—", "disk_free_gb": 0, "disk_used_pct": 0, "outbounds": []}
             if tab == "devices":
@@ -1445,6 +1682,7 @@ class App(BaseHTTPRequestHandler):
                         section=tab,
                         q=q,
                         device=device,
+                        actor_role=adm.get("role", "viewer"),
                     ),
                     "text/html; charset=utf-8",
                 )
@@ -1477,6 +1715,7 @@ class App(BaseHTTPRequestHandler):
                         q=q,
                         donation_rows=donation_rows,
                         donation_totals=donation_totals,
+                        actor_role=adm.get("role", "viewer"),
                     ),
                     "text/html; charset=utf-8",
                 )
@@ -1499,6 +1738,8 @@ class App(BaseHTTPRequestHandler):
                     section=tab,
                     q=q,
                     device=None,
+                    admin_rows=admin_rows,
+                    actor_role=adm.get("role", "viewer"),
                 ),
                 "text/html; charset=utf-8",
             )
@@ -1659,15 +1900,16 @@ class App(BaseHTTPRequestHandler):
             ip = self.client_address[0]
             if not ip_allowed(ip, s):
                 return self.reply(403, render_login("IP не в allowlist"), "text/html; charset=utf-8")
-            if user != USER or password != PASSWORD:
+            identity = authenticate_admin(db, user, password)
+            if not identity:
                 time.sleep(0.4)
                 return self.reply(401, render_login("Неверный логин или пароль"), "text/html; charset=utf-8")
             if enabled(s, "totp_enabled", False):
                 secret = s.get("totp_secret") or ""
                 if not secret or not totp_ok(secret, code):
                     return self.reply(401, render_login("Нужен корректный код 2FA"), "text/html; charset=utf-8")
-            token = sign_session({"u": USER, "exp": int(time.time()) + SESSION_TTL, "n": secrets.token_hex(8)})
-            audit(db, USER, ip, "login", {"ok": True})
+            token = sign_session({"u": identity["username"], "role": identity["role"], "exp": int(time.time()) + SESSION_TTL, "n": secrets.token_hex(8)})
+            audit(db, identity["username"], ip, "login", {"ok": True, "role": identity["role"]})
             db.commit()
             self.send_response(303)
             self.send_header("Location", "/operator?tab=dashboard")
@@ -1682,6 +1924,29 @@ class App(BaseHTTPRequestHandler):
         if not adm:
             return
         actor, ip = adm["user"], adm["ip"]
+        if not self.require_role(adm, "operator"):
+            return
+
+        if path == "/operator/admins":
+            if not self.require_role(adm, "owner"):
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            username = (form.get("username", [""])[0] or "").strip()[:64]
+            raw_password = form.get("password", [""])[0]
+            role = normal_role(form.get("role", ["operator"])[0])
+            is_enabled = 1 if "enabled" in form else 0
+            if not re.fullmatch(r"[A-Za-z0-9_.@-]{2,64}", username) or len(raw_password) < 10:
+                return self.reply(400, "Логин или пароль не соответствуют требованиям", "text/plain; charset=utf-8")
+            now = int(time.time())
+            db.execute(
+                "insert into admin_users(username,password_hash,role,enabled,created_at,updated_at) values (?,?,?,?,?,?) "
+                "on conflict(username) do update set password_hash=excluded.password_hash, role=excluded.role, enabled=excluded.enabled, updated_at=excluded.updated_at",
+                (username, password_hash(raw_password), role, is_enabled, now, now),
+            )
+            audit(db, actor, ip, "admin_user_upsert", {"username": username, "role": role, "enabled": bool(is_enabled)})
+            db.commit()
+            return self.redirect_operator("admins", "Администратор сохранён")
 
         if path == "/operator/actions":
             length = int(self.headers.get("Content-Length", "0"))
@@ -1698,6 +1963,11 @@ class App(BaseHTTPRequestHandler):
             elif action == "telegram_test":
                 ok = telegram_send(s, "[Quantum Control] Тестовое сообщение: алерты работают.")
                 flash = "Telegram OK" if ok else "Telegram ошибка (проверьте token/chat)"
+            elif action == "backup_now":
+                archive = create_backup_archive()
+                ok = telegram_send_document(s, archive, f"Quantum Control: ручная резервная копия {time.strftime('%Y-%m-%d %H:%M UTC')}")
+                flash = "Backup отправлен в Telegram" if ok else "Backup создан локально, Telegram недоступен"
+                audit(db, actor, ip, "backup_now", {"ok": ok, "file": os.path.basename(archive)})
             elif action == "restart_operator":
                 audit(db, actor, ip, "restart_operator", {})
                 db.commit()
@@ -1895,6 +2165,7 @@ class App(BaseHTTPRequestHandler):
             tab = "security"
             values = {
                 "telegram_alerts_enabled": "1" if "telegram_alerts_enabled" in form else "0",
+                "telegram_backups_enabled": "1" if "telegram_backups_enabled" in form else "0",
                 "telegram_bot_token": form.get("telegram_bot_token", [""])[0][:200],
                 "telegram_chat_id": form.get("telegram_chat_id", [""])[0][:64],
             }
@@ -1918,6 +2189,7 @@ def main():
     port = int(os.environ.get("QV_PORT", "8765"))
     bind = os.environ.get("QV_BIND", "0.0.0.0")
     threading.Thread(target=alert_worker, daemon=True).start()
+    threading.Thread(target=hourly_backup_worker, daemon=True).start()
     threading.Thread(target=health_worker, daemon=True).start()
     threading.Thread(target=scheduled_release_worker, daemon=True).start()
     try:

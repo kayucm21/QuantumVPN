@@ -12,8 +12,8 @@ os.makedirs(r"C:\gradle-home-qvpn", exist_ok=True)
 os.environ["GRADLE_USER_HOME"] = r"C:\gradle-home-qvpn"
 os.environ.pop("GRADLE_OPTS", None)
 
-version = "5.9.1"
-code = 116
+version = "5.9.2"
+code = 117
 art = src_root / "artifacts" / version
 art.mkdir(parents=True, exist_ok=True)
 
@@ -77,9 +77,9 @@ metadata = {
     "artifacts": items,
 }
 (art / "release-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-(art / "build-info.txt").write_text("version=5.9.1\nversionCode=116\nfeatures=horizon-glass-adaptive,privacy-index,travel-mode,live-server-map,smart-battery,smart-notifications,server-timeline,scheduled-release-21-msk\n", encoding="utf-8")
+(art / "build-info.txt").write_text("version=5.9.2\nversionCode=117\nfeatures=horizon-glass-adaptive,privacy-index,travel-mode,live-server-map,smart-battery,smart-notifications,server-timeline,rbac-audit,hourly-telegram-backup,scheduled-release-21-msk\n", encoding="utf-8")
 (art / "RELEASE_NOTES.md").write_text(
-    "# QuantumVPN 5.9.1\n\n"
+    "# QuantumVPN 5.9.2\n\n"
     "- Horizon Glass 2026: redesigned home, servers, statistics and settings surfaces.\n"
     "- Privacy Index summarizes VPN, DNS, ad-block and failover protection on-device.\n"
     "- Travel Mode reinforces unknown-network protection and automatic failover.\n"
@@ -92,9 +92,9 @@ metadata = {
 )
 (art / "update.html").write_text(
     "<!doctype html><html lang='ru'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>QuantumVPN 5.9.1</title><style>body{font-family:system-ui;background:#06121d;color:#effcff;padding:24px}.card{max-width:560px;margin:8vh auto;padding:28px;border:1px solid #1d5570;border-radius:24px;background:#0b2032}.btn{display:block;text-align:center;padding:15px;border-radius:999px;background:#3de7ff;color:#041018;font-weight:800;text-decoration:none;margin-top:20px}.muted{color:#9eb6c9}</style>"
-    "<div class='card'><h1>QuantumVPN 5.9.1</h1><p class='muted'>Horizon Glass 2026 · адаптивные цвета · живые стеклянные карточки.</p>"
+    "<title>QuantumVPN 5.9.2</title><style>body{font-family:system-ui;background:#06121d;color:#effcff;padding:24px}.card{max-width:560px;margin:8vh auto;padding:28px;border:1px solid #1d5570;border-radius:24px;background:#0b2032}.btn{display:block;text-align:center;padding:15px;border-radius:999px;background:#3de7ff;color:#041018;font-weight:800;text-decoration:none;margin-top:20px}.muted{color:#9eb6c9}</style>"
+    "<div class='card'><h1>QuantumVPN 5.9.2</h1><p class='muted'>Horizon Glass 2026 · роли операторов · часовые резервные копии.</p>"
     "<p class='muted'>Скачайте APK и подтвердите установку в Android.</p>"
-    "<a class='btn' href='/downloads/5.9.1/QuantumVPN-5.9.1-operator-debug-arm64-v8a.apk'>Скачать ARM64</a>"
-    "<p><a class='muted' href='/downloads/5.9.1/QuantumVPN-5.9.1-operator-debug-armeabi-v7a.apk'>Скачать ARMv7</a></p></div>", encoding="utf-8")
+    "<a class='btn' href='/downloads/5.9.2/QuantumVPN-5.9.2-operator-debug-arm64-v8a.apk'>Скачать ARM64</a>"
+    "<p><a class='muted' href='/downloads/5.9.2/QuantumVPN-5.9.2-operator-debug-armeabi-v7a.apk'>Скачать ARMv7</a></p></div>", encoding="utf-8")
 print("ARTIFACTS_OK", art, flush=True)

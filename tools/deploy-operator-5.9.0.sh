@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version='5.9.1'
-version_code='116'
+version='5.9.2'
+version_code='117'
 release="/var/www/quantumvpn/downloads/$version"
 
 python3 -m py_compile /tmp/quantumvpn_operator_panel.py
@@ -36,7 +36,7 @@ ENV=/etc/quantumvpn-operator.env
 grep -q '^QV_DOWNLOAD_BASE=' "$ENV" && sed -i 's|^QV_DOWNLOAD_BASE=.*|QV_DOWNLOAD_BASE=https://tepacom.o190.com:8443|' "$ENV" || echo 'QV_DOWNLOAD_BASE=https://tepacom.o190.com:8443' >>"$ENV"
 if [[ -f /tmp/setup-nginx-downloads.sh ]]; then bash /tmp/setup-nginx-downloads.sh || true; fi
 
-# Upload new APKs now, but keep 5.8.0 production until the next 21:00 Moscow time.
+# Upload new APKs now, but keep the current production release until the next 21:00 Moscow time.
 python3 - "$version" "$version_code" <<'PY'
 import datetime, sqlite3, sys, time
 from zoneinfo import ZoneInfo
@@ -55,16 +55,17 @@ values = {
     "scheduled_app_version_code": version_code,
     "scheduled_rollout_percent": "100",
     "scheduled_min_version_code": "0",
-    "scheduled_app_changelog": "Horizon Glass 2026; адаптивные цвета; индекс приватности; режим поездки; живая карта серверов; умная батарея; история серверов.",
+    "scheduled_app_changelog": "Horizon Glass 2026; роли owner/operator/viewer; аудит действий; часовые резервные копии в Telegram; адаптивные цвета; индекс приватности.",
     "update_notifications_enabled": "1",
-    "announce": "Сегодня в 21:00 по МСК доступно обновление QuantumVPN 5.9.1 с новым Horizon Glass дизайном.",
-    "announce_en": "QuantumVPN 5.9.1 with the new Horizon Glass design will be available at 21:00 Moscow time.",
-    "force_update_message": "Сегодня в 21:00 по МСК будет доступно обновление QuantumVPN 5.9.1.",
-    "app_changelog": "Запланировано на 21:00 МСК: Horizon Glass 2026, адаптивные цвета и обновлённая стеклянная навигация.",
+    "telegram_backups_enabled": "1",
+    "announce": "Сегодня в 21:00 по МСК доступно обновление QuantumVPN 5.9.2: роли администраторов, аудит и резервные копии.",
+    "announce_en": "QuantumVPN 5.9.2 with RBAC, audit and hourly backups will be available at 21:00 Moscow time.",
+    "force_update_message": "Сегодня в 21:00 по МСК будет доступно обновление QuantumVPN 5.9.2.",
+    "app_changelog": "Запланировано на 21:00 МСК: роли owner/operator/viewer, аудит действий и часовые резервные копии Telegram.",
 }
 for key, value in values.items():
     db.execute("insert or replace into settings(key,value) values (?,?)", (key, value))
-db.execute("insert into events values (?,?,?,?,?)", (int(time.time()), "release_scheduled", "operator", "", "5.9.0 at " + target.isoformat()))
+db.execute("insert into events values (?,?,?,?,?)", (int(time.time()), "release_scheduled", "operator", "", version + " at " + target.isoformat()))
 db.commit()
 db.close()
 print("scheduled_publish_moscow=" + target.isoformat())

@@ -298,14 +298,6 @@ def conn():
                 "webhook_url": "",
                 "webhook_secret": "",
                 "webhook_events": "incident,release,maintenance,diagnostic",
-                "vk_enabled": "0",
-                "vk_version": "1.0.0",
-                "vk_version_code": "1",
-                "vk_client_id": "",
-                "vk_redirect_uri": "orbit-social://oauth/callback",
-                "vk_api_version": "5.199",
-                "vk_release_notes": "Первый публичный прототип Orbit Social.",
-                "vk_proxy_base": "https://api.vk.com/method",
             }
             for key, value in defaults.items():
                 db.execute("insert or ignore into settings values (?,?)", (key, value))
@@ -1351,7 +1343,6 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a class="{'active' if section in ('users','devices','fleet') else ''}" href="/operator?tab=users"><span class=nav-ico>♧</span> Пользователи</a>
         <a class="{'active' if section == 'service' else ''}" href="/operator?tab=service"><span class=nav-ico>▭</span> Подписки</a>
         <a class="{'active' if section in ('release','features','branding') else ''}" href="/operator?tab=release"><span class=nav-ico>◇</span> Релизы</a>
-        <a class="{'active' if section == 'vk' else ''}" href="/operator?tab=vk"><span class=nav-ico>◈</span> VK-приложение</a>
         <a class="{'active' if section in ('incidents','logs','reports') else ''}" href="/operator?tab=incidents"><span class=nav-ico>♧</span> События</a>
         <a class="{'active' if section in ('audit','integrations','security','admins') else ''}" href="/operator?tab=audit"><span class=nav-ico>▤</span> Аудит</a>
         <details class=nav-group><summary>Ещё</summary>
@@ -1387,42 +1378,6 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <section class="card actions-card"><h2>Действия</h2><div class=actions-stack><form method=post action=/operator/actions><button class="ops-action ops-check" name=action value=sync_protocols><strong>⌕　Проверить</strong><small>Проверка состояния сервисов</small></button></form><form method=post action=/operator/actions><button class="ops-action ops-restart" name=action value=restart_operator><strong>■　Перезапустить</strong><small>Перезапустить Operator</small></button></form><a class="ops-action ops-release" href="/operator?tab=release"><strong>⟳　Откатить</strong><small>Выбрать предыдущий релиз</small></a><form method=post action=/operator/actions><button class="ops-action ops-save" name=action value=bump_revision><strong>▣　Сохранить</strong><small>Сохранить конфигурацию</small></button></form></div></section>
       </div>
       <section class="card logs-card"><div class=terminal-toolbar><h2 style="margin:0">●　Журналы (в реальном времени)</h2><div class=actions><span class=pill>Ⅱ</span><span class=muted>Автопрокрутка</span><span class=pill>↻</span><a class="button secondary" href="/operator?tab=logs">Открыть</a></div></div><pre class=terminal-log>{terminal_lines}</pre></section>
-    </section>
-
-    <section class=grid {show('vk')}>
-      <form class=card method=post action=/operator/policy>
-        <input type=hidden name=section value=vk>
-        <h2>Orbit Social · VK-клиент</h2>
-        <p class=muted>Отдельное приложение с собственным дизайном. Вход выполняется через официальный VK ID OAuth в браузере — пароль пользователя сюда не передаётся.</p>
-        <label><input type=checkbox name=vk_enabled {checked('vk_enabled')}> Включить VK-клиент</label>
-        <label>Версия<input name=vk_version value="{html.escape(s.get('vk_version','1.0.0'))}" pattern="[0-9]+\\.[0-9]+\\.[0-9]+" required></label>
-        <label>versionCode<input type=number min=1 name=vk_version_code value="{html.escape(s.get('vk_version_code','1'))}" required></label>
-        <label>VK ID Client ID<input name=vk_client_id value="{html.escape(s.get('vk_client_id',''))}" placeholder="Укажите ID приложения VK ID"></label>
-        <label>Redirect URI<input name=vk_redirect_uri value="{html.escape(s.get('vk_redirect_uri','orbit-social://oauth/callback'))}"></label>
-        <label>Версия VK API<input name=vk_api_version value="{html.escape(s.get('vk_api_version','5.199'))}"></label>
-        <label>Публичный proxy/API URL<input type=url name=vk_proxy_base value="{html.escape(s.get('vk_proxy_base','https://api.vk.com/method'))}"></label>
-        <label>Описание релиза<textarea name=vk_release_notes>{html.escape(s.get('vk_release_notes',''))}</textarea></label>
-        <button>Сохранить настройки VK</button>
-      </form>
-      <section class=card>
-        <h2>Состояние и безопасность</h2>
-        <div class=stats>
-          <div class=stat>Версия<b>{html.escape(s.get('vk_version','1.0.0'))}</b></div>
-          <div class=stat>Состояние<b class={'ok' if s.get('vk_enabled') == '1' else 'off'}>{'Включено' if s.get('vk_enabled') == '1' else 'Выключено'}</b></div>
-          <div class=stat>OAuth<b class={'ok' if s.get('vk_client_id') else 'warn'}>{'Настроен' if s.get('vk_client_id') else 'Нужен Client ID'}</b></div>
-          <div class=stat>API<b class=ok>HTTPS</b></div>
-        </div>
-        <p class=muted style="margin-top:14px">Client secret хранится только на VDS и не встраивается в APK. Для запуска OAuth сначала зарегистрируйте приложение VK ID и добавьте разрешённый Redirect URI.</p>
-        <p><a class="button secondary" href="/api/vk/version" target=_blank rel=noopener>Проверить VK API JSON</a></p>
-      </section>
-      <form class=card method=post action=/operator/vk-upload enctype=multipart/form-data>
-        <h2>Загрузка Orbit Social APK</h2>
-        <label>Версия каталога<input name=version value="{html.escape(s.get('vk_version','1.0.0'))}" required></label>
-        <label>ABI<select name=abi><option>arm64-v8a</option><option>armeabi-v7a</option><option>x86_64</option></select></label>
-        <label>Файл APK<input type=file name=apk accept=.apk required></label>
-        <button>Загрузить APK VK</button>
-        <p class=muted>Имя файла: OrbitSocial-{{ver}}-{{abi}}.apk</p>
-      </form>
     </section>
 
     <section class=card {show('fleet')}>
@@ -2116,31 +2071,6 @@ class App(BaseHTTPRequestHandler):
             }
             return self.reply(200, json.dumps(result, ensure_ascii=False))
 
-        if path == "/api/vk/version":
-            vk_version = s.get("vk_version") or "1.0.0"
-            vk_code = int(s.get("vk_version_code") or 1)
-            abi = (query.get("abi", ["arm64-v8a"])[0] or "arm64-v8a").strip()
-            if abi not in ("arm64-v8a", "armeabi-v7a", "x86_64"):
-                abi = "arm64-v8a"
-            artifact = os.path.join(DOWNLOAD_ROOT, "vk", vk_version, f"OrbitSocial-{vk_version}-{abi}.apk")
-            payload = {
-                "product": "orbit-social",
-                "application_id": "com.quantumvpn.orbit",
-                "version": vk_version,
-                "version_code": vk_code,
-                "enabled": s.get("vk_enabled") == "1",
-                "oauth": {
-                    "provider": "VK ID",
-                    "client_id_configured": bool((s.get("vk_client_id") or "").strip()),
-                    "redirect_uri": s.get("vk_redirect_uri") or "orbit-social://oauth/callback",
-                },
-                "api": {"base": s.get("vk_proxy_base") or "https://api.vk.com/method", "version": s.get("vk_api_version") or "5.199"},
-                "release_notes": s.get("vk_release_notes") or "",
-                "update_url": f"{DOWNLOAD_BASE}/downloads/vk/{vk_version}/OrbitSocial-{vk_version}-{abi}.apk" if os.path.isfile(artifact) else "",
-                "update_notifications": True,
-            }
-            return self.reply(200, json.dumps(payload, ensure_ascii=False))
-
         if path == "/api/v1/subscription":
             if s.get("subscription_main_enabled") != "1":
                 return self.reply(503, "Subscription temporarily unavailable", "text/plain; charset=utf-8")
@@ -2624,28 +2554,6 @@ class App(BaseHTTPRequestHandler):
             db.commit()
             return self.redirect_operator("devices", "Устройство сохранено")
 
-        if path == "/operator/vk-upload":
-            form, files = parse_multipart(self)
-            version = (form.get("version", [s.get("vk_version", "1.0.0")])[0] or "").strip()
-            abi = (form.get("abi", ["arm64-v8a"])[0] or "arm64-v8a").strip()
-            apk = files.get("apk")
-            if not version or not apk or not apk["data"]:
-                return self.redirect_operator("vk", "Нужны версия и APK Orbit Social")
-            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) or abi not in ("arm64-v8a", "armeabi-v7a", "x86_64"):
-                return self.redirect_operator("vk", "Проверьте версию и ABI")
-            folder = os.path.join(DOWNLOAD_ROOT, "vk", version)
-            os.makedirs(folder, exist_ok=True)
-            name = f"OrbitSocial-{version}-{abi}.apk"
-            target = os.path.join(folder, name)
-            with open(target, "wb") as out:
-                out.write(apk["data"])
-            digest = hashlib.sha256(apk["data"]).hexdigest()
-            open(target + ".sha256", "w").write(digest + "\n")
-            set_settings(db, {"vk_version": version})
-            audit(db, actor, ip, "upload_vk_apk", {"version": version, "abi": abi, "sha256": digest, "size": len(apk["data"])})
-            db.commit()
-            return self.redirect_operator("vk", f"Загружено {name}")
-
         if path == "/operator/upload":
             form, files = parse_multipart(self)
             version = (form.get("version", [""])[0] or "").strip()
@@ -2838,29 +2746,6 @@ class App(BaseHTTPRequestHandler):
                 "telegram_bot_token": form.get("telegram_bot_token", [""])[0][:200],
                 "telegram_chat_id": form.get("telegram_chat_id", [""])[0][:64],
             }
-        elif section == "vk":
-            tab = "vk"
-            version = (form.get("vk_version", ["1.0.0"])[0] or "1.0.0").strip()
-            try:
-                version_code = max(1, int(form.get("vk_version_code", ["1"])[0]))
-            except Exception:
-                return self.reply(400, '{"error":"invalid_vk_version_code"}')
-            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-                return self.reply(400, '{"error":"invalid_vk_version"}')
-            redirect_uri = (form.get("vk_redirect_uri", ["orbit-social://oauth/callback"])[0] or "orbit-social://oauth/callback").strip()[:300]
-            proxy_base = (form.get("vk_proxy_base", ["https://api.vk.com/method"])[0] or "https://api.vk.com/method").strip()[:300]
-            if not proxy_base.lower().startswith("https://"):
-                return self.reply(400, '{"error":"vk_proxy_https_required"}')
-            values = {
-                "vk_enabled": "1" if "vk_enabled" in form else "0",
-                "vk_version": version,
-                "vk_version_code": str(version_code),
-                "vk_client_id": form.get("vk_client_id", [""])[0].strip()[:80],
-                "vk_redirect_uri": redirect_uri,
-                "vk_api_version": form.get("vk_api_version", ["5.199"])[0].strip()[:20],
-                "vk_proxy_base": proxy_base,
-                "vk_release_notes": form.get("vk_release_notes", [""])[0][:1000],
-            }
         elif section == "webhooks":
             tab = "integrations"
             url = (form.get("webhook_url", [""])[0] or "").strip()[:2048]
@@ -2881,7 +2766,7 @@ class App(BaseHTTPRequestHandler):
         else:
             return self.reply(400, '{"error":"unknown_section"}')
 
-        if section in ("service", "features", "nodes", "ab", "branding", "latency", "release", "vk") and any(current.get(k) != v for k, v in values.items()):
+        if section in ("service", "features", "nodes", "ab", "branding", "latency", "release") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)
         changes = {k: {"before": current.get(k), "after": v} for k, v in values.items() if current.get(k) != v}
         maintenance_before = effective_maintenance(current)

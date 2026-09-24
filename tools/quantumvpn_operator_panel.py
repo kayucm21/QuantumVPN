@@ -46,10 +46,10 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://tepacom.o190.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://tepacom.o190.com:8443").rstrip("/")
-PANEL_BUILD = "5.9.3"
-VERSION = "5.9.3"
-VERSION_CODE = 118
-DEFAULT_NOTE = "QuantumVPN 5.9.3: удалённое оформление, живой мониторинг и безопасные обновления."
+PANEL_BUILD = "5.9.4"
+VERSION = "5.9.4"
+VERSION_CODE = 119
+DEFAULT_NOTE = "QuantumVPN 5.9.4: центр уведомлений, экран приватности и новый onboarding."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()
@@ -1098,10 +1098,10 @@ def css():
     return """
     :root{color-scheme:dark;--bg:#050b16;--card:#0a192ae8;--line:#21546a;--text:#eaf7ff;--muted:#9ab0bf;--ok:#38efab;--off:#ff9aa7;--accent:#31dda0}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#103b47,#050b16 55%);color:var(--text);font:15px/1.45 "Segoe UI",system-ui,sans-serif}
-    main{max-width:1280px;margin:auto;padding:24px 16px 72px}.hero,.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 16px 40px #0004}
+    main{max-width:1440px;margin:auto;padding:24px 16px 72px}.hero,.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 16px 40px #0004}
     .hero{background:linear-gradient(135deg,#0d3140,#091222)}h1{margin:4px 0;font-size:30px}h2{margin:0 0 12px;font-size:18px}
     .accent,.ok{color:var(--ok)}.off{color:var(--off)}.warn{color:#ffd27f}.muted{color:var(--muted)}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}.grid .card{margin:0}
+    .panel-shell{display:grid;grid-template-columns:220px minmax(0,1fr);gap:14px;align-items:start}.sidebar{position:sticky;top:14px;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:12px;box-shadow:0 16px 40px #0004}.panel-content{min-width:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}.grid .card{margin:0}
     .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.stat{background:#07121f;border:1px solid #1d3546;border-radius:14px;padding:12px}
     .stat b{display:block;font-size:22px;margin-top:4px}label{display:block;margin:10px 0}
     textarea,input,select{width:100%;background:#07121f;color:var(--text);border:1px solid #285368;border-radius:10px;padding:10px}
@@ -1109,12 +1109,12 @@ def css():
     button,a.button{display:inline-block;background:linear-gradient(135deg,#31dda0,#3298ef);color:#041019;border:0;border-radius:11px;padding:10px 14px;font-weight:800;text-decoration:none;cursor:pointer}
     button.secondary,a.secondary{background:#123247;color:#dff6ff;border:1px solid #2a5b73}
     button.danger{background:linear-gradient(135deg,#ff7b8a,#ef4d6a);color:#18040a}
-    .actions{display:flex;gap:8px;flex-wrap:wrap}nav.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 0}
-    nav.tabs a{padding:8px 12px;border-radius:999px;border:1px solid #2a5b73;color:#dff6ff;text-decoration:none;font-size:13px}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}nav.tabs{display:flex;flex-direction:column;gap:6px}
+    nav.tabs a{display:block;padding:10px 12px;border-radius:11px;border:1px solid transparent;color:#dff6ff;text-decoration:none;font-size:13px}nav.tabs a:hover{background:#123247;border-color:#2a5b73}
     table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 6px;border-bottom:1px solid #1d3546;text-align:left;vertical-align:top}
     .flash{padding:10px 12px;border-radius:12px;background:#113528;border:1px solid #2f7a58;margin:10px 0}
     .login{max-width:420px;margin:10vh auto}.pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#123247;font-size:12px}
-    @media(max-width:600px){main{padding:16px 10px}h1{font-size:24px}table{font-size:11px}}
+    @media(max-width:800px){main{padding:16px 10px}.panel-shell{grid-template-columns:1fr}.sidebar{position:static}.sidebar nav.tabs{flex-direction:row;overflow:auto}.sidebar nav.tabs a{white-space:nowrap}.hero{margin-bottom:10px}table{font-size:11px}}
     """
 
 
@@ -1265,6 +1265,9 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <div class=accent>QUANTUM CONTROL · ROSPANEL · build {html.escape(PANEL_BUILD)}</div>
       <h1>Управление приложением</h1>
       <p class=muted>Политики, релизы, устройства, алерты и статус — только доп. панель. Подписчики правятся в RosPanel.</p>
+    </section>
+    <div class=panel-shell>
+      <aside class=sidebar>
       <nav class=tabs>
         <a href="/operator?tab=dashboard">Дашборд</a>
         <a href="/operator?tab=service">Сервис</a>
@@ -1281,10 +1284,11 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a href="/operator?tab=latency">Задержка</a>
         {('<a href="/operator?tab=admins">Администраторы</a>' if role_at_least(actor_role, 'owner') else '')}
         <a href="/operator?tab=audit">Аудит</a>
-        <a href="/operator/logs.txt">Логи</a>
+        <a href="/operator?tab=logs">Живые логи</a>
         <a href="/operator/logout">Выход</a>
       </nav>
-    </section>
+      </aside>
+      <section class=panel-content>
     {flash_html}
 
     <section class=card {show('dashboard')}>
@@ -1575,13 +1579,36 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </section>
     </section>
 
+    <section class=card {show('logs')}>
+      <div class=actions style="justify-content:space-between;align-items:center"><div><h2 style="margin-bottom:4px">Живые логи</h2><p class=muted style="margin:0">Поток событий панели в реальном времени. История не обновляет страницу и хранится по текущим правилам очистки.</p></div><span id=live-state class=pill>Подключение…</span></div>
+      <pre id=live-log style="min-height:280px;max-height:560px;overflow:auto;background:#030812;border:1px solid #1d3546;border-radius:12px;padding:14px;margin-top:14px;white-space:pre-wrap">Ожидание событий…</pre>
+    </section>
+
     <section class=card {show('audit')}>
       <h2>Аудит изменений</h2>
       <table><thead><tr><th>Время</th><th>Кто</th><th>IP</th><th>Действие</th><th>Diff</th></tr></thead><tbody>{audit_html}</tbody></table>
     </section>
 
+      </section>
+    </div>
+
     <script>
     const tab = new URLSearchParams(location.search).get('tab') || 'dashboard';
+    if (tab === 'logs') {{
+      const output = document.getElementById('live-log');
+      const state = document.getElementById('live-state');
+      const source = new EventSource('/operator/live');
+      source.onopen = () => {{ state.textContent = 'LIVE'; state.className = 'pill ok'; }};
+      source.onerror = () => {{ state.textContent = 'Переподключение…'; state.className = 'pill off'; }};
+      source.onmessage = (event) => {{
+        try {{
+          const item = JSON.parse(event.data);
+          const stamp = new Date(item.ts * 1000).toLocaleString();
+          output.textContent = `[${{stamp}}] ${{item.kind}} · ${{item.device || 'system'}} · ${{item.ip || '—'}}\\n${{item.detail || ''}}\\n\\n` + output.textContent;
+          if (output.textContent.length > 24000) output.textContent = output.textContent.slice(0, 24000);
+        }} catch (_) {{}}
+      }};
+    }}
     </script>
     </main>"""
 
@@ -2020,6 +2047,36 @@ class App(BaseHTTPRequestHandler):
                 "text/plain; charset=utf-8",
                 {"Content-Disposition": 'attachment; filename="quantum-control-report.txt"'},
             )
+
+        if path == "/operator/live":
+            adm = self.admin(require_login_page=False)
+            if not adm:
+                return
+            last_ts = int(query.get("since", ["0"])[0] or 0)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            deadline = time.monotonic() + 25
+            try:
+                while time.monotonic() < deadline:
+                    rows = db.execute(
+                        "select ts,kind,device,ip,detail from events where ts>? order by ts asc limit 80",
+                        (last_ts,),
+                    ).fetchall()
+                    for ts, kind, device, ip, detail in rows:
+                        last_ts = max(last_ts, int(ts))
+                        payload = {"ts": int(ts), "kind": kind, "device": device, "ip": ip, "detail": detail[:1600]}
+                        self.wfile.write(("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
+                    if not rows:
+                        self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    time.sleep(1)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+            return
 
         if path == "/operator":
             adm = self.admin()

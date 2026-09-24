@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.layout.size
@@ -219,6 +221,15 @@ fun QuantumVpnAppV2(
             V2MaintenanceScreen(policy.maintenanceMessage)
             return@Surface
         }
+        if (!state.settings.onboardingCompleted && state.initialized) {
+            V2OnboardingScreen(
+                hasServers = groups.any { it.items.isNotEmpty() },
+                updateState = updateState,
+                onLoadServers = { viewModel.installManagedSubscription() },
+                onFinished = { viewModel.completeOnboarding() },
+            )
+            return@Surface
+        }
         Column(Modifier.fillMaxSize()) {
             if (block != null || policy.activeAnnounce().isNotBlank()) {
                 Text(block ?: policy.activeAnnounce(), color = Aurora.Text, modifier = Modifier.fillMaxWidth().background(Aurora.Glass).padding(16.dp))
@@ -257,6 +268,8 @@ fun QuantumVpnAppV2(
                     V2Tab.Settings -> V2Settings(
                         diagnostics = diagnostics,
                         policy = policy,
+                        privacyScore = privacyScore,
+                        vpnConnected = connected,
                         theme = state.settings.themeMode,
                         dynamicColor = state.settings.useDynamicColor,
                         autoConnect = state.settings.autoConnectOnCellular,
@@ -335,6 +348,87 @@ private fun V2MaintenanceScreen(message: String) {
             )
             Text("Проверяем состояние сервиса автоматически", color = Aurora.Mint, fontSize = 12.sp, modifier = Modifier.padding(top = 24.dp))
         }
+    }
+}
+
+@Composable
+private fun V2OnboardingScreen(
+    hasServers: Boolean,
+    updateState: UpdateState,
+    onLoadServers: () -> Unit,
+    onFinished: () -> Unit,
+) {
+    val context = LocalContext.current
+    var networkOnline by remember { mutableStateOf(false) }
+    var step by rememberSaveable { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val manager = context.getSystemService(ConnectivityManager::class.java)
+            val capabilities = manager?.activeNetwork?.let(manager::getNetworkCapabilities)
+            networkOnline = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            kotlinx.coroutines.delay(1_500)
+        }
+    }
+    val updateReady = when (updateState) {
+        is UpdateState.UpToDate, is UpdateState.Ready, is UpdateState.Available -> true
+        else -> false
+    }
+    val checks = listOf(
+        Triple("Сеть", if (networkOnline) "Соединение доступно" else "Проверяем интернет…", networkOnline),
+        Triple("Серверы", if (hasServers) "Серверы готовы к выбору" else "Загружаем список серверов…", hasServers),
+        Triple("Обновление", if (updateReady) "Версия приложения актуальна" else "Проверяем обновления…", updateReady),
+    )
+    val ready = checks.all { it.third }
+    Column(
+        Modifier.fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFF061B2B), Aurora.Night)))
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        V2BrandHeader("Первый запуск · защищённое соединение")
+        Spacer(Modifier.height(18.dp))
+        Text("Добро пожаловать", color = Aurora.Text, fontSize = 29.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+        Text("Настроим QuantumVPN за несколько секунд", color = Aurora.Muted, fontSize = 14.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp))
+        Spacer(Modifier.height(24.dp))
+        Surface(
+            color = Aurora.Glass.copy(alpha = .88f),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .55f)),
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(18.dp)) {
+                checks.forEachIndexed { index, item ->
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
+                        Surface(
+                            shape = CircleShape,
+                            color = if (item.third) Aurora.Mint.copy(alpha = .18f) else Aurora.Violet.copy(alpha = .22f),
+                            modifier = Modifier.size(34.dp),
+                        ) { Box(contentAlignment = Alignment.Center) { Text(if (item.third) "✓" else "${index + 1}", color = if (item.third) Aurora.Mint else Aurora.Muted, fontWeight = FontWeight.Bold) } }
+                        Column(Modifier.padding(start = 12.dp)) {
+                            Text(item.first, color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                            Text(item.second, color = Aurora.Muted, fontSize = 12.sp)
+                        }
+                    }
+                    if (index < checks.lastIndex) androidx.compose.material3.HorizontalDivider(color = Aurora.Border.copy(alpha = .45f))
+                }
+            }
+        }
+        Spacer(Modifier.height(22.dp))
+        when {
+            !hasServers -> Button(
+                onClick = onLoadServers,
+                colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Загрузить серверы", fontWeight = FontWeight.Bold) }
+            !ready -> Text("Проверка продолжается автоматически…", color = Aurora.Muted, fontSize = 13.sp)
+            else -> Button(
+                onClick = onFinished,
+                colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Начать пользоваться", fontWeight = FontWeight.Bold) }
+        }
+        TextButton(onClick = onFinished, modifier = Modifier.padding(top = 4.dp)) { Text("Пропустить проверку", color = Aurora.Muted) }
     }
 }
 
@@ -654,6 +748,8 @@ private fun V2Statistics(
 private fun V2Settings(
     diagnostics: DiagnosticState,
     policy: ClientPolicy,
+    privacyScore: Int,
+    vpnConnected: Boolean,
     theme: ThemeMode,
     dynamicColor: Boolean,
     autoConnect: Boolean,
@@ -679,7 +775,13 @@ private fun V2Settings(
     var aboutOpen by rememberSaveable { mutableStateOf(false) }
     var donateOpen by rememberSaveable { mutableStateOf(false) }
     if (privacyOpen) {
-        V2PrivacyPage(onBack = { privacyOpen = false })
+        V2PrivacyPage(
+            onBack = { privacyOpen = false },
+            score = privacyScore,
+            vpnConnected = vpnConnected,
+            adBlock = adBlock,
+            killSwitch = killSwitch,
+        )
         return
     }
     if (notificationsOpen) {
@@ -985,7 +1087,13 @@ private fun DonationHistoryRow(entry: DonationEntry) {
 }
 
 @Composable
-private fun V2PrivacyPage(onBack: () -> Unit) {
+private fun V2PrivacyPage(
+    onBack: () -> Unit,
+    score: Int,
+    vpnConnected: Boolean,
+    adBlock: Boolean,
+    killSwitch: Boolean,
+) {
     Column(
         Modifier
             .fillMaxSize()
@@ -996,14 +1104,32 @@ private fun V2PrivacyPage(onBack: () -> Unit) {
         TextButton(onClick = onBack) { Text("← Назад") }
         Text("Конфиденциальность", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
         Text("Данные остаются под вашим контролем", color = Aurora.Muted, modifier = Modifier.padding(top = 4.dp, bottom = 18.dp))
+        Surface(
+            color = Aurora.Mint.copy(alpha = .12f),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .55f)),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Индекс приватности", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                    Text(PrivacyScore.label(score), color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                }
+                Text("$score/100", color = Aurora.Mint, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Spacer(Modifier.height(14.dp))
         listOf(
-            "История сайтов и DNS-запросов не сохраняется",
-            "Подписки и ключи хранятся локально в Android Keystore",
-            "Диагностика отправляется только после нажатия кнопки",
-            "Отчёт очищается от ссылок, ключей и других секретов",
-            "Обновления APK проверяются по SHA-256 и подписи",
-        ).forEach { item ->
-            V2StatusRow(item, "Включено по умолчанию", true)
+            "VPN-сессия защищена" to vpnConnected,
+            "Блокировка рекламы" to adBlock,
+            "Аварийное отключение" to killSwitch,
+            "История сайтов и DNS-запросов не сохраняется" to true,
+            "Подписки и ключи хранятся локально в Android Keystore" to true,
+            "Диагностика отправляется только после нажатия кнопки" to true,
+            "Отчёт очищается от ссылок, ключей и других секретов" to true,
+            "Обновления APK проверяются по SHA-256 и подписи" to true,
+        ).forEach { (item, enabled) ->
+            V2StatusRow(item, if (enabled) "Активно" else "Можно включить в настройках", enabled)
             Spacer(Modifier.height(10.dp))
         }
     }

@@ -1,0 +1,4 @@
+version=5.9.4
+versionCode=119
+features=notification-center,privacy-center,first-run-network-check,aurora-glass,operator-sidebar,operator-live-events
+schedule=unchanged

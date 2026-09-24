@@ -1,13 +1,5 @@
 package com.quantumvpn.ui
 
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -18,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -60,6 +53,14 @@ import com.quantumvpn.R
 import com.quantumvpn.updates.UpdateState
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 
 /**
  * Cold-start splash: dark radial gradient, glowing brand badge with a rotating
@@ -306,7 +307,7 @@ fun StartupSplashScreen(
     }
 }
 
-/** Aurora C splash: violet/mint glass, kept separate from the former blue loader. */
+/** Liquid Glass Orbit splash: globe + horizontal progress, update check before UI. */
 @Composable
 private fun V2StartupSplash(
     ready: Boolean,
@@ -315,105 +316,107 @@ private fun V2StartupSplash(
     onFinished: () -> Unit,
 ) {
     val progress = remember { Animatable(0f) }
-    val infinite = rememberInfiniteTransition(label = "v2-splash")
-    val pulse by infinite.animateFloat(
-        initialValue = 0.92f, targetValue = 1.08f,
-        animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Reverse), label = "pulse",
+    val infinite = rememberInfiniteTransition(label = "splash-glow")
+    val glow by infinite.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Reverse),
+        label = "glow",
+    )
+    val shimmer by infinite.animateFloat(
+        initialValue = -0.35f,
+        targetValue = 1.35f,
+        animationSpec = infiniteRepeatable(tween(1600, easing = LinearEasing), RepeatMode.Restart),
+        label = "shimmer",
     )
     LaunchedEffect(ready) {
         if (!ready) {
             while (progress.value < .86f) {
-                progress.snapTo((progress.value + .025f).coerceAtMost(.86f)); delay(45)
+                progress.snapTo((progress.value + .018f).coerceAtMost(.86f)); delay(40)
             }
         } else {
-            progress.animateTo(1f, tween(260)); delay(180); onFinished()
+            progress.animateTo(1f, tween(280)); delay(160); onFinished()
         }
     }
     val displayedProgress = when (updateState) {
         is UpdateState.Downloading -> if (updateState.totalBytes > 0) {
             (updateState.downloadedBytes.toFloat() / updateState.totalBytes).coerceIn(0f, 1f)
         } else progress.value
+        is UpdateState.Ready -> 1f
         else -> progress.value
     }
     val pct = (displayedProgress * 100).roundToInt()
     val status = when (updateState) {
         is UpdateState.Checking -> "Проверяем обновление…"
-        is UpdateState.RetryingViaVpn -> "Проверяем обновление через защищённый канал…"
+        is UpdateState.RetryingViaVpn -> "Повтор через обычную сеть (без VPN)…"
         is UpdateState.Downloading -> {
             val downloaded = updateState.downloadedBytes / 1024f / 1024f
             val total = updateState.totalBytes / 1024f / 1024f
-            val remaining = ((updateState.totalBytes - updateState.downloadedBytes).coerceAtLeast(0)) / 1024f / 1024f
-            "Обновление: %.1f из %.1f МБ · осталось %.1f МБ".format(downloaded, total, remaining)
+            "Система загружает обновление… %.0f%% · %.1f / %.1f МБ".format(displayedProgress * 100, downloaded, total)
         }
-        is UpdateState.Ready -> "Обновление загружено · открываем установку Android…"
+        is UpdateState.Ready -> "Готово · Android запросит установку…"
+        is UpdateState.Available -> "Найдено обновление · передаём системе…"
+        is UpdateState.Failure -> "Сбой · откройте ссылку в браузере или повторите"
         else -> when {
-            availableServers <= 0 -> "Проверяем доступные серверы…"
-            !ready -> "Найдено серверов: $availableServers · готовим приложение…"
+            availableServers <= 0 -> "Загружаем серверы…"
+            !ready -> "Загружаем серверы…"
             else -> "Готово"
         }
     }
     Box(
-        Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF071D2A), Color(0xFF061522), Color(0xFF030D17)))),
-        contentAlignment = Alignment.Center,
+        Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Color(0xFF071A2C), Color(0xFF040B16)))),
     ) {
         Globe3DBackdrop(Modifier.fillMaxSize(), pulse = true, reduceMotion = false, countryCode = null)
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(28.dp)) {
-            Surface(
-                shape = CircleShape,
-                color = Color(0xB80B2635),
-                border = androidx.compose.foundation.BorderStroke(3.dp, Color(0xFF6FD9F2)),
-                modifier = Modifier.size(176.dp).scale(pulse),
+        Column(
+            Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 36.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(Modifier.height(28.dp))
+            Text("QuantumVPN", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 32.sp)
+            Text("ORBIT · Защита соединения", color = Color(0xFF8FA9BE), fontSize = 16.sp, modifier = Modifier.padding(top = 6.dp))
+            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.weight(1f))
+            Text(status, color = Color(0xFFB7CDDE), fontSize = 14.sp, maxLines = 2)
+            Spacer(Modifier.height(12.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(12.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(Color(0xFF1E4C6B)),
             ) {
-                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Icon(Icons.Default.Lock, null, tint = Color(0xFF42F2BD), modifier = Modifier.size(66.dp))
-                    Text("Quantum", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 28.sp)
-                    Text("VPN", color = Color(0xFF42F2BD), fontWeight = FontWeight.Bold, fontSize = 28.sp)
+                Box(
+                    Modifier
+                        .fillMaxWidth(displayedProgress.coerceIn(0.02f, 1f))
+                        .height(12.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(
+                                    Color(0xFF1AB8D4).copy(alpha = glow),
+                                    Color(0xFF3DE7FF),
+                                    Color(0xFF7B5CFF).copy(alpha = glow),
+                                ),
+                            ),
+                        ),
+                )
+                Canvas(Modifier.fillMaxSize()) {
+                    val x = size.width * shimmer
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(Color.White.copy(alpha = 0.55f), Color.Transparent),
+                            center = Offset(x, size.height / 2f),
+                            radius = size.width * 0.18f,
+                        ),
+                        radius = size.width * 0.18f,
+                        center = Offset(x, size.height / 2f),
+                    )
                 }
             }
-            Spacer(Modifier.height(22.dp))
-            Text("Защита соединения", color = Color.White.copy(alpha = .86f), fontSize = 18.sp)
+            Spacer(Modifier.height(8.dp))
+            Text("$pct%", color = Color(0xFF3DE7FF), fontWeight = FontWeight.Bold, fontSize = 14.sp)
             Spacer(Modifier.height(18.dp))
-            Box(Modifier.size(104.dp), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(
-                    progress = { displayedProgress },
-                    color = Color(0xFF42F2BD),
-                    trackColor = Color(0xFF33445B),
-                    strokeWidth = 9.dp,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                Text("$pct%", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            }
-            Spacer(Modifier.height(16.dp))
-            Text(
-                status,
-                color = CosmicTokens.OnVoidMuted,
-                fontSize = 15.sp,
-                maxLines = 2,
-            )
-            Spacer(Modifier.height(20.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                SplashStep("Обновление", updateState is UpdateState.UpToDate || updateState is UpdateState.Failure)
-                SplashStep("Серверы", availableServers > 0)
-                SplashStep("Готово", ready)
-            }
+            Text("Более открытый мир начинается здесь", color = Color(0xFF6B8499), fontSize = 12.sp)
         }
-    }
-}
-
-@Composable
-private fun SplashStep(label: String, done: Boolean) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Surface(
-            shape = CircleShape,
-            color = if (done) Color(0xFF54F4CF).copy(alpha = .16f) else Color(0xFF18283B),
-            border = androidx.compose.foundation.BorderStroke(2.dp, if (done) Color(0xFF54F4CF) else Color(0xFF40546B)),
-            modifier = Modifier.size(38.dp),
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                if (done) Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF54F4CF), modifier = Modifier.size(23.dp))
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(label, color = if (done) Color.White else Color(0xFF8294A9), fontSize = 12.sp)
     }
 }

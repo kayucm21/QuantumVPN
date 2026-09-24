@@ -1,0 +1,3 @@
+version=5.8.0
+versionCode=114
+features=smart-connect,network-handoff,notification-center,aurora-glass,widget,health-monitor

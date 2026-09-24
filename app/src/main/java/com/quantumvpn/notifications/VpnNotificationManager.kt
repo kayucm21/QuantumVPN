@@ -43,15 +43,26 @@ class VpnNotificationManager(
     )
 
     fun showUpdateAvailableNotification(version: String) {
+        ensureChannels()
         val notification = NotificationCompat.Builder(context, CHANNEL_ID_CRITICAL)
             .setContentTitle("Доступно обновление QuantumVPN")
             .setContentText("Версия $version готова к загрузке. Нажмите, чтобы обновить приложение.")
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentIntent(launchAppIntent())
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
+            .setOnlyAlertOnce(false)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .build()
         notificationManager.notify(NOTIFICATION_ID_UPDATE, notification)
+    }
+
+    private fun ensureChannels() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            createNotificationChannels()
+        }
     }
 
     fun showMaintenanceNotification(message: String) {

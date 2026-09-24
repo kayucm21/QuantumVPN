@@ -1,7 +1,3 @@
-QuantumVPN 5.7.5 (versionCode 103)
-Package: com.quantumvpn.debug
-ABIs: arm64-v8a, armeabi-v7a
-Build type: debug, same update identity as 5.6.16
-Signing certificate SHA-256: 4cb9e0871e8f54000da71d6e11ebb4b19c8dec4ea6737c8e266d4d000706851d
-Core: v1.13.18-extended-2.6.5 @ e8f6936480b7fa9738911e3e7fc2ec0d8a634a88
-Device verification: not run; no Android device is attached to ADB
+version=5.7.5
+versionCode=104
+applicationId=com.quantumvpn.debug

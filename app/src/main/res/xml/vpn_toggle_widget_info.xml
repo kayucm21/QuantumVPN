@@ -8,5 +8,5 @@
     android:targetCellHeight="2"
     android:previewImage="@mipmap/ic_launcher"
     android:resizeMode="horizontal|vertical"
-    android:updatePeriodMillis="0"
+    android:updatePeriodMillis="900000"
     android:widgetCategory="home_screen" />

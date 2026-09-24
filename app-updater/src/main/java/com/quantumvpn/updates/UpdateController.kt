@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -44,7 +45,7 @@ class UpdateController(
     private val automaticCheckStarted = AtomicBoolean(false)
 
     init {
-        cleanupStaleFiles()
+        cleanupFinishedArtifacts()
     }
 
     /** Runs at most once per app process; startup may opt into verified automatic download. */
@@ -55,8 +56,24 @@ class UpdateController(
     }
 
     fun check(channel: UpdateChannel, autoDownload: Boolean = false) {
+        when (val current = mutableState.value) {
+            is UpdateState.Downloading,
+            is UpdateState.Ready,
+            is UpdateState.RetryingViaVpn -> return
+            is UpdateState.Checking -> return
+            is UpdateState.Available -> {
+                if (autoDownload) download()
+                return
+            }
+            else -> Unit
+        }
         replaceOperation {
-            cleanupFiles()
+            // Do not wipe an in-flight APK if another check sneaks through.
+            if (mutableState.value is UpdateState.Downloading ||
+                mutableState.value is UpdateState.Ready
+            ) {
+                return@replaceOperation
+            }
             mutableState.value = UpdateState.Checking(channel.name)
             try {
                 val candidate = withVpnRetry(UpdateOperation.Check) {
@@ -84,6 +101,13 @@ class UpdateController(
     }
 
     fun download() {
+        when (mutableState.value) {
+            is UpdateState.Downloading,
+            is UpdateState.Ready,
+            is UpdateState.RetryingViaVpn,
+            is UpdateState.Checking -> return
+            else -> Unit
+        }
         val candidate = when (val current = mutableState.value) {
             is UpdateState.Available -> current.candidate
             is UpdateState.Failure -> current.candidate
@@ -92,18 +116,65 @@ class UpdateController(
         replaceOperation { downloadInternal(candidate) }
     }
 
+    /** UI hook for Android DownloadManager / browser handoff. */
+    fun beginSystemDownload(candidate: UpdateCandidate) {
+        operation?.cancel()
+        operation = null
+        mutableState.value = UpdateState.Downloading(candidate, 0L, candidate.metadata.apkSize)
+    }
+
+    fun reportSystemProgress(candidate: UpdateCandidate, downloaded: Long, total: Long) {
+        if (mutableState.value !is UpdateState.Downloading &&
+            mutableState.value !is UpdateState.Available &&
+            mutableState.value !is UpdateState.Failure
+        ) {
+            return
+        }
+        mutableState.value = UpdateState.Downloading(
+            candidate,
+            downloaded.coerceAtLeast(0L),
+            total.takeIf { it > 0L } ?: candidate.metadata.apkSize,
+        )
+    }
+
+    fun markReadyFromSystemFile(candidate: UpdateCandidate, file: File) {
+        if (!file.isFile) {
+            mutableState.value = UpdateState.Failure("Системный APK не найден.", candidate)
+            return
+        }
+        readyFile = file
+        mutableState.value = UpdateState.Ready(candidate)
+    }
+
+    fun failSystemDownload(message: String, candidate: UpdateCandidate?) {
+        mutableState.value = UpdateState.Failure(message, candidate)
+    }
+
     private suspend fun downloadInternal(candidate: UpdateCandidate) {
-        cleanupFiles()
         root.mkdirs()
         val partial = File(root, "${candidate.metadata.apkFile}.part")
         val complete = File(root, candidate.metadata.apkFile)
+        // Drop unrelated leftovers but keep matching .part for resume.
+        root.listFiles()?.forEach { file ->
+            if (file.isFile && file.name != partial.name && file.name != complete.name) {
+                file.delete()
+            }
+        }
+        complete.delete()
+        if (partial.isFile && (partial.length() <= 0L || partial.length() > candidate.metadata.apkSize)) {
+            partial.delete()
+        }
         var lastPublishedAt = 0L
+        val already = partial.takeIf { it.isFile }?.length() ?: 0L
         try {
             val downloadJob = coroutineContext[Job]
-            withVpnRetry(UpdateOperation.Download, candidate) {
-                partial.delete()
-                lastPublishedAt = 0L
-                mutableState.value = UpdateState.Downloading(candidate, 0, candidate.metadata.apkSize)
+            // Prefer Wi‑Fi/LTE under the VPN so panel:8443 is not killed mid-APK.
+            // Never wipe .part: HTTP client resumes; VPN fallback is last resort only.
+            mutableState.value = UpdateState.Downloading(candidate, already, candidate.metadata.apkSize)
+            // Never flip the VPN for APK download — updaterRouting resets progress and
+            // shows "защищённый канал", then the splash exits with a panel error.
+            // Only bind sockets to Wi‑Fi/LTE under an existing tunnel.
+            val runDownload = {
                 http.download(
                     candidate.apkAsset.downloadUrl,
                     partial,
@@ -121,8 +192,34 @@ class UpdateController(
                     }
                 }
             }
+            var lastError: UpdateException? = null
+            repeat(3) { attempt ->
+                try {
+                    if (vpnFallback != null) {
+                        vpnFallback.withUnderlyingNetwork(runDownload)
+                    } else {
+                        runDownload()
+                    }
+                    lastError = null
+                    return@repeat
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: UpdateException) {
+                    lastError = error
+                    if (attempt < 2) {
+                        mutableState.value = UpdateState.Downloading(
+                            candidate,
+                            partial.takeIf { it.isFile }?.length() ?: 0L,
+                            candidate.metadata.apkSize,
+                        )
+                        kotlinx.coroutines.delay(1_000L * (attempt + 1))
+                    }
+                }
+            }
+            lastError?.let { throw it }
             coroutineContext.ensureActive()
             if (sha256(partial) != candidate.metadata.apkSha256) {
+                partial.delete()
                 throw UpdateException("SHA-256 загруженного APK не совпадает с опубликованным.")
             }
             coroutineContext.ensureActive()
@@ -132,16 +229,14 @@ class UpdateController(
             readyFile = complete
             mutableState.value = UpdateState.Ready(candidate)
         } catch (cancelled: CancellationException) {
-            cleanupFiles()
+            // Keep .part so the next attempt can resume.
             throw cancelled
         } catch (error: UpdateException) {
-            cleanupFiles()
             mutableState.value = UpdateState.Failure(
                 error.message ?: "Не удалось загрузить обновление.",
                 candidate,
             )
         } catch (_: Throwable) {
-            cleanupFiles()
             mutableState.value = UpdateState.Failure("Не удалось загрузить обновление.", candidate)
         }
     }
@@ -178,7 +273,7 @@ class UpdateController(
     }
 
     fun cleanupStaleFiles() {
-        cleanupFiles()
+        cleanupFinishedArtifacts()
     }
 
     private fun replaceOperation(block: suspend () -> Unit) {
@@ -199,7 +294,8 @@ class UpdateController(
             if (!error.retryViaVpn || vpnFallback == null) throw error
             error
         }
-        // 1) Leave the active VPN tunnel via underlying Wi‑Fi/LTE (keeps FTP working).
+        // 1) Prefer Wi‑Fi/LTE under an active VPN — never start updaterRouting for checks
+        //    (that UI path shows "защищённый канал" and resets splash download progress).
         val afterUnderlying = try {
             vpnFallback.withUnderlyingNetwork {
                 try {
@@ -216,23 +312,10 @@ class UpdateController(
             Result.failure(directFailure)
         }
         afterUnderlying.getOrNull()?.let { return it }
-
-        // 2) Last resort: temporary updater VPN route.
-        mutableState.value = UpdateState.RetryingViaVpn(operation, candidate)
-        val vpnSession = try {
-            vpnFallback.connect()
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: UpdateException) {
-            throw vpnUnavailable(directFailure, error.message)
-        } catch (_: Throwable) {
-            throw vpnUnavailable(directFailure, null)
+        afterUnderlying.exceptionOrNull()?.let { err ->
+            if (err is UpdateException) throw err
         }
-        return try {
-            block()
-        } finally {
-            withContext(NonCancellable) { vpnSession.close() }
-        }
+        throw directFailure
     }
 
     private fun vpnUnavailable(directFailure: UpdateException, detail: String?): UpdateException {
@@ -250,6 +333,18 @@ class UpdateController(
             if (file.isFile) file.delete()
         }
         root.delete()
+    }
+
+    /** Drop finished leftovers but keep resumable `.part` across process restarts. */
+    private fun cleanupFinishedArtifacts() {
+        readyFile = null
+        if (!root.isDirectory) return
+        root.listFiles()?.forEach { file ->
+            if (!file.isFile) return@forEach
+            val name = file.name
+            if (name.endsWith(".part") || name.endsWith(".part.full")) return@forEach
+            file.delete()
+        }
     }
 
     private fun sha256(file: File): String {

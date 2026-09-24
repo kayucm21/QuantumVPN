@@ -11,6 +11,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import android.annotation.SuppressLint
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -42,6 +50,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.viewinterop.AndroidView
 import com.quantumvpn.updates.UpdateState
 import com.quantumvpn.BuildConfig
 import com.quantumvpn.QuantumVpnApplication
@@ -68,8 +77,12 @@ import kotlinx.coroutines.launch
 import com.quantumvpn.diagnostics.DiagnosticState
 import com.quantumvpn.diagnostics.SessionTrafficRecord
 import com.quantumvpn.diagnostics.VoluntaryDiagnosticReporter
+import com.quantumvpn.donations.DonationEntry
+import com.quantumvpn.donations.DonationRepository
+import com.quantumvpn.donations.DonationSummary
 import com.quantumvpn.profiles.ProfilesUiState
 import com.quantumvpn.profiles.ProfilesViewModel
+import com.quantumvpn.policy.ClientPolicy
 import com.quantumvpn.vpn.RuntimeSelectorGroup
 import com.quantumvpn.vpn.VpnConnectionState
 import com.quantumvpn.vpn.VpnSessionStats
@@ -86,17 +99,18 @@ private enum class V2Tab(val title: String, val icon: ImageVector) {
     Settings("Настройки", Icons.Default.Settings),
 }
 
-/** Aurora C — violet/mint glass visual language used by every production tab. */
+/** Liquid Glass Orbit — cyan/blue glassmorphism matching the design mockup. */
 private val LocalAuroraDark = staticCompositionLocalOf { true }
 private object Aurora {
-    val Night: Color @Composable get() = MaterialTheme.colorScheme.background
-    val VioletNight: Color @Composable get() = MaterialTheme.colorScheme.surface
-    val Glass: Color @Composable get() = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = .92f)
-    val Mint: Color @Composable get() = MaterialTheme.colorScheme.primary
-    val Violet: Color @Composable get() = MaterialTheme.colorScheme.secondary
-    val Text: Color @Composable get() = MaterialTheme.colorScheme.onBackground
-    val Muted: Color @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
-    val Border: Color @Composable get() = MaterialTheme.colorScheme.outline
+    val Night: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF040B16) else Color(0xFFF3F7FB)
+    val VioletNight: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF071526) else Color(0xFFE8F1FA)
+    val Glass: Color @Composable get() = if (LocalAuroraDark.current) Color(0xCC0B1E33) else Color(0xE6FFFFFF)
+    val Mint: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF3DE7FF) else Color(0xFF0087A8)
+    val Violet: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF2A7BFF) else Color(0xFF2563EB)
+    val Text: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFFF4FBFF) else Color(0xFF0B1A2A)
+    val Muted: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF8FA9BE) else Color(0xFF51657A)
+    val Border: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF1E4C6B) else Color(0xFFB7CDDE)
+    val Danger: Color @Composable get() = Color(0xFFFF7A93)
 }
 
 /** The production visual shell. It replaces the legacy hub without touching VPN core. */
@@ -213,6 +227,7 @@ fun QuantumVpnAppV2(
                             else if (block == null && !busy) onVpnStart(id)
                         },
                         onServers = { tab = V2Tab.Servers },
+                        onSettings = { tab = V2Tab.Settings },
                     )
                     V2Tab.Servers -> V2Servers(groups, mainGroup?.tag, mainGroup?.selected, offlinePings, onSelectServer, activeProfile?.id, reliabilityScores, activeProfile?.updatedAtEpochMillis, state.busy) { viewModel.refreshAllSubscriptionsQuietly() }
                     V2Tab.Statistics -> V2Statistics(
@@ -223,30 +238,52 @@ fun QuantumVpnAppV2(
                         cumulativeBlocked = state.settings.cumulativeBlocked,
                     )
                     V2Tab.Settings -> V2Settings(
-                        adBlock = state.settings.adBlockEnabled,
-                        killSwitch = state.settings.blockNonVpnTraffic,
                         diagnostics = diagnostics,
+                        policy = policy,
                         theme = state.settings.themeMode,
                         dynamicColor = state.settings.useDynamicColor,
+                        autoConnect = state.settings.autoConnectOnCellular,
+                        notifications = !state.settings.quietMode,
                         protectUnknownWifi = state.settings.protectUnknownWifi,
                         onTheme = viewModel::setTheme,
                         onDynamicColor = viewModel::setUseDynamicColor,
+                        onAutoConnect = viewModel::setAutoConnectOnCellular,
+                        onNotifications = { enabled -> viewModel.setQuietMode(!enabled) },
                         onProtectUnknownWifi = viewModel::setProtectUnknownWifi,
-                        updateState = updateState,
-                        onCheckUpdate = onCheckUpdate,
-                        onAdBlock = viewModel::setAdBlockEnabled,
-                        onKillSwitch = viewModel::setBlockNonVpnTraffic,
                     )
                 }
             }
             V2BottomBar(tab = tab, onTab = { tab = it })
         }
     }
+    // Обновление проверяется и скачивается на сплэше до открытия интерфейса.
     when (val update = updateState) {
-        is UpdateState.Available -> UpdateAvailableDialog(update.candidate, onDownloadUpdate, onCancelUpdate)
-        is UpdateState.Downloading -> UpdateDownloadingDialog(update.candidate, update.downloadedBytes, update.totalBytes, onCancelUpdate)
         is UpdateState.Ready -> UpdateReadyDialog(update.candidate, onInstallUpdate, onCancelUpdate)
-        is UpdateState.Failure -> AlertDialog(onDismissRequest = onCancelUpdate, title = { Text("Обновление") }, text = { Text(update.message) }, confirmButton = { TextButton(onClick = onCheckUpdate) { Text("Повторить") } }, dismissButton = { TextButton(onClick = onCancelUpdate) { Text("Закрыть") } })
+        is UpdateState.Failure -> {
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            AlertDialog(
+                onDismissRequest = onCancelUpdate,
+                title = { Text("Обновление") },
+                text = {
+                    Text(
+                        (update.message.ifBlank { "Не удалось загрузить в приложении." }) +
+                            "\n\nОткройте загрузку в браузере — Android сам предложит установить APK.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val url = update.candidate?.apkAsset?.downloadUrl
+                            ?: "https://tepacom.o190.com:8443/update"
+                        runCatching {
+                            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        }
+                    }) { Text("Скачать в браузере") }
+                },
+                dismissButton = {
+                    TextButton(onClick = onCheckUpdate) { Text("Повторить") }
+                },
+            )
+        }
         else -> Unit
     }
     }
@@ -293,66 +330,105 @@ private fun serverFlag(name: String): String {
     }
 }
 
+private fun serverRegion(name: String): String {
+    val value = name.lowercase()
+    return when {
+        listOf("usa", "сша", "new york", "america", "canada", "бразил", "mexico").any { it in value } -> "Америка"
+        listOf("сингап", "singapore", "япон", "tokyo", "korea", "hong", "taiwan", "india", "азия").any { it in value } -> "Азия"
+        else -> "Европа"
+    }
+}
+
 @Composable
 private fun V2Home(
     connected: Boolean, busy: Boolean, hasProfile: Boolean, server: String, ping: Int?, adBlock: Boolean, stats: VpnSessionStats,
-    onConnect: () -> Unit, onServers: () -> Unit,
+    onConnect: () -> Unit, onServers: () -> Unit, onSettings: () -> Unit,
 ) {
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Aurora.VioletNight, Aurora.Glass, Aurora.Night)))) {
-        if (LocalAuroraDark.current) Globe3DBackdrop(Modifier.fillMaxSize(), pulse = connected || busy, reduceMotion = false, countryCode = null)
+    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Color(0xFF071A2C), Color(0xFF040B16))))) {
+        Globe3DBackdrop(Modifier.fillMaxSize(), pulse = true, reduceMotion = false, countryCode = null)
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 24.dp),
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Surface(shape = CircleShape, color = Aurora.Violet.copy(alpha = 0.17f), border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .55f)), modifier = Modifier.size(54.dp)) {
-                    Box(contentAlignment = Alignment.Center) { Text("Q", color = Aurora.Mint, fontWeight = FontWeight.Bold, fontSize = 31.sp) }
+                Text("QuantumVPN", color = Aurora.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Surface(onClick = onSettings, shape = CircleShape, color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), modifier = Modifier.size(42.dp)) {
+                    Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Settings, null, tint = Aurora.Mint) }
                 }
-                Text("Quantum", color = Aurora.Text, fontSize = 29.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 10.dp))
-                Text("VPN", color = Aurora.Mint, fontSize = 29.sp, fontWeight = FontWeight.Bold)
             }
-            Spacer(Modifier.height(20.dp))
-            Surface(onClick = onServers, color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("⚡", fontSize = 24.sp)
-                    Column(Modifier.weight(1f).padding(start = 11.dp)) {
+            Spacer(Modifier.height(14.dp))
+            Surface(onClick = onServers, color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .35f)), shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("🌐", fontSize = 22.sp)
+                    Column(Modifier.weight(1f).padding(start = 12.dp)) {
                         Text("Лучший сервер", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
-                        Text(server, color = Aurora.Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("Автовыбор · Низкий пинг", color = Aurora.Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    Surface(color = Aurora.Mint.copy(alpha = .12f), shape = RoundedCornerShape(13.dp)) {
-                        Text(ping?.let { "$it мс" } ?: "авто", color = Aurora.Mint, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                    Surface(color = Color(0xFF2EE59D).copy(alpha = .18f), shape = RoundedCornerShape(999.dp)) {
+                        Text(ping?.let { "$it мс" } ?: "авто", color = Color(0xFF2EE59D), fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     }
+                }
+            }
+            Spacer(Modifier.height(28.dp))
+            Surface(
+                shape = CircleShape,
+                color = Aurora.Glass.copy(alpha = .55f),
+                border = androidx.compose.foundation.BorderStroke(3.dp, if (connected) Aurora.Mint else Aurora.Violet.copy(alpha = .85f)),
+                modifier = Modifier.size(196.dp).clickable(enabled = !busy) { onConnect() },
+            ) {
+                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Icon(if (connected) Icons.Default.CheckCircle else Icons.Default.Lock, null, tint = Aurora.Mint, modifier = Modifier.size(58.dp))
+                    Spacer(Modifier.height(10.dp))
+                    Text(if (connected) "Отключить" else if (busy) "Подключение…" else "Подключить", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 20.sp)
                 }
             }
             Spacer(Modifier.height(18.dp))
             Text(
-                if (connected) "Защита включена" else "Защита выключена",
-                color = if (connected) Aurora.Mint else Color(0xFFFF9EAF),
+                if (connected) "Вы подключены" else "Вы не подключены",
+                color = if (connected) Aurora.Mint else Aurora.Danger,
                 fontWeight = FontWeight.Bold,
-                fontSize = 24.sp,
+                fontSize = 20.sp,
             )
-            Spacer(Modifier.height(14.dp))
+            Text(
+                if (connected) "Ваша активность защищена" else "Ваша активность не защищена",
+                color = Aurora.Muted,
+                fontSize = 13.sp,
+            )
+            Spacer(Modifier.height(22.dp))
             Surface(
-                shape = CircleShape,
                 color = Aurora.Glass,
-                border = androidx.compose.foundation.BorderStroke(2.dp, if (connected) Aurora.Mint else Aurora.Violet),
-                modifier = Modifier.size(172.dp).clickable(enabled = !busy) { onConnect() },
+                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border),
+                shape = RoundedCornerShape(22.dp),
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Icon(if (connected) Icons.Default.CheckCircle else Icons.Default.Lock, null, tint = Aurora.Mint, modifier = Modifier.size(54.dp))
-                    Spacer(Modifier.height(9.dp))
-                    Text(if (connected) "Отключить" else if (busy) "Подключение…" else "Подключить", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                    Text(if (connected) "Соединение защищено" else if (hasProfile) "Готово к подключению" else "Загружаем серверы", color = Aurora.Muted, fontSize = 13.sp)
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 14.dp, horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    V2HomeStat("📶", ping?.let { "$it мс" } ?: "—", "Пинг", Color(0xFF2EE59D))
+                    V2HomeStat("↓", stats.samples.lastOrNull()?.let { formatBytes(it.downloadBytesPerSecond) + "/с" } ?: "—", "Загрузка", Aurora.Mint)
+                    V2HomeStat("↑", stats.samples.lastOrNull()?.let { formatBytes(it.uploadBytesPerSecond) + "/с" } ?: "—", "Отдача", Aurora.Violet)
                 }
             }
-            Spacer(Modifier.height(16.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                V2Metric("Трафик", formatBytes(stats.downloadTotalBytes + stats.uploadTotalBytes), Modifier.weight(1f))
-                V2Metric("Защита", if (adBlock) "DNS активен" else "DNS выключен", Modifier.weight(1f))
+            if (adBlock) {
+                Spacer(Modifier.height(12.dp))
+                Text("DNS-фильтр активен после подключения", color = Aurora.Muted, fontSize = 12.sp)
             }
-            Spacer(Modifier.height(12.dp))
-            V2StatusRow("Блокировка рекламы", if (adBlock) "Активируется после подключения" else "Выключена", adBlock)
+            if (!hasProfile) {
+                Spacer(Modifier.height(10.dp))
+                Text("Загружаем серверы…", color = Aurora.Mint, fontSize = 12.sp)
+            }
         }
+    }
+}
+
+@Composable
+private fun V2HomeStat(icon: String, value: String, label: String, accent: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 6.dp)) {
+        Text(icon, fontSize = 16.sp, color = accent)
+        Text(value, color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Text(label, color = Aurora.Muted, fontSize = 11.sp)
     }
 }
 
@@ -363,24 +439,26 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
     val allServers = groups.flatMap { it.items }
     val servers = allServers.filter { item ->
         val matchesText = query.isBlank() || item.tag.contains(query, true) || item.type.contains(query, true)
-        val matchesFilter = filter == "Все" || item.type.contains(filter, true) || item.tag.contains(filter, true)
+        val region = serverRegion(item.tag)
+        val matchesFilter = filter == "Все" || region == filter
         matchesText && matchesFilter
     }
-    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Aurora.VioletNight, Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
-        V2BrandHeader("Свобода без границ")
-        Text("Серверы", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
-        Text("Быстрый пинг и автоматическое обновление списка", color = Aurora.Muted, modifier = Modifier.padding(top = 4.dp, bottom = 18.dp))
-        Text(updatedAt?.let { "Сохранённый список · " + java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it)) } ?: "Список ещё не загружен", color = Aurora.Muted, fontSize = 12.sp)
-        TextButton(onClick = onRefresh, enabled = !busy) { Text("Обновить серверы") }
+    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Серверы", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(onClick = onRefresh, enabled = !busy) { Text("Обновить пинг", color = Aurora.Mint) }
+        }
+        Text(updatedAt?.let { "Список · " + java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it)) } ?: "Загружаем список…", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(bottom = 12.dp))
         OutlinedTextField(
             value = query, onValueChange = { query = it }, singleLine = true,
             label = { Text("Найти страну или сервер") }, modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
         )
         Row(Modifier.fillMaxWidth().padding(bottom = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("Все", "VLESS", "Hysteria").forEach { option ->
+            listOf("Все", "Европа", "Азия", "Америка").forEach { option ->
                 Surface(
                     onClick = { filter = option }, shape = RoundedCornerShape(18.dp),
                     color = if (filter == option) Aurora.Mint else Aurora.Glass,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (filter == option) Aurora.Mint else Aurora.Border),
                 ) { Text(option, color = if (filter == option) Aurora.Night else Aurora.Muted, modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp), fontSize = 12.sp) }
             }
         }
@@ -452,51 +530,45 @@ private fun V2Statistics(
     diagnostics: DiagnosticState,
     cumulativeBlocked: Long,
 ) {
-    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Aurora.VioletNight, Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
-        V2BrandHeader(if (connected) "Онлайн · соединение защищено" else "Свобода без границ")
-        Text("Статистика", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
-        Text("Сеанс, трафик и качество соединения", color = Aurora.Muted, modifier = Modifier.padding(top = 4.dp, bottom = 18.dp))
-        Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(if (connected) "Текущий сеанс · защищён" else "Соединение пока выключено", color = Aurora.Muted)
-                Text(formatBytes(stats.downloadTotalBytes + stats.uploadTotalBytes), color = Aurora.Text, fontSize = 42.sp, fontWeight = FontWeight.Bold)
-                Text("↓ ${formatBytes(stats.downloadTotalBytes)}    ↑ ${formatBytes(stats.uploadTotalBytes)}", color = Aurora.Mint)
+    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Статистика", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(999.dp)) {
+                Text("Сегодня", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
             }
+        }
+        Spacer(Modifier.height(14.dp))
+        Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+            Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("🌐", fontSize = 28.sp)
+                Column(Modifier.padding(start = 12.dp)) {
+                    Text(if (connected) "Подключено" else "Не подключено", color = if (connected) Aurora.Mint else Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text(
+                        if (connected) "Соединение активно — статистика обновляется" else "Запустите подключение, чтобы увидеть полную статистику",
+                        color = Aurora.Muted,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        val speed = stats.samples.lastOrNull()
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            V2Metric("Пинг", stats.pingMillis?.let { "$it мс" } ?: "—", Modifier.weight(1f))
+            V2Metric("Загрузка", speed?.let { formatBytes(it.downloadBytesPerSecond) + "/с" } ?: "0 Б/с", Modifier.weight(1f))
+            V2Metric("Отдача", speed?.let { formatBytes(it.uploadBytesPerSecond) + "/с" } ?: "0 Б/с", Modifier.weight(1f))
         }
         Spacer(Modifier.height(14.dp))
         TrafficChart(stats)
-        val speed = stats.samples.lastOrNull()
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            V2Metric("Загрузка", speed?.let { formatBytes(it.downloadBytesPerSecond) + "/с" } ?: "—", Modifier.weight(1f))
-            V2Metric("Отдача", speed?.let { formatBytes(it.uploadBytesPerSecond) + "/с" } ?: "—", Modifier.weight(1f))
-        }
         var now by remember { mutableStateOf(System.currentTimeMillis()) }
         LaunchedEffect(connected) { while (connected) { now = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) } }
         val seconds = stats.connectedAtEpochMillis?.let { ((now - it) / 1000).coerceAtLeast(0) } ?: 0
-        Text("Время сеанса: %02d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60), color = Aurora.Muted, modifier = Modifier.padding(vertical = 16.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            V2Metric("Ping", stats.pingMillis?.let { "$it мс" } ?: "—", Modifier.weight(1f))
-            V2Metric("DNS-фильтр", stats.adBlockedSessionTotal.toString(), Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(14.dp))
-        val network = diagnostics.network
-        Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Состояние подключения", color = Aurora.Text, fontWeight = FontWeight.Bold)
-                Text(if (connected) "VPN-туннель работает" else "VPN выключен", color = if (connected) Aurora.Mint else Aurora.Muted)
-                Text("Сеть: ${network?.transport ?: "—"} · ${if (network?.validated == true) "доступ подтверждён" else "ожидание проверки"}", color = Aurora.Muted, fontSize = 12.sp)
-                Text("Private DNS: ${network?.privateDnsMode ?: "—"}", color = Aurora.Muted, fontSize = 12.sp)
-                diagnostics.lastFailure?.let { Text("Последняя ошибка: ${it.message}", color = Color(0xFFFF9EAF), fontSize = 12.sp) }
-            }
-        }
-        Spacer(Modifier.height(14.dp))
-        Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Приватность", color = Aurora.Text, fontWeight = FontWeight.Bold)
-                Text("Заблокировано DNS-фильтром: ${cumulativeBlocked + stats.adBlockedSessionTotal}", color = Aurora.Mint)
-                Text("История адресов и посещённых сайтов не сохраняется", color = Aurora.Muted, fontSize = 12.sp)
-            }
-        }
+        Spacer(Modifier.height(4.dp))
+        Text("Время подключения  %02d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60), color = Aurora.Muted, fontSize = 13.sp)
+        Spacer(Modifier.height(6.dp))
+        Text("Общий трафик  ${formatBytes(stats.downloadTotalBytes + stats.uploadTotalBytes)}", color = Aurora.Muted, fontSize = 13.sp)
+        Spacer(Modifier.height(6.dp))
+        Text("Сессий сегодня  ${history.size}", color = Aurora.Muted, fontSize = 13.sp)
         if (history.isNotEmpty()) {
             Spacer(Modifier.height(14.dp))
             Text("Последние сеансы", color = Aurora.Text, fontWeight = FontWeight.Bold)
@@ -509,49 +581,356 @@ private fun V2Statistics(
 }
 
 @Composable
-private fun V2Settings(adBlock: Boolean, killSwitch: Boolean, diagnostics: DiagnosticState, theme: ThemeMode, dynamicColor: Boolean, protectUnknownWifi: Boolean, onTheme: (ThemeMode) -> Unit, onDynamicColor: (Boolean) -> Unit, onProtectUnknownWifi: (Boolean) -> Unit, onAdBlock: (Boolean) -> Unit, onKillSwitch: (Boolean) -> Unit, updateState: UpdateState, onCheckUpdate: () -> Unit) {
+private fun V2Settings(
+    diagnostics: DiagnosticState,
+    policy: ClientPolicy,
+    theme: ThemeMode,
+    dynamicColor: Boolean,
+    autoConnect: Boolean,
+    notifications: Boolean,
+    protectUnknownWifi: Boolean,
+    onTheme: (ThemeMode) -> Unit,
+    onDynamicColor: (Boolean) -> Unit,
+    onAutoConnect: (Boolean) -> Unit,
+    onNotifications: (Boolean) -> Unit,
+    onProtectUnknownWifi: (Boolean) -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var logStatus by remember { mutableStateOf("") }
     var privacyOpen by rememberSaveable { mutableStateOf(false) }
+    var notificationsOpen by rememberSaveable { mutableStateOf(false) }
+    var aboutOpen by rememberSaveable { mutableStateOf(false) }
+    var donateOpen by rememberSaveable { mutableStateOf(false) }
     if (privacyOpen) {
         V2PrivacyPage(onBack = { privacyOpen = false })
         return
     }
-    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Aurora.VioletNight, Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
-        V2BrandHeader("Свобода без границ")
+    if (notificationsOpen) {
+        V2NotificationCenterPage(
+            policy = policy,
+            onBack = { notificationsOpen = false },
+            onOpenSystemSettings = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        },
+                    )
+                }
+            },
+        )
+        return
+    }
+    if (donateOpen) {
+        V2DonationPage(onBack = { donateOpen = false })
+        return
+    }
+    if (aboutOpen) {
+        Column(
+            Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Aurora.VioletNight, Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp),
+        ) {
+            TextButton(onClick = { aboutOpen = false }) { Text("← Назад") }
+            Text("О приложении", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
+            Text("QuantumVPN ${BuildConfig.VERSION_NAME}", color = Aurora.Mint, modifier = Modifier.padding(top = 12.dp))
+            Text("Liquid Glass Orbit · защита соединения", color = Aurora.Muted, modifier = Modifier.padding(top = 6.dp))
+        }
+        return
+    }
+    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
         Text("Настройки", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
-        Text("Приватность, DNS и оформление", color = Aurora.Muted, modifier = Modifier.padding(top = 4.dp, bottom = 18.dp))
-        Text("БЕЗОПАСНОСТЬ", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
-        V2Toggle("DNS и блокировка рекламы", "dns.adguard-dns.com · включается только вместе с VPN", adBlock, onAdBlock)
-        Spacer(Modifier.height(10.dp))
-        V2Toggle("Kill switch", "Блокировать интернет при разрыве VPN", killSwitch, onKillSwitch)
-        Spacer(Modifier.height(10.dp))
-        V2Toggle("Защита незнакомого Wi-Fi", "После страницы входа предложить включить VPN", protectUnknownWifi, onProtectUnknownWifi)
         Spacer(Modifier.height(18.dp))
-        Text("ПРИЛОЖЕНИЕ", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
-        V2StatusRow("Диагностика", "Добровольный отчёт", true)
-        Spacer(Modifier.height(10.dp))
-        V2NavRow("Конфиденциальность", "Что хранится на устройстве и что отправляется", onClick = { privacyOpen = true })
-        Spacer(Modifier.height(10.dp))
-        V2StatusRow("Оформление", "Северное сияние · фиолетово-мятное стекло", true)
-        Spacer(Modifier.height(10.dp))
+        Text("Оформление", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ThemeMode.entries.forEach { mode ->
-                Surface(onClick = { onTheme(mode) }, color = if (theme == mode) Aurora.Mint else Aurora.Glass, shape = RoundedCornerShape(14.dp), modifier = Modifier.weight(1f)) {
-                    Text(when (mode) { ThemeMode.System -> "Система"; ThemeMode.Dark -> "Тёмная"; ThemeMode.Light -> "Светлая" }, color = if (theme == mode) Aurora.Night else Aurora.Muted, textAlign = TextAlign.Center, fontSize = 11.sp, modifier = Modifier.padding(vertical = 10.dp))
+            listOf(ThemeMode.Light, ThemeMode.Dark, ThemeMode.System).forEach { mode ->
+                Surface(
+                    onClick = { onTheme(mode) },
+                    color = if (theme == mode) Aurora.Mint else Aurora.Glass,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (theme == mode) Aurora.Mint else Aurora.Border),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(
+                        when (mode) {
+                            ThemeMode.Light -> "Светлая"
+                            ThemeMode.Dark -> "Тёмная"
+                            ThemeMode.System -> "Системная"
+                        },
+                        color = if (theme == mode) Aurora.Night else Aurora.Muted,
+                        textAlign = TextAlign.Center,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(vertical = 12.dp),
+                    )
                 }
             }
         }
         Spacer(Modifier.height(10.dp))
-        V2Toggle("Цвета системы", "Dynamic Color из оформления Android", dynamicColor, onDynamicColor)
+        V2Toggle("Цвета устройства", "Использовать акцент Android Dynamic Color", dynamicColor, onDynamicColor)
         Spacer(Modifier.height(16.dp))
-        Text("QuantumVPN ${BuildConfig.VERSION_NAME}", color = Aurora.Muted)
-        TextButton(onClick = onCheckUpdate, enabled = updateState !is UpdateState.Checking && updateState !is UpdateState.Downloading) { Text(if (updateState is UpdateState.Checking) "Проверяем…" else "Проверить обновление") }
-        if (updateState is UpdateState.UpToDate) Text("Установлена актуальная версия", color = Aurora.Mint)
-        Button(onClick = { scope.launch { logStatus = "Отправка…"; logStatus = if (VoluntaryDiagnosticReporter(context).send(diagnostics).isSuccess) "Отчёт отправлен в панель" else "Не удалось отправить отчёт" } }, colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night), modifier = Modifier.fillMaxWidth()) { Text("Отправить логи добровольно") }
+        V2Toggle("Автоподключение", "Подключать VPN при запуске на мобильной сети", autoConnect, onAutoConnect)
+        Spacer(Modifier.height(10.dp))
+        V2Toggle("Уведомления", "Показывать статус соединения", notifications, onNotifications)
+        Spacer(Modifier.height(10.dp))
+        V2Toggle("Защита незнакомого Wi‑Fi", "Предложить VPN после страницы входа", protectUnknownWifi, onProtectUnknownWifi)
+        Spacer(Modifier.height(10.dp))
+        V2NavRow(
+            "Центр уведомлений",
+            if (policy.maintenance) "Технические работы активны" else "Обновления и объявления сервиса",
+            onClick = { notificationsOpen = true },
+        )
+        Spacer(Modifier.height(10.dp))
+        V2Toggle("Диагностика сети", "Помогать улучшать стабильность (добровольно)", true) { }
+        Spacer(Modifier.height(18.dp))
+        V2NavRow("Пожертвование", "Поддержать проект через ЮMoney · история сборов", onClick = { donateOpen = true })
+        Spacer(Modifier.height(10.dp))
+        V2NavRow("Отправить логи", "Добровольный диагностический отчёт", onClick = {
+            scope.launch {
+                logStatus = "Отправка…"
+                logStatus = if (VoluntaryDiagnosticReporter(context).send(diagnostics).isSuccess) {
+                    "Отчёт отправлен в панель"
+                } else {
+                    "Не удалось отправить отчёт"
+                }
+            }
+        })
         if (logStatus.isNotBlank()) Text(logStatus, color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+        Spacer(Modifier.height(10.dp))
+        V2NavRow("О приложении", "Версия и информация", onClick = { aboutOpen = true })
+        Spacer(Modifier.height(10.dp))
+        V2NavRow("Конфиденциальность", "Что хранится на устройстве и что отправляется", onClick = { privacyOpen = true })
     }
+}
+
+@Composable
+private fun V2NotificationCenterPage(
+    policy: ClientPolicy,
+    onBack: () -> Unit,
+    onOpenSystemSettings: () -> Unit,
+) {
+    Column(
+        Modifier.fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFF05111F), Aurora.Night)))
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+    ) {
+        TextButton(onClick = onBack) { Text("← Назад", color = Aurora.Mint) }
+        Text("Центр уведомлений", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
+        Text("Обновления, состояние сервиса и важные объявления", color = Aurora.Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp, bottom = 16.dp))
+        Surface(
+            color = if (policy.maintenance) Aurora.Danger.copy(alpha = .14f) else Aurora.Glass,
+            border = androidx.compose.foundation.BorderStroke(1.dp, if (policy.maintenance) Aurora.Danger else Aurora.Border),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text(if (policy.maintenance) "Технические работы" else "Сервис работает", color = if (policy.maintenance) Aurora.Danger else Aurora.Mint, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text(
+                    policy.maintenanceMessage.ifBlank { "Новых ограничений нет. Уведомления о важных изменениях будут показаны здесь." },
+                    color = Aurora.Muted,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Surface(
+            color = Aurora.Glass,
+            border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Последняя версия", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (policy.latestVersion.isBlank()) "Проверяем обновления при запуске" else "QuantumVPN ${policy.latestVersion} · versionCode ${policy.versionCode}",
+                    color = Aurora.Mint,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                Text("Автопроверка выполняется при запуске и в фоне.", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+            }
+        }
+        if (policy.activeAnnounce().isNotBlank()) {
+            Spacer(Modifier.height(12.dp))
+            Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .45f)), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Объявление оператора", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                    Text(policy.activeAnnounce(), color = Aurora.Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        V2NavRow("Настройки Android", "Разрешить или изменить уведомления QuantumVPN", onClick = onOpenSystemSettings)
+    }
+}
+
+@Composable
+private fun V2DonationPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val repo = remember(context) { DonationRepository(context) }
+    var local by remember { mutableStateOf(repo.localHistory()) }
+    var summary by remember { mutableStateOf(DonationSummary()) }
+    var status by remember { mutableStateOf("") }
+    var sending by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        summary = repo.fetchSummary()
+    }
+    fun report(amount: Int) {
+        if (sending || amount < 1) return
+        sending = true
+        status = "Сохраняем…"
+        scope.launch {
+            val result = repo.reportDonation(amount)
+            local = repo.localHistory()
+            result.onSuccess {
+                summary = it
+                status = "Спасибо! ${DonationRepository.formatRub(amount)} отмечены"
+            }.onFailure {
+                status = "Сохранено на устройстве. Сервер временно недоступен."
+            }
+            sending = false
+        }
+    }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Aurora.VioletNight, Aurora.Night)))
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+    ) {
+        TextButton(onClick = onBack) { Text("← Назад") }
+        Text("Пожертвование", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
+        Text("Поддержите QuantumVPN через ЮMoney", color = Aurora.Muted, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            V2Metric("Всего собрано", if (summary.totalRub > 0) DonationRepository.formatRub(summary.totalRub) else "—", Modifier.weight(1f))
+            V2Metric("Ваши", DonationRepository.formatRub(repo.localTotalRub()), Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(14.dp))
+        Surface(
+            color = Aurora.Glass,
+            border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border),
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Оплата ЮMoney", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                Text("Всё остаётся в приложении — браузер не открывается", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
+                YooMoneyDonateWebView(Modifier.fillMaxWidth().height(420.dp))
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        Text("Я отправил", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text("Отметьте сумму после оплаты — она попадёт в историю", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(50, 100, 200, 500).forEach { amount ->
+                Surface(
+                    onClick = { report(amount) },
+                    enabled = !sending,
+                    color = Aurora.Glass,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(
+                        "$amount ₽",
+                        color = Aurora.Text,
+                        textAlign = TextAlign.Center,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(vertical = 12.dp),
+                    )
+                }
+            }
+        }
+        if (status.isNotBlank()) {
+            Text(status, color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+        }
+        Spacer(Modifier.height(18.dp))
+        Text("Общая история", color = Aurora.Text, fontWeight = FontWeight.Bold)
+        if (summary.recent.isEmpty()) {
+            Text("Пока нет отмеченных пожертвований на сервере", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+        } else {
+            summary.recent.take(12).forEach { entry ->
+                DonationHistoryRow(entry)
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Text("Ваша история на устройстве", color = Aurora.Text, fontWeight = FontWeight.Bold)
+        if (local.isEmpty()) {
+            Text("Вы ещё ничего не отмечали", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+        } else {
+            local.take(20).forEach { entry ->
+                DonationHistoryRow(entry)
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+    }
+}
+
+@Composable
+private fun DonationHistoryRow(entry: DonationEntry) {
+    Surface(
+        color = Aurora.Glass,
+        border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .7f)),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(DonationRepository.formatRub(entry.amountRub), color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                Text(DonationRepository.formatWhen(entry.ts), color = Aurora.Muted, fontSize = 12.sp)
+            }
+            if (entry.label.isNotBlank()) {
+                Text(entry.label, color = Aurora.Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun YooMoneyDonateWebView(modifier: Modifier = Modifier) {
+    AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            WebView(ctx).apply {
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.loadsImagesAutomatically = true
+                settings.javaScriptCanOpenWindowsAutomatically = false
+                settings.setSupportMultipleWindows(false)
+                settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                        // Keep payment flow inside the app WebView — never hand off to Chrome.
+                        val target = url.orEmpty()
+                        return when {
+                            target.startsWith("http://") || target.startsWith("https://") -> {
+                                view?.loadUrl(target)
+                                true
+                            }
+                            else -> true
+                        }
+                    }
+
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: android.webkit.WebResourceRequest?,
+                    ): Boolean {
+                        val target = request?.url?.toString().orEmpty()
+                        if (target.startsWith("http://") || target.startsWith("https://")) {
+                            view?.loadUrl(target)
+                        }
+                        return true
+                    }
+                }
+                webChromeClient = WebChromeClient()
+                loadUrl(DonationRepository.YOOMONEY_PAGE_URL)
+            }
+        },
+    )
 }
 
 @Composable
@@ -605,7 +984,8 @@ private fun TrafficChart(stats: VpnSessionStats) {
     val border = Aurora.Border
     Surface(color = Aurora.Glass, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp)) {
         Column(Modifier.padding(16.dp)) {
-            Text("Скорость · ↓ загрузка / ↑ отдача", color = Aurora.Muted, fontSize = 12.sp)
+            Text("Трафик", color = Aurora.Text, fontWeight = FontWeight.Bold)
+            Text("Загрузка · Отдача", color = Aurora.Muted, fontSize = 12.sp)
             if (samples.size < 2) Text("График появится после получения данных", color = Aurora.Muted, modifier = Modifier.padding(vertical = 24.dp))
             else Canvas(Modifier.fillMaxWidth().height(130.dp).padding(top = 16.dp)) {
                 val peak = samples.maxOf { maxOf(it.downloadBytesPerSecond, it.uploadBytesPerSecond) }.coerceAtLeast(1).toFloat()

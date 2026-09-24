@@ -14,6 +14,7 @@ import secrets
 import shutil
 import sqlite3
 import ssl
+import socket
 import struct
 import subprocess
 import threading
@@ -27,6 +28,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+
+class OperatorHTTPServer(ThreadingHTTPServer):
+    # Default backlog is 5 — APK downloads get RST mid-transfer and clients restart forever.
+    request_queue_size = 512
+    allow_reuse_address = True
+
 ROOT = os.environ.get("QV_DATA_DIR", "/var/lib/quantumvpn-operator")
 DB = os.path.join(ROOT, "operator.db")
 USER = os.environ["QV_ADMIN_USER"]
@@ -36,9 +43,12 @@ ROSPANEL_DB = os.environ.get("QV_ROSPANEL_DB", "/var/lib/rospanel/rospanel.db")
 ROSPANEL_API = os.environ.get("QV_ROSPANEL_API", "").rstrip("/")
 DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/downloads")
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://tepacom.o190.com:8443")
-PANEL_BUILD = "5.7.5"
-VERSION = "5.7.5"
-VERSION_CODE = 103
+# Prefer :8443 until :443 fallback nginx is confirmed live.
+DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://tepacom.o190.com:8443").rstrip("/")
+PANEL_BUILD = "5.8.0"
+VERSION = "5.8.0"
+VERSION_CODE = 114
+DEFAULT_NOTE = "QuantumVPN 5.8.0: Smart Connect, авто-переход Wi‑Fi/LTE, центр уведомлений и Aurora Glass."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()
@@ -47,11 +57,6 @@ _LAST_EVENT_CLEANUP = 0
 _RATE = defaultdict(deque)
 _RATE_LOCK = threading.Lock()
 _ALERT_STATE = {"last": {}, "lock": threading.Lock()}
-
-DEFAULT_NOTE = (
-    "Aurora 2026: оценка качества серверов, центр состояния, история и приватность, "
-    "защита публичного Wi-Fi, управляемый выпуск и расписание техработ."
-)
 
 
 def b64url(data: bytes) -> str:
@@ -122,7 +127,7 @@ def release_info(version: str, version_code: int, note: str, abi: str, size: int
     return {
         "version": version,
         "version_code": version_code,
-        "url": f"{PUBLIC_BASE}/downloads/{version}/{name}",
+        "url": f"{DOWNLOAD_BASE}/downloads/{version}/{name}",
         "sha256": digest.hexdigest(),
         "size": size,
         "note": note or DEFAULT_NOTE,
@@ -153,9 +158,29 @@ def conn():
                 create table if not exists audit (
                     ts integer, actor text, ip text, action text, detail text
                 );
+                create table if not exists donations (
+                    id integer primary key autoincrement,
+                    ts integer not null,
+                    device text not null,
+                    ip text not null default '',
+                    amount_rub integer not null,
+                    note text not null default '',
+                    app_version text not null default ''
+                );
+                create table if not exists server_health (
+                    ts integer not null,
+                    target text not null,
+                    ok integer not null,
+                    latency_ms integer not null default 0,
+                    detail text not null default ''
+                );
                 create index if not exists idx_events_device on events(device);
                 create index if not exists idx_events_kind_ts on events(kind, ts);
+                create index if not exists idx_events_ts on events(ts);
                 create index if not exists idx_audit_ts on audit(ts);
+                create index if not exists idx_donations_ts on donations(ts);
+                create index if not exists idx_donations_device on donations(device);
+                create index if not exists idx_server_health_ts on server_health(ts);
                 """
             )
             defaults = {
@@ -185,6 +210,7 @@ def conn():
                 "feature_auto_failover": "1",
                 "feature_kill_switch": "0",
                 "feature_block_open_wifi": "0",
+                "feature_selfsteal": "1",
                 "feature_ab_json": "{}",
                 "nodes_recommended": "",
                 "nodes_forbidden": "",
@@ -199,6 +225,10 @@ def conn():
             }
             for key, value in defaults.items():
                 db.execute("insert or ignore into settings values (?,?)", (key, value))
+            # Оповещения о новой версии всегда включены — нельзя выключить.
+            db.execute(
+                "insert or replace into settings(key,value) values ('update_notifications_enabled','1')"
+            )
             db.execute(
                 "update settings set value=? where key='maintenance_message' and value=?",
                 (
@@ -210,6 +240,7 @@ def conn():
         if now - _LAST_EVENT_CLEANUP >= 3600:
             db.execute("delete from events where ts < ?", (now - 14 * 86400,))
             db.execute("delete from audit where ts < ?", (now - 90 * 86400,))
+            db.execute("delete from server_health where ts < ?", (now - 7 * 86400,))
             _LAST_EVENT_CLEANUP = now
         db.commit()
     return db
@@ -397,6 +428,29 @@ def service_status():
     }
 
 
+_CACHE = {"summary": None, "summary_at": 0.0, "status": None, "status_at": 0.0}
+
+
+def cached_rospanel_summary(ttl=30.0):
+    now = time.monotonic()
+    if _CACHE["summary"] is not None and now - _CACHE["summary_at"] < ttl:
+        return _CACHE["summary"]
+    value = rospanel_summary()
+    _CACHE["summary"] = value
+    _CACHE["summary_at"] = now
+    return value
+
+
+def cached_service_status(ttl=20.0):
+    now = time.monotonic()
+    if _CACHE["status"] is not None and now - _CACHE["status_at"] < ttl:
+        return _CACHE["status"]
+    value = service_status()
+    _CACHE["status"] = value
+    _CACHE["status_at"] = now
+    return value
+
+
 def probe_upstream():
     try:
         url = urlsplit(UPSTREAM)
@@ -406,6 +460,43 @@ def probe_upstream():
         return {"ok": True, "status": status, "latency_ms": round((time.monotonic() - started) * 1000)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def record_health(db, target, result):
+    """Persist a small bounded health sample for the operator dashboard."""
+    ok = 1 if result.get("ok") else 0
+    latency = int(result.get("latency_ms") or 0)
+    detail = str(result.get("error") or result.get("status") or "")[:280]
+    db.execute(
+        "insert into server_health(ts,target,ok,latency_ms,detail) values (?,?,?,?,?)",
+        (int(time.time()), target, ok, latency, detail),
+    )
+
+
+def health_snapshot(db, limit=24):
+    rows = db.execute(
+        "select ts,target,ok,latency_ms,detail from server_health order by ts desc limit ?",
+        (max(1, min(200, int(limit))),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def health_worker():
+    """Check the subscription upstream and local VPN services periodically."""
+    while True:
+        try:
+            db = conn()
+            upstream = probe_upstream()
+            record_health(db, "subscription_upstream", upstream)
+            services = service_status()
+            for target in ("rospanel", "xray", "operator"):
+                value = services.get(target, "unknown")
+                record_health(db, target, {"ok": value in ("active", "running", "ok"), "status": value})
+            db.commit()
+            db.close()
+        except Exception:
+            pass
+        time.sleep(60)
 
 
 def telegram_send(s, text: str):
@@ -565,7 +656,7 @@ def render_login(error=""):
     </form></section></main>"""
 
 
-def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None):
+def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None):
     checked = lambda key: "checked" if s.get(key) == "1" else ""
     events = "".join(
         f"<tr><td>{time.strftime('%d.%m %H:%M', time.localtime(x[0]))}</td><td>{html.escape(x[1])}</td>"
@@ -623,6 +714,15 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
           <h2 style="margin-top:18px">История</h2>
           <table><thead><tr><th>Время</th><th>Тип</th><th>IP</th><th>Детали</th></tr></thead><tbody>{hist}</tbody></table>
         </section>"""
+    donation_table = "".join(
+        f"<tr><td>{time.strftime('%d.%m.%Y %H:%M', time.localtime(ts))}</td>"
+        f"<td class=ok><b>{int(amount)} ₽</b></td>"
+        f"<td><a href='/operator?tab=devices&q={quote(device)}'>{html.escape(device)}</a></td>"
+        f"<td>{html.escape(ip or '—')}</td>"
+        f"<td>{html.escape(ver or '—')}</td>"
+        f"<td>{html.escape((note or '')[:120])}</td></tr>"
+        for ts, amount, device, ip, ver, note in (donation_rows or [])
+    ) or "<tr><td colspan=6>Пожертвований пока нет</td></tr>"
     totp_setup = ""
     if not enabled(s, "totp_enabled", False) or not s.get("totp_secret"):
         totp_setup = "<p class=muted>2FA выключена. Включите и сохраните — секрет сгенерируется автоматически.</p>"
@@ -635,6 +735,19 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
 
     flash_html = f"<div class=flash>{html.escape(flash)}</div>" if flash else ""
     outbounds = ", ".join(status.get("outbounds") or []) or "—"
+    monitor_db = conn()
+    try:
+        monitor_rows = health_snapshot(monitor_db)
+    finally:
+        monitor_db.close()
+    latest_monitor = {}
+    for item in monitor_rows:
+        latest_monitor.setdefault(item["target"], item)
+    monitor_html = "".join(
+        f"<tr><td>{html.escape(target)}</td><td class={'ok' if row['ok'] else 'off'}>{'OK' if row['ok'] else 'Ошибка'}</td>"
+        f"<td>{row['latency_ms']} ms</td><td>{time.strftime('%d.%m %H:%M', time.localtime(row['ts']))}</td></tr>"
+        for target, row in sorted(latest_monitor.items())
+    ) or "<tr><td colspan=4>Первый автоматический замер выполняется…</td></tr>"
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <title>Quantum Control</title><style>{css()}</style><main>
     <section class=hero>
@@ -646,6 +759,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a href="/operator?tab=service">Сервис</a>
         <a href="/operator?tab=features">Фичи</a>
         <a href="/operator?tab=release">Релизы</a>
+        <a href="/operator?tab=donations">Пожертвования</a>
         <a href="/operator?tab=devices">Устройства</a>
         <a href="/operator?tab=users">Юзеры</a>
         <a href="/operator?tab=security">Безопасность</a>
@@ -682,6 +796,10 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
             <button class=secondary name=action value=sync_protocols>Синхронизировать протоколы</button>
           </form>
           <p class=muted style="margin-top:10px">Рестарт RosPanel кратко оборвёт VPN-сессии.</p>
+        </div>
+        <div class=card><h2>Автомониторинг серверов</h2>
+          <p class=muted>Проверка upstream и сервисов каждые 60 секунд. История хранится 7 дней.</p>
+          <table><thead><tr><th>Цель</th><th>Статус</th><th>Пинг</th><th>Последняя проверка</th></tr></thead><tbody>{monitor_html}</tbody></table>
         </div>
       </div>
     </section>
@@ -726,6 +844,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label><input type=checkbox name=feature_auto_failover {checked('feature_auto_failover')}> Auto failover</label>
         <label><input type=checkbox name=feature_kill_switch {checked('feature_kill_switch')}> Kill-switch</label>
         <label><input type=checkbox name=feature_block_open_wifi {checked('feature_block_open_wifi')}> Блок открытого Wi‑Fi</label>
+        <label><input type=checkbox name=feature_selfsteal {checked('feature_selfsteal')}> Selfsteal — защита маршрутизации / маскировка TLS</label>
+        <p class=muted>Оповещения о новой версии всегда включены и рассылаются фоном каждые ~15 минут.</p>
         <button>Сохранить</button>
       </form>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=ab>
@@ -765,6 +885,18 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <button>Загрузить</button>
         <p class=muted>Файл: QuantumVPN-{{ver}}-operator-debug-{{abi}}.apk</p>
       </form>
+    </section>
+
+    <section class=card {show('donations')}>
+      <h2>Пожертвования</h2>
+      <div class=stats>
+        <div class=stat>Всего собрано<b class=ok>{(donation_totals or {}).get('total_rub', 0)} ₽</b></div>
+        <div class=stat>Отметок<b>{(donation_totals or {}).get('count', 0)}</b></div>
+        <div class=stat>Устройств<b>{(donation_totals or {}).get('devices', 0)}</b></div>
+      </div>
+      <p class=muted style="margin-top:12px">ЮMoney bill: <code>1KF196EER0I.260922</code> · клиенты отмечают сумму после оплаты</p>
+      <table style="margin-top:12px"><thead><tr><th>Время</th><th>Сумма</th><th>Device</th><th>IP</th><th>Версия</th><th>Заметка</th></tr></thead>
+      <tbody>{donation_table}</tbody></table>
     </section>
 
     <section {show('devices')}>
@@ -854,6 +986,49 @@ class App(BaseHTTPRequestHandler):
         raw = self.headers.get("X-Device-Id") or self.headers.get("X-HWID") or ""
         return device_id(raw) if raw else device_id(self.headers.get("User-Agent", "")[:120]), ip
 
+    def donations_payload(self, db):
+        self.ensure_donations_table(db)
+        dev, _ip = self.client()
+        totals = db.execute(
+            "select coalesce(sum(amount_rub),0), count(*) from donations"
+        ).fetchone()
+        recent = db.execute(
+            "select ts, amount_rub, note from donations order by ts desc limit 40"
+        ).fetchall()
+        mine = db.execute(
+            "select ts, amount_rub, note from donations where device=? order by ts desc limit 40",
+            (dev,),
+        ).fetchall()
+        return {
+            "total_rub": int(totals[0] or 0),
+            "count": int(totals[1] or 0),
+            "recent": [
+                {"ts": int(ts), "amount_rub": int(amount), "label": (note or "")[:40] or "Пожертвование"}
+                for ts, amount, note in recent
+            ],
+            "mine": [
+                {"ts": int(ts), "amount_rub": int(amount), "label": (note or "")[:40] or "Вы"}
+                for ts, amount, note in mine
+            ],
+        }
+
+    def ensure_donations_table(self, db):
+        db.execute(
+            """
+            create table if not exists donations (
+                id integer primary key autoincrement,
+                ts integer not null,
+                device text not null,
+                ip text not null default '',
+                amount_rub integer not null,
+                note text not null default '',
+                app_version text not null default ''
+            )
+            """
+        )
+        db.execute("create index if not exists idx_donations_ts on donations(ts)")
+        db.execute("create index if not exists idx_donations_device on donations(device)")
+
     def reply(self, code, body, content_type="application/json; charset=utf-8", headers=None):
         if isinstance(body, str):
             data = body.encode("utf-8")
@@ -911,30 +1086,44 @@ class App(BaseHTTPRequestHandler):
 
     def device_search(self, db, q, limit=50):
         q = (q or "").strip()
+        # Fast path: scan recent rows and dedupe in Python — avoids heavy GROUP BY on large events.
         if q:
             like = f"%{q}%"
             rows = db.execute(
                 """
-                select device, ip, max(ts) as last_ts, max(detail) as detail
+                select device, ip, ts, detail
                 from events
                 where device like ? or ip like ? or detail like ?
-                group by device
-                order by last_ts desc limit ?
+                order by ts desc
+                limit 800
                 """,
-                (like, like, like, limit),
+                (like, like, like),
             ).fetchall()
         else:
             rows = db.execute(
                 """
-                select device, ip, max(ts) as last_ts, max(detail) as detail
-                from events where kind='policy'
-                group by device order by last_ts desc limit ?
+                select device, ip, ts, detail
+                from events
+                where kind='policy'
+                order by ts desc
+                limit 800
                 """,
-                (limit,),
             ).fetchall()
-        flags = {r[0]: r for r in db.execute("select device, force_banner, request_diagnostic, note, updated_at from device_flags")}
-        out = []
+        seen = {}
         for device, ip, last_ts, detail in rows:
+            if device in seen:
+                continue
+            seen[device] = (device, ip, last_ts, detail)
+            if len(seen) >= limit:
+                break
+        flags = {
+            r[0]: r
+            for r in db.execute(
+                "select device, force_banner, request_diagnostic, note, updated_at from device_flags"
+            )
+        }
+        out = []
+        for device, ip, last_ts, detail in seen.values():
             fl = flags.get(device)
             out.append((device, ip, last_ts, detail, int(fl[2]) if fl else 0))
         return out
@@ -1053,7 +1242,11 @@ class App(BaseHTTPRequestHandler):
             status["services"] = service_status()
             status["upstream"] = probe_upstream()
             status["summary"] = rospanel_summary()
+            status["monitor"] = {"interval_seconds": 60, "samples": health_snapshot(db)}
             return self.reply(200, json.dumps(status))
+
+        if path.startswith("/api/client/donations"):
+            return self.reply(200, json.dumps(self.donations_payload(db)))
 
         if path.startswith("/api/client/policy"):
             dev, ip = self.client()
@@ -1077,6 +1270,8 @@ class App(BaseHTTPRequestHandler):
                 "auto_failover": enabled(s, "feature_auto_failover"),
                 "kill_switch": enabled(s, "feature_kill_switch"),
                 "block_open_wifi": enabled(s, "feature_block_open_wifi"),
+                "selfsteal": enabled(s, "feature_selfsteal"),
+                "stealth_mode": enabled(s, "feature_selfsteal"),
             }
             features.update(ab_features(s, bucket))
             fl = db.execute(
@@ -1099,7 +1294,7 @@ class App(BaseHTTPRequestHandler):
                 "announce": localize(s, "announce", "announce_en", lang),
                 "latest_version": version,
                 "version_code": version_code,
-                "update_url": f"{PUBLIC_BASE}/downloads/{version}/QuantumVPN-{version}-operator-debug-arm64-v8a.apk",
+                "update_url": f"{DOWNLOAD_BASE}/downloads/{version}/QuantumVPN-{version}-operator-debug-arm64-v8a.apk",
                 "update_notifications": True,
                 "config_revision": int(s.get("config_revision", "1") or 1),
                 "features": features,
@@ -1153,11 +1348,65 @@ class App(BaseHTTPRequestHandler):
             tab = query.get("tab", ["dashboard"])[0]
             q = query.get("q", [""])[0]
             flash = query.get("flash", [""])[0]
+            empty_summary = {"active": 0, "disabled": 0, "expired": 0, "online_15m": 0, "traffic_today_gb": 0.0, "ok": False}
+            empty_status = {"rospanel": "—", "operator": "—", "xray": "—", "opera": "—", "disk_free_gb": 0, "disk_used_pct": 0, "outbounds": []}
+            if tab == "devices":
+                # Devices tab must stay fast: skip RosPanel/systemctl scans and heavy event dumps.
+                device_rows = self.device_search(db, q)
+                device = self.load_device(db, q) if q else None
+                return self.reply(
+                    200,
+                    render_panel(
+                        s,
+                        [],
+                        [],
+                        [],
+                        empty_summary,
+                        empty_status,
+                        [],
+                        device_rows,
+                        flash=unquote(flash),
+                        section=tab,
+                        q=q,
+                        device=device,
+                    ),
+                    "text/html; charset=utf-8",
+                )
+            if tab == "donations":
+                self.ensure_donations_table(db)
+                donation_rows = db.execute(
+                    "select ts, amount_rub, device, ip, app_version, note from donations order by ts desc limit 300"
+                ).fetchall()
+                totals_row = db.execute(
+                    "select coalesce(sum(amount_rub),0), count(*), count(distinct device) from donations"
+                ).fetchone()
+                donation_totals = {
+                    "total_rub": int(totals_row[0] or 0),
+                    "count": int(totals_row[1] or 0),
+                    "devices": int(totals_row[2] or 0),
+                }
+                return self.reply(
+                    200,
+                    render_panel(
+                        s,
+                        [],
+                        [],
+                        [],
+                        empty_summary,
+                        empty_status,
+                        [],
+                        [],
+                        flash=unquote(flash),
+                        section=tab,
+                        q=q,
+                        donation_rows=donation_rows,
+                        donation_totals=donation_totals,
+                    ),
+                    "text/html; charset=utf-8",
+                )
             rows = db.execute("select ts,kind,device,ip,detail from events order by ts desc limit 100").fetchall()
             protocols = db.execute("select name,enabled from protocols order by name").fetchall()
             audit_rows = db.execute("select ts,actor,ip,action,detail from audit order by ts desc limit 100").fetchall()
-            device_rows = self.device_search(db, q if tab == "devices" else "")
-            device = self.load_device(db, q) if tab == "devices" and q else None
             users = rospanel_users(q=q if tab == "users" else "")
             return self.reply(
                 200,
@@ -1166,14 +1415,14 @@ class App(BaseHTTPRequestHandler):
                     rows,
                     users,
                     protocols,
-                    rospanel_summary(),
-                    service_status(),
+                    cached_rospanel_summary(),
+                    cached_service_status(),
                     audit_rows,
-                    device_rows,
+                    [],
                     flash=unquote(flash),
                     section=tab,
                     q=q,
-                    device=device,
+                    device=None,
                 ),
                 "text/html; charset=utf-8",
             )
@@ -1185,14 +1434,69 @@ class App(BaseHTTPRequestHandler):
         target = os.path.realpath(os.path.join(DOWNLOAD_ROOT, path.removeprefix("/downloads/")))
         if not target.startswith(root) or not os.path.isfile(target):
             return self.reply(404, "Not found", "text/plain")
-        self.send_response(200)
+        size = os.path.getsize(target)
+        range_header = self.headers.get("Range", "")
+        start, end = 0, size - 1
+        status = 200
+        if range_header.startswith("bytes=") and "-" in range_header:
+            try:
+                spec = range_header.replace("bytes=", "", 1).strip()
+                left, right = spec.split("-", 1)
+                if left:
+                    start = max(0, int(left))
+                if right:
+                    end = min(size - 1, int(right))
+                if start > end or start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+                status = 206
+            except Exception:
+                start, end = 0, size - 1
+                status = 200
+        length = end - start + 1
+        self.send_response(status)
         self.send_header("Content-Type", "application/vnd.android.package-archive")
-        self.send_header("Content-Length", str(os.path.getsize(target)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.send_header("Content-Disposition", "attachment")
+        self.send_header("Cache-Control", "public, max-age=60")
         self.end_headers()
-        if not head:
-            with open(target, "rb") as source:
-                shutil.copyfileobj(source, self.wfile, 64 * 1024)
+        if head:
+            return
+        # Prefer zero-copy sendfile only when TLS is terminated upstream (plain TCP socket).
+        # OpenSSL-wrapped sockets cannot use sendfile reliably.
+        if os.environ.get("QV_TLS_TERMINATED", "").strip() in ("1", "true", "yes"):
+            try:
+                out_fd = self.wfile.fileno()
+                with open(target, "rb") as source:
+                    in_fd = source.fileno()
+                    offset = start
+                    remaining = length
+                    while remaining > 0:
+                        sent = os.sendfile(out_fd, in_fd, offset, remaining)
+                        if sent <= 0:
+                            break
+                        offset += sent
+                        remaining -= sent
+                    if remaining == 0:
+                        return
+                    start = offset
+                    length = remaining
+            except Exception:
+                pass
+        with open(target, "rb") as source:
+            source.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = source.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def do_HEAD(self):
         path = urlsplit(self.path).path
@@ -1238,6 +1542,31 @@ class App(BaseHTTPRequestHandler):
                 return self.reply(201, '{"ok":true}')
             except Exception:
                 return self.reply(400, '{"error":"invalid_report"}')
+
+        if path == "/api/client/donations":
+            limit = int(s.get("rate_limit_per_min") or 120)
+            ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
+            if rate_limited(ip, limit):
+                return self.reply(429, '{"error":"rate_limited"}')
+            try:
+                self.ensure_donations_table(db)
+                size = min(int(self.headers.get("Content-Length", "0")), 4096)
+                raw = self.rfile.read(size).decode("utf-8")
+                payload = json.loads(raw)
+                amount = int(payload.get("amount_rub") or 0)
+                if amount < 1 or amount > 1_000_000:
+                    return self.reply(400, '{"error":"invalid_amount"}')
+                note = str(payload.get("note") or "")[:80]
+                app_version = str(payload.get("app_version") or "")[:32]
+                dev, ip = self.client()
+                db.execute(
+                    "insert into donations(ts,device,ip,amount_rub,note,app_version) values (?,?,?,?,?,?)",
+                    (int(time.time()), dev, ip, amount, note, app_version),
+                )
+                db.commit()
+                return self.reply(201, json.dumps(self.donations_payload(db)))
+            except Exception:
+                return self.reply(400, '{"error":"invalid_donation"}')
 
         if path.startswith("/operator/") and self.headers.get("Origin") not in (None, PUBLIC_BASE):
             # allow same-host without Origin; block foreign browser origins
@@ -1448,6 +1777,7 @@ class App(BaseHTTPRequestHandler):
                     "feature_auto_failover",
                     "feature_kill_switch",
                     "feature_block_open_wifi",
+                    "feature_selfsteal",
                 )
             }
         elif section == "ab":
@@ -1501,10 +1831,22 @@ class App(BaseHTTPRequestHandler):
 
 def main():
     port = int(os.environ.get("QV_PORT", "8765"))
+    bind = os.environ.get("QV_BIND", "0.0.0.0")
     threading.Thread(target=alert_worker, daemon=True).start()
-    server = ThreadingHTTPServer(("0.0.0.0", port), App)
+    threading.Thread(target=health_worker, daemon=True).start()
+    try:
+        OperatorHTTPServer.request_queue_size = int(os.environ.get("QV_BACKLOG", "512"))
+    except Exception:
+        OperatorHTTPServer.request_queue_size = 512
+    server = OperatorHTTPServer((bind, port), App)
+    try:
+        server.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+    except Exception:
+        pass
+    terminated = os.environ.get("QV_TLS_TERMINATED", "").strip() in ("1", "true", "yes")
     cert, key = os.environ.get("QV_TLS_CERT"), os.environ.get("QV_TLS_KEY")
-    if cert and key:
+    if cert and key and not terminated:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)
         server.socket = context.wrap_socket(server.socket, server_side=True)

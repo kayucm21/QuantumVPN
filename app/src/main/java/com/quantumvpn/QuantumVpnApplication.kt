@@ -30,6 +30,7 @@ class QuantumVpnApplication : Application() {
         container.clientPolicyRepository.start()
         VpnScheduleAlarms.reschedule(this)
         com.quantumvpn.vpn.SubscriptionRefreshAlarms.reschedule(this)
+        com.quantumvpn.vpn.UpdateCheckAlarms.reschedule(this)
         CoroutineScope(Dispatchers.IO).launch {
             container.profileStore.initialize()
             val names = container.profileStore.profiles.value.associate { it.id to it.name }
@@ -53,6 +54,7 @@ class QuantumVpnApplication : Application() {
         }
         CoroutineScope(Dispatchers.IO).launch {
             val prefs = getSharedPreferences("service_notifications", MODE_PRIVATE)
+            val updatePrefs = getSharedPreferences("update_notifications", MODE_PRIVATE)
             container.clientPolicyRepository.policy.collectLatest { policy ->
                 val known = prefs.contains("maintenance")
                 val previous = prefs.getBoolean("maintenance", false)
@@ -69,6 +71,16 @@ class QuantumVpnApplication : Application() {
                     container.notificationManager.showServiceRestoredNotification()
                 }
                 prefs.edit().putBoolean("maintenance", policy.maintenance).apply()
+
+                // Instant alert only — never start a second check/download that cancels splash.
+                if (policy.versionCode > BuildConfig.VERSION_CODE && policy.latestVersion.isNotBlank()) {
+                    val version = policy.latestVersion
+                    val already = updatePrefs.getString("last_version", "") == version
+                    if (!already) {
+                        container.notificationManager.showUpdateAvailableNotification(version)
+                        updatePrefs.edit().putString("last_version", version).apply()
+                    }
+                }
             }
         }
     }

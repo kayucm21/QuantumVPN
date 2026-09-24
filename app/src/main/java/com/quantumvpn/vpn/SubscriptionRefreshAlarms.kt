@@ -56,7 +56,16 @@ class SubscriptionRefreshReceiver : BroadcastReceiver() {
                 try {
                     runBlocking {
                         app.container.clientPolicyRepository.refresh()
-                        app.container.updateController.checkOnce(UpdateChannel.Stable)
+                        when (app.container.updateController.state.value) {
+                            is com.quantumvpn.updates.UpdateState.Downloading,
+                            is com.quantumvpn.updates.UpdateState.Ready,
+                            is com.quantumvpn.updates.UpdateState.Checking,
+                            is com.quantumvpn.updates.UpdateState.RetryingViaVpn -> Unit
+                            else -> {
+                                // Background: always re-check (not checkOnce) so update alerts fire without opening UI.
+                                app.container.updateController.check(UpdateChannel.Stable, autoDownload = false)
+                            }
+                        }
                         app.container.eventJournalStore.append(
                             "subs",
                             "Scheduled subscription refresh requested",

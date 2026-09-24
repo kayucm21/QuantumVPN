@@ -14,5 +14,6 @@ class SubscriptionRefreshBootReceiver : BroadcastReceiver() {
         val ctx = context.applicationContext
         SubscriptionRefreshAlarms.reschedule(ctx)
         VpnScheduleAlarms.reschedule(ctx)
+        UpdateCheckAlarms.reschedule(ctx)
     }
 }

@@ -20,6 +20,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import android.view.WindowManager
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -34,7 +35,10 @@ import com.quantumvpn.ui.QuantumVpnApp
 import com.quantumvpn.ui.StartupSplashScreen
 import com.quantumvpn.ui.ThemeMode
 import com.quantumvpn.ui.theme.QuantumVpnTheme
+import com.quantumvpn.updates.SystemApkUpdateInstaller
+import com.quantumvpn.updates.UpdateCandidate
 import com.quantumvpn.updates.UpdateChannel
+import com.quantumvpn.updates.UpdateState
 import com.quantumvpn.vpn.VpnBatteryExemption
 import com.quantumvpn.vpn.VpnConnectionState
 import com.quantumvpn.vpn.VpnController
@@ -42,6 +46,9 @@ import com.quantumvpn.vpn.VpnScheduleAlarms
 import com.quantumvpn.widget.VpnToggleWidget
 import com.quantumvpn.widget.VpnWideWidget
 import androidx.lifecycle.lifecycleScope
+import java.io.File
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
@@ -60,6 +67,9 @@ class MainActivity : FragmentActivity() {
     private var lastSubscriptionRefreshMs = 0L
     private val updateController
         get() = (application as QuantumVpnApplication).container.updateController
+    private val systemApkInstaller by lazy { SystemApkUpdateInstaller(this) }
+    private var systemInstallFile: File? = null
+    private var systemDownloadActive = false
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -103,6 +113,8 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Блокировка скриншотов/записи экрана до отрисовки UI.
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -125,6 +137,7 @@ class MainActivity : FragmentActivity() {
             ) {
                 VpnScheduleAlarms.reschedule(this@MainActivity)
                 com.quantumvpn.vpn.SubscriptionRefreshAlarms.reschedule(this@MainActivity)
+                com.quantumvpn.vpn.UpdateCheckAlarms.reschedule(this@MainActivity)
             }
             LaunchedEffect(vpnState) {
                 VpnToggleWidget.requestUpdate(this@MainActivity)
@@ -159,12 +172,71 @@ class MainActivity : FragmentActivity() {
                 startupServersChecked = true
             }
             var splashDone by remember { mutableStateOf(false) }
-            LaunchedEffect(splashDone) {
-                if (splashDone) {
-                    kotlinx.coroutines.delay(750)
-                    updateController.checkOnce(UpdateChannel.Stable, autoDownload = false)
+            var updateGaveUp by remember { mutableStateOf(false) }
+            var autoInstallStarted by remember { mutableStateOf(false) }
+            var systemDownloadStarted by remember { mutableStateOf(false) }
+            // Только проверка на сплэше; качает системный DownloadManager → установщик Android.
+            LaunchedEffect(Unit) {
+                updateController.checkOnce(UpdateChannel.Stable, autoDownload = false)
+                kotlinx.coroutines.delay(90_000)
+                when (val s = updateController.state.value) {
+                    is UpdateState.Downloading,
+                    is UpdateState.Available,
+                    is UpdateState.Ready,
+                    is UpdateState.Checking,
+                    is UpdateState.RetryingViaVpn -> Unit
+                    is UpdateState.Failure -> {
+                        if (s.candidate == null) updateGaveUp = true
+                    }
+                    else -> updateGaveUp = true
                 }
             }
+            LaunchedEffect(updateState) {
+                when (val s = updateState) {
+                    is UpdateState.Available -> {
+                        if (!systemDownloadStarted) {
+                            systemDownloadStarted = true
+                            startSystemApkDownload(s.candidate)
+                        }
+                    }
+                    is UpdateState.Ready -> {
+                        if (!autoInstallStarted) {
+                            autoInstallStarted = true
+                            requestUpdateInstall()
+                        }
+                    }
+                    is UpdateState.Failure -> {
+                        val candidate = s.candidate
+                        if (candidate != null && !systemDownloadStarted && !splashDone) {
+                            systemDownloadStarted = true
+                            startSystemApkDownload(candidate)
+                        } else if (candidate != null && !splashDone) {
+                            // Last resort: open APK URL in browser so Chrome can finish the download.
+                            runCatching { systemApkInstaller.openInBrowser(candidate) }
+                            updateGaveUp = true
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+            LaunchedEffect(systemDownloadStarted, updateState) {
+                if (!systemDownloadStarted) return@LaunchedEffect
+                while (isActive && updateState is UpdateState.Downloading) {
+                    systemApkInstaller.pollProgress()
+                    delay(750)
+                }
+            }
+            val updateBlocking = when (val s = updateState) {
+                is UpdateState.Checking,
+                is UpdateState.RetryingViaVpn,
+                is UpdateState.Downloading,
+                is UpdateState.Available,
+                is UpdateState.Ready -> true
+                is UpdateState.Failure -> s.candidate != null && !updateGaveUp
+                is UpdateState.Idle -> !updateGaveUp
+                is UpdateState.UpToDate -> false
+            }
+            val updateSettled = !updateBlocking
             val darkTheme = if (!splashDone) {
                 true
             } else {
@@ -193,12 +265,9 @@ class MainActivity : FragmentActivity() {
                 highContrast = state.settings.highContrast,
                 dynamicColor = state.settings.useDynamicColor,
             ) {
-                LaunchedEffect(state.settings.flagSecure) {
-                    if (state.settings.flagSecure) {
-                        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                    } else {
-                        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                    }
+                // Скриншоты и запись экрана всегда заблокированы (FLAG_SECURE).
+                SideEffect {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
                 var previousVpn by remember { mutableStateOf<VpnConnectionState?>(null) }
                 LaunchedEffect(vpnState, state.settings.connectSoundEnabled, state.settings.quietMode) {
@@ -239,7 +308,7 @@ class MainActivity : FragmentActivity() {
                 }
                 if (!splashDone) {
                     StartupSplashScreen(
-                        ready = state.initialized && startupServersChecked,
+                        ready = state.initialized && startupServersChecked && updateSettled,
                         updateState = updateState,
                         availableServers = state.homeSelectorGroups.sumOf { it.items.size },
                         onFinished = { splashDone = true },
@@ -273,7 +342,14 @@ class MainActivity : FragmentActivity() {
                         onClearDnsCache = vpnController::clearDnsCache,
                         updateState = updateState,
                         onCheckUpdate = { channel -> updateController.check(channel) },
-                        onDownloadUpdate = updateController::download,
+                        onDownloadUpdate = {
+                            val candidate = when (val s = updateController.state.value) {
+                                is UpdateState.Available -> s.candidate
+                                is UpdateState.Failure -> s.candidate
+                                else -> null
+                            }
+                            if (candidate != null) startSystemApkDownload(candidate)
+                        },
                         onInstallUpdate = ::requestUpdateInstall,
                         onCancelUpdate = updateController::cancelAndDelete,
                         initialShortcut = pendingShortcut,
@@ -451,7 +527,13 @@ class MainActivity : FragmentActivity() {
 
     private fun launchUpdateInstaller() {
         try {
-            updateInstallerLauncher.launch(updateController.createInstallIntent())
+            val systemFile = systemInstallFile
+            val intent = if (systemFile != null && systemFile.isFile) {
+                systemApkInstaller.createInstallIntent(systemFile)
+            } else {
+                updateController.createInstallIntent()
+            }
+            updateInstallerLauncher.launch(intent)
         } catch (_: ActivityNotFoundException) {
             updateController.failInstallation("Системный установщик APK не найден.")
         } catch (_: SecurityException) {
@@ -459,6 +541,28 @@ class MainActivity : FragmentActivity() {
         } catch (error: Exception) {
             updateController.failInstallation(error.message ?: "Не удалось открыть системную установку.")
         }
+    }
+
+    private fun startSystemApkDownload(candidate: UpdateCandidate) {
+        if (systemDownloadActive) return
+        systemDownloadActive = true
+        systemInstallFile = null
+        updateController.beginSystemDownload(candidate)
+        systemApkInstaller.start(
+            candidate = candidate,
+            onProgress = { downloaded, total ->
+                updateController.reportSystemProgress(candidate, downloaded, total)
+            },
+            onReady = { file ->
+                systemDownloadActive = false
+                systemInstallFile = file
+                updateController.markReadyFromSystemFile(candidate, file)
+            },
+            onFailed = { message ->
+                systemDownloadActive = false
+                updateController.failSystemDownload(message, candidate)
+            },
+        )
     }
 }
 

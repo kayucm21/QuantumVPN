@@ -18,7 +18,9 @@ import com.quantumvpn.policy.ClientFeatureGate
 import com.quantumvpn.ui.UiSettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -35,6 +37,8 @@ class WifiAutoConnectCoordinator(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var registered = false
     private var lastPublicWifiPrompt: Pair<String, Long>? = null
+    private var lastTransport: String? = null
+    private var handoffJob: Job? = null
 
     fun start() {
         if (registered) return
@@ -54,6 +58,28 @@ class WifiAutoConnectCoordinator(
                 }
             },
         )
+        // Keep an established session aligned with the active physical network.
+        // Android's default-network callback is available from API 24 and does not
+        // require location permission. The short debounce avoids restarting twice
+        // while Android publishes Wi-Fi/LTE capabilities during a handover.
+        runCatching {
+            cm.registerDefaultNetworkCallback(
+                object : ConnectivityManager.NetworkCallback() {
+                    override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                        scope.launch { handleTransportChange(cm, capabilities) }
+                    }
+
+                    override fun onLost(network: Network) {
+                        scope.launch {
+                            delay(350)
+                            val active = cm.activeNetwork
+                            val capabilities = active?.let { cm.getNetworkCapabilities(it) }
+                            if (capabilities != null) handleTransportChange(cm, capabilities)
+                        }
+                    }
+                },
+            )
+        }
         cm.registerNetworkCallback(
             NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
@@ -164,6 +190,36 @@ class WifiAutoConnectCoordinator(
         val profileId = settings.activeProfileId ?: return
         eventJournal.append("cellular", "Автоподключение на mobile data")
         vpnController.start(profileId)
+    }
+
+    private suspend fun handleTransportChange(
+        cm: ConnectivityManager,
+        capabilities: NetworkCapabilities,
+    ) {
+        val transport = when {
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi‑Fi"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "мобильная сеть"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+            // The VPN itself can become Android's default network. It is not a
+            // physical handoff and must not trigger a restart loop.
+            else -> return
+        }
+        val previous = lastTransport
+        lastTransport = transport
+        if (previous.isNullOrBlank() || previous == transport) return
+        if (!ClientFeatureGate.features().autoFailover) return
+        val settings = settingsStore.settings.first()
+        if (!settings.autoFailoverEnabled) return
+        if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return
+        if (vpnController.state.value !is VpnConnectionState.Connected) return
+        handoffJob?.cancel()
+        handoffJob = scope.launch {
+            delay(900)
+            if (vpnController.state.value is VpnConnectionState.Connected) {
+                eventJournal.append("network", "Смена сети: $previous → $transport; переподключение")
+                vpnController.restartIfConnected("Автопереход $previous → $transport")
+            }
+        }
     }
 
     private companion object {

@@ -169,6 +169,14 @@
         </receiver>
 
         <receiver
+            android:name=".vpn.UpdateCheckReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.quantumvpn.action.CHECK_UPDATES" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
             android:name=".vpn.SubscriptionRefreshBootReceiver"
             android:exported="false">
             <intent-filter>

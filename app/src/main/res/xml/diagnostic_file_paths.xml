@@ -7,6 +7,12 @@
         name="updates"
         path="updates/" />
     <cache-path
+        name="updates-system"
+        path="updates-system/" />
+    <cache-path
         name="backups"
         path="backups/" />
+    <external-files-path
+        name="external_downloads"
+        path="Download/" />
 </paths>

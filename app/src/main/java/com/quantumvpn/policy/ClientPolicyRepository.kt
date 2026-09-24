@@ -37,7 +37,7 @@ class ClientPolicyRepository(
     val policy: StateFlow<ClientPolicy> = mutable.asStateFlow()
     private var loop: Job? = null
 
-    fun start(intervalMs: Long = 5_000L) {
+    fun start(intervalMs: Long = 3_000L) {
         if (baseUrl.isBlank()) return
         if (loop?.isActive == true) return
         loop = scope.launch(Dispatchers.IO) {
@@ -115,7 +115,11 @@ class ClientPolicyRepository(
                 vpnSchedule = featuresObj?.optBoolean("vpn_schedule", true) ?: true,
                 autoFailover = featuresObj?.optBoolean("auto_failover", true) ?: true,
                 safeMode = featuresObj?.optBoolean("safe_mode", true) ?: true,
-                stealthMode = featuresObj?.optBoolean("stealth_mode", true) ?: true,
+                stealthMode = run {
+                    val stealth = featuresObj?.optBoolean("stealth_mode", true) ?: true
+                    val selfsteal = featuresObj?.optBoolean("selfsteal", true) ?: true
+                    stealth || selfsteal
+                },
                 carrierBypass = featuresObj?.optBoolean("carrier_bypass", true) ?: true,
             )
             return ClientPolicy(

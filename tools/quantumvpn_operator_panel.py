@@ -267,6 +267,13 @@ def conn():
                 "telegram_chat_id": "",
                 "telegram_alerts_enabled": "0",
                 "telegram_backups_enabled": "0",
+                "latency_optimization_enabled": "1",
+                "latency_probe_interval": "30",
+                "latency_max_ms": "120",
+                "latency_probe_targets": "1.1.1.1:443,8.8.8.8:443",
+                "latency_state": "unknown",
+                "latency_last_probe": "0",
+                "latency_best_ms": "0",
                 "rate_limit_per_min": "120",
             }
             for key, value in defaults.items():
@@ -593,6 +600,72 @@ def health_worker():
         except Exception:
             pass
         time.sleep(60)
+
+
+def parse_latency_targets(raw: str):
+    targets = []
+    for item in (raw or "").replace(";", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        host, sep, port = item.rpartition(":")
+        if not sep:
+            host, port = item, "443"
+        host = host.strip("[] ")
+        try:
+            port = max(1, min(65535, int(port)))
+        except Exception:
+            continue
+        if host and len(host) <= 253:
+            targets.append((host, port))
+    return targets[:8]
+
+
+def probe_tcp_latency(host: str, port: int):
+    started = time.monotonic()
+    sock = None
+    try:
+        sock = socket.create_connection((host, port), timeout=3)
+        return {"ok": True, "latency_ms": round((time.monotonic() - started) * 1000), "status": f"tcp:{port}"}
+    except Exception as exc:
+        return {"ok": False, "latency_ms": 0, "error": str(exc)}
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def latency_worker():
+    """Measure the VDS egress path without requiring raw ICMP privileges."""
+    while True:
+        interval = 30
+        try:
+            db = conn()
+            s = settings(db)
+            interval = max(15, min(300, int(s.get("latency_probe_interval", "30") or 30)))
+            if enabled(s, "latency_optimization_enabled", True):
+                targets = parse_latency_targets(s.get("latency_probe_targets", ""))
+                samples = []
+                for host, port in targets:
+                    result = probe_tcp_latency(host, port)
+                    record_health(db, f"latency:{host}:{port}", result)
+                    if result.get("ok"):
+                        samples.append(int(result.get("latency_ms") or 0))
+                max_ms = max(20, min(5000, int(s.get("latency_max_ms", "120") or 120)))
+                best = min(samples) if samples else 0
+                state = "healthy" if samples and best <= max_ms else ("degraded" if samples else "offline")
+                set_settings(db, {
+                    "latency_state": state,
+                    "latency_last_probe": str(int(time.time())),
+                    "latency_best_ms": str(best),
+                })
+                db.commit()
+            db.close()
+        except Exception:
+            time.sleep(5)
+        time.sleep(interval)
 
 
 def promote_scheduled_release(db, now=None):
@@ -1009,7 +1082,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     telegram_token = s.get("telegram_bot_token", "") if role_at_least(actor_role, "operator") else ""
     monitor_db = conn()
     try:
-        monitor_rows = health_snapshot(monitor_db)
+        monitor_rows = health_snapshot(monitor_db, limit=200)
     finally:
         monitor_db.close()
     latest_monitor = {}
@@ -1020,6 +1093,10 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         f"<td>{row['latency_ms']} ms</td><td>{time.strftime('%d.%m %H:%M', time.localtime(row['ts']))}</td></tr>"
         for target, row in sorted(latest_monitor.items())
     ) or "<tr><td colspan=4>Первый автоматический замер выполняется…</td></tr>"
+    latency_rows = [row for row in monitor_rows if str(row.get("target", "")).startswith("latency:")]
+    latency_best = min((int(row.get("latency_ms") or 0) for row in latency_rows if row.get("ok")), default=0)
+    latency_state = s.get("latency_state") or "unknown"
+    latency_label = {"healthy": "стабильно", "degraded": "нестабильно", "offline": "нет ответа"}.get(latency_state, "ожидание")
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <title>Quantum Control</title><style>{css()}</style><main>
     <section class=hero>
@@ -1035,6 +1112,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a href="/operator?tab=devices">Устройства</a>
         <a href="/operator?tab=users">Юзеры</a>
         <a href="/operator?tab=security">Безопасность</a>
+        <a href="/operator?tab=latency">Задержка</a>
         {('<a href="/operator?tab=admins">Администраторы</a>' if role_at_least(actor_role, 'owner') else '')}
         <a href="/operator?tab=audit">Аудит</a>
         <a href="/operator/logs.txt">Логи</a>
@@ -1073,6 +1151,11 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <div class=card><h2>Автомониторинг серверов</h2>
           <p class=muted>Проверка upstream и сервисов каждые 60 секунд. История хранится 7 дней.</p>
           <table><thead><tr><th>Цель</th><th>Статус</th><th>Пинг</th><th>Последняя проверка</th></tr></thead><tbody>{monitor_html}</tbody></table>
+        </div>
+        <div class=card><h2>Оптимизация задержки</h2>
+          <p>Состояние: <b class={'ok' if latency_state=='healthy' else 'off'}>{latency_label}</b></p>
+          <p>Лучший TCP‑замер: <b>{latency_best or s.get('latency_best_ms','0')} ms</b> · порог {html.escape(s.get('latency_max_ms','120'))} ms</p>
+          <p class=muted>Замеры выполняются с VDS каждые {html.escape(s.get('latency_probe_interval','30'))} с. Это помогает выбирать стабильный маршрут, но не меняет физическую задержку между пользователем и VDS.</p>
         </div>
       </div>
     </section>
@@ -1127,6 +1210,21 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label>feature_ab_json<textarea name=feature_ab_json rows=10>{html.escape(s.get('feature_ab_json','{{}}'))}</textarea></label>
         <button>Сохранить A/B</button>
       </form>
+    </section>
+
+    <section class=grid {show('latency')}>
+      <form class=card method=post action=/operator/policy><input type=hidden name=section value=latency>
+        <h2>Низкая задержка и стабильность</h2>
+        <label><input type=checkbox name=latency_optimization_enabled {checked('latency_optimization_enabled')}> Включить автоматический мониторинг</label>
+        <label>Интервал проверки, секунд<input type=number name=latency_probe_interval min=15 max=300 value="{html.escape(s.get('latency_probe_interval','30'))}"></label>
+        <label>Порог деградации, мс<input type=number name=latency_max_ms min=20 max=5000 value="{html.escape(s.get('latency_max_ms','120'))}"></label>
+        <label>TCP‑цели (host:port, через запятую)<textarea name=latency_probe_targets>{html.escape(s.get('latency_probe_targets','1.1.1.1:443,8.8.8.8:443'))}</textarea></label>
+        <p class=muted>Панель исключает только недоступные/нестабильные направления из рекомендаций. Для реального снижения 150–200 мс нужен VDS ближе к пользователям или дополнительная нода в другом регионе.</p>
+        <button>Сохранить оптимизацию</button>
+      </form>
+      <section class=card><h2>Последние TCP‑замеры</h2>
+        <table><thead><tr><th>Цель</th><th>Статус</th><th>Задержка</th><th>Время</th></tr></thead><tbody>{monitor_html}</tbody></table>
+      </section>
     </section>
 
     <section class=grid {show('release')}>
@@ -1611,6 +1709,13 @@ class App(BaseHTTPRequestHandler):
                 "features": features,
                 "nodes_recommended": [x.strip() for x in (s.get("nodes_recommended") or "").split(",") if x.strip()],
                 "nodes_forbidden": [x.strip() for x in (s.get("nodes_forbidden") or "").split(",") if x.strip()],
+                "latency_optimization": {
+                    "enabled": enabled(s, "latency_optimization_enabled", True),
+                    "probe_interval_seconds": max(15, min(300, int(s.get("latency_probe_interval", "30") or 30))),
+                    "max_ms": max(20, min(5000, int(s.get("latency_max_ms", "120") or 120))),
+                    "state": s.get("latency_state") or "unknown",
+                    "best_ms": int(s.get("latency_best_ms", "0") or 0),
+                },
                 "min_version_code": min_vc,
                 "force_update": force_update,
                 "force_update_message": s.get("force_update_message") or "",
@@ -2146,6 +2251,22 @@ class App(BaseHTTPRequestHandler):
             except Exception:
                 return self.reply(400, '{"error":"invalid_ab_json"}')
             values = {"feature_ab_json": raw[:4000]}
+        elif section == "latency":
+            tab = "latency"
+            try:
+                probe_interval = max(15, min(300, int(form.get("latency_probe_interval", ["30"])[0])))
+                max_latency = max(20, min(5000, int(form.get("latency_max_ms", ["120"])[0])))
+            except Exception:
+                return self.reply(400, '{"error":"invalid_latency_settings"}')
+            targets = ",".join(f"{host}:{port}" for host, port in parse_latency_targets(form.get("latency_probe_targets", [""])[0]))
+            if not targets:
+                return self.reply(400, '{"error":"latency_targets_required"}')
+            values = {
+                "latency_optimization_enabled": "1" if "latency_optimization_enabled" in form else "0",
+                "latency_probe_interval": str(probe_interval),
+                "latency_max_ms": str(max_latency),
+                "latency_probe_targets": targets,
+            }
         elif section == "security":
             tab = "security"
             try:
@@ -2175,7 +2296,7 @@ class App(BaseHTTPRequestHandler):
         else:
             return self.reply(400, '{"error":"unknown_section"}')
 
-        if section in ("service", "features", "nodes", "ab", "release") and any(current.get(k) != v for k, v in values.items()):
+        if section in ("service", "features", "nodes", "ab", "latency", "release") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)
         changes = {k: {"before": current.get(k), "after": v} for k, v in values.items() if current.get(k) != v}
         set_settings(db, values)
@@ -2193,6 +2314,7 @@ def main():
     bind = os.environ.get("QV_BIND", "0.0.0.0")
     threading.Thread(target=alert_worker, daemon=True).start()
     threading.Thread(target=hourly_backup_worker, daemon=True).start()
+    threading.Thread(target=latency_worker, daemon=True).start()
     threading.Thread(target=health_worker, daemon=True).start()
     threading.Thread(target=scheduled_release_worker, daemon=True).start()
     try:

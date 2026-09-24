@@ -212,6 +212,16 @@ def conn():
                     created_at integer not null default 0,
                     updated_at integer not null default 0
                 );
+                create table if not exists incidents (
+                    id integer primary key autoincrement,
+                    opened_at integer not null,
+                    closed_at integer not null default 0,
+                    severity text not null default 'warning',
+                    source text not null,
+                    title text not null,
+                    detail text not null default '',
+                    dedupe_key text not null
+                );
                 create index if not exists idx_events_device on events(device);
                 create index if not exists idx_events_kind_ts on events(kind, ts);
                 create index if not exists idx_events_ts on events(ts);
@@ -219,6 +229,8 @@ def conn():
                 create index if not exists idx_donations_ts on donations(ts);
                 create index if not exists idx_donations_device on donations(device);
                 create index if not exists idx_server_health_ts on server_health(ts);
+                create index if not exists idx_incidents_open on incidents(closed_at, opened_at);
+                create index if not exists idx_incidents_key on incidents(dedupe_key, closed_at);
                 """
             )
             defaults = {
@@ -278,6 +290,10 @@ def conn():
                 "latency_last_probe": "0",
                 "latency_best_ms": "0",
                 "rate_limit_per_min": "120",
+                "webhook_enabled": "0",
+                "webhook_url": "",
+                "webhook_secret": "",
+                "webhook_events": "incident,release,maintenance,diagnostic",
             }
             for key, value in defaults.items():
                 db.execute("insert or ignore into settings values (?,?)", (key, value))
@@ -587,17 +603,137 @@ def health_snapshot(db, limit=24):
     return [dict(row) for row in rows]
 
 
+def webhook_emit(s, event: str, payload: dict):
+    """Send a signed, opt-in event to the operator's HTTPS webhook.
+
+    Webhooks are deliberately disabled by default and only accept HTTPS URLs so
+    an accidental panel setting cannot turn the server into an HTTP/metadata
+    proxy. Delivery is best-effort; the incident and audit records remain the
+    source of truth when a receiver is unavailable.
+    """
+    if not enabled(s, "webhook_enabled", False):
+        return False
+    url = (s.get("webhook_url") or "").strip()
+    if not url.lower().startswith("https://") or len(url) > 2048:
+        return False
+    allowed = {x.strip().lower() for x in (s.get("webhook_events") or "").split(",") if x.strip()}
+    if allowed and "all" not in allowed and event.lower() not in allowed:
+        return False
+    body = json.dumps(
+        {"event": event, "ts": int(time.time()), "panel_build": PANEL_BUILD, "payload": payload},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": f"QuantumControl/{PANEL_BUILD}",
+        "X-Quantum-Event": event[:80],
+    }
+    secret = (s.get("webhook_secret") or "").strip()
+    if secret:
+        headers["X-Quantum-Signature"] = "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    try:
+        with urlopen(Request(url, data=body, headers=headers, method="POST"), timeout=8) as response:
+            return 200 <= response.status < 300
+    except Exception:
+        return False
+
+
+def incident_open(db, dedupe_key: str, severity: str, source: str, title: str, detail: str, settings_snapshot=None):
+    """Open one incident per dedupe key and notify only on the transition."""
+    active = db.execute(
+        "select id from incidents where dedupe_key=? and closed_at=0 order by id desc limit 1",
+        (dedupe_key,),
+    ).fetchone()
+    if active:
+        return False
+    now = int(time.time())
+    db.execute(
+        "insert into incidents(opened_at,closed_at,severity,source,title,detail,dedupe_key) values (?,?,?,?,?,?,?)",
+        (now, 0, severity[:20], source[:80], title[:240], detail[:1000], dedupe_key[:160]),
+    )
+    db.execute(
+        "insert into events values (?,?,?,?,?)",
+        (now, "incident_opened", source[:80], "", json.dumps({"key": dedupe_key, "title": title, "detail": detail}, ensure_ascii=False)),
+    )
+    if settings_snapshot is not None:
+        webhook_emit(settings_snapshot, "incident.opened", {"key": dedupe_key, "severity": severity, "source": source, "title": title, "detail": detail})
+    return True
+
+
+def incident_close(db, dedupe_key: str, settings_snapshot=None):
+    rows = db.execute(
+        "select id,source,title from incidents where dedupe_key=? and closed_at=0",
+        (dedupe_key,),
+    ).fetchall()
+    if not rows:
+        return False
+    now = int(time.time())
+    db.execute("update incidents set closed_at=? where dedupe_key=? and closed_at=0", (now, dedupe_key))
+    db.execute(
+        "insert into events values (?,?,?,?,?)",
+        (now, "incident_closed", "operator", "", json.dumps({"key": dedupe_key}, ensure_ascii=False)),
+    )
+    if settings_snapshot is not None:
+        webhook_emit(settings_snapshot, "incident.closed", {"key": dedupe_key, "source": rows[0][1], "title": rows[0][2]})
+    return True
+
+
+def report_snapshot(db):
+    """Return a compact, exportable 24-hour operations report for the panel."""
+    now = int(time.time())
+    since = now - 86400
+    events = db.execute(
+        "select kind,count(*) from events where ts>? group by kind order by kind",
+        (since,),
+    ).fetchall()
+    health = db.execute(
+        "select count(*), coalesce(sum(ok),0), coalesce(avg(nullif(latency_ms,0)),0) from server_health where ts>?",
+        (since,),
+    ).fetchone()
+    devices = db.execute(
+        "select count(distinct device) from events where ts>? and device!=''",
+        (since,),
+    ).fetchone()[0]
+    open_count = db.execute("select count(*) from incidents where closed_at=0").fetchone()[0]
+    return {
+        "generated_at": now,
+        "window": "24h",
+        "events": {str(kind): int(count) for kind, count in events},
+        "devices_seen": int(devices or 0),
+        "health_checks": int(health[0] or 0),
+        "health_ok": int(health[1] or 0),
+        "health_uptime_percent": round((int(health[1] or 0) / int(health[0] or 1)) * 100, 1),
+        "average_latency_ms": round(float(health[2] or 0), 1),
+        "open_incidents": int(open_count or 0),
+    }
+
+
 def health_worker():
     """Check the subscription upstream and local VPN services periodically."""
     while True:
         try:
             db = conn()
+            s = settings(db)
             upstream = probe_upstream()
             record_health(db, "subscription_upstream", upstream)
+            if upstream.get("ok"):
+                incident_close(db, "upstream", s)
+            else:
+                incident_open(db, "upstream", "critical", "subscription_upstream", "Подписка недоступна", str(upstream.get("error") or "нет ответа"), s)
             services = service_status()
             for target in ("rospanel", "xray", "operator"):
                 value = services.get(target, "unknown")
                 record_health(db, target, {"ok": value in ("active", "running", "ok"), "status": value})
+                key = f"service:{target}"
+                if value in ("active", "running", "ok"):
+                    incident_close(db, key, s)
+                else:
+                    incident_open(db, key, "critical", target, f"Сервис {target} недоступен", f"status={value}", s)
+            if services.get("disk_used_pct", 0) >= 90:
+                incident_open(db, "disk", "warning", "disk", "Заканчивается место на диске", f"used={services.get('disk_used_pct')}%", s)
+            else:
+                incident_close(db, "disk", s)
             db.commit()
             db.close()
         except Exception:
@@ -718,6 +854,7 @@ def promote_scheduled_release(db, now=None):
         (now, "release_promoted", "operator", "", json.dumps({"version": version, "version_code": code}, ensure_ascii=False)),
     )
     db.commit()
+    webhook_emit(settings(db), "release.promoted", {"version": version, "version_code": code, "rollout_percent": rollout})
     release_info.cache_clear()
     return True
 
@@ -963,7 +1100,7 @@ def css():
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#103b47,#050b16 55%);color:var(--text);font:15px/1.45 "Segoe UI",system-ui,sans-serif}
     main{max-width:1280px;margin:auto;padding:24px 16px 72px}.hero,.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 16px 40px #0004}
     .hero{background:linear-gradient(135deg,#0d3140,#091222)}h1{margin:4px 0;font-size:30px}h2{margin:0 0 12px;font-size:18px}
-    .accent,.ok{color:var(--ok)}.off{color:var(--off)}.muted{color:var(--muted)}
+    .accent,.ok{color:var(--ok)}.off{color:var(--off)}.warn{color:#ffd27f}.muted{color:var(--muted)}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}.grid .card{margin:0}
     .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.stat{background:#07121f;border:1px solid #1d3546;border-radius:14px;padding:12px}
     .stat b{display:block;font-size:22px;margin-top:4px}label{display:block;margin:10px 0}
@@ -1086,6 +1223,10 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     monitor_db = conn()
     try:
         monitor_rows = health_snapshot(monitor_db, limit=200)
+        incident_rows = [dict(row) for row in monitor_db.execute(
+            "select id,opened_at,closed_at,severity,source,title,detail,dedupe_key from incidents order by closed_at asc, opened_at desc limit 200"
+        ).fetchall()]
+        report = report_snapshot(monitor_db)
     finally:
         monitor_db.close()
     latest_monitor = {}
@@ -1100,6 +1241,24 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     latency_best = min((int(row.get("latency_ms") or 0) for row in latency_rows if row.get("ok")), default=0)
     latency_state = s.get("latency_state") or "unknown"
     latency_label = {"healthy": "стабильно", "degraded": "нестабильно", "offline": "нет ответа"}.get(latency_state, "ожидание")
+    def incident_row(item):
+        close = "—"
+        if not item["closed_at"]:
+            close = (
+                "<form method=post action=/operator/actions>"
+                "<input type=hidden name=action value=close_incident>"
+                f"<input type=hidden name=incident_key value=\"{html.escape(item['dedupe_key'], quote=True)}\">"
+                "<button class=secondary>Закрыть</button></form>"
+            )
+        state = "активен" if not item["closed_at"] else time.strftime("%d.%m %H:%M", time.localtime(item["closed_at"]))
+        return (
+            f"<tr><td>{time.strftime('%d.%m %H:%M', time.localtime(item['opened_at']))}</td>"
+            f"<td class={'off' if item['severity']=='critical' else 'warn'}>{html.escape(item['severity'])}</td>"
+            f"<td>{html.escape(item['source'])}</td><td><b>{html.escape(item['title'])}</b><br><span class=muted>{html.escape(item['detail'][:260])}</span></td>"
+            f"<td>{state}</td><td>{close}</td></tr>"
+        )
+    incident_html = "".join(incident_row(item) for item in incident_rows) or "<tr><td colspan=6>Инцидентов пока нет</td></tr>"
+    webhook_events = html.escape(s.get("webhook_events", "incident,release,maintenance,diagnostic"))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <title>Quantum Control</title><style>{css()}</style><main>
     <section class=hero>
@@ -1115,6 +1274,9 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a href="/operator?tab=donations">Пожертвования</a>
         <a href="/operator?tab=devices">Устройства</a>
         <a href="/operator?tab=users">Юзеры</a>
+        <a href="/operator?tab=incidents">Инциденты</a>
+        <a href="/operator?tab=reports">Отчёты</a>
+        <a href="/operator?tab=integrations">Интеграции</a>
         <a href="/operator?tab=security">Безопасность</a>
         <a href="/operator?tab=latency">Задержка</a>
         {('<a href="/operator?tab=admins">Администраторы</a>' if role_at_least(actor_role, 'owner') else '')}
@@ -1330,6 +1492,50 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <p class=muted>Активны {summary.get('active')} · отключены {summary.get('disabled')} · истекли {summary.get('expired')} · онлайн 15м {summary.get('online_15m')}</p>
       <table><thead><tr><th>Имя</th><th>Статус</th><th>State</th><th>Трафик</th><th>Expire</th><th>Seen</th><th></th></tr></thead>
       <tbody>{subscribers}</tbody></table>
+    </section>
+
+    <section class=card {show('incidents')}>
+      <h2>Центр инцидентов</h2>
+      <p class=muted>Панель автоматически открывает инцидент при отказе подписки, RosPanel, Xray, Operator или диске и закрывает его после восстановления.</p>
+      <div class=stats>
+        <div class=stat>Активные инциденты<b class={'off' if report['open_incidents'] else 'ok'}>{report['open_incidents']}</b></div>
+        <div class=stat>Проверки за 24ч<b>{report['health_checks']}</b></div>
+        <div class=stat>Успешность<b class=ok>{report['health_uptime_percent']}%</b></div>
+        <div class=stat>Средний замер<b>{report['average_latency_ms']} ms</b></div>
+      </div>
+      <table style="margin-top:14px"><thead><tr><th>Открыт</th><th>Уровень</th><th>Источник</th><th>Событие</th><th>Состояние</th><th></th></tr></thead><tbody>{incident_html}</tbody></table>
+    </section>
+
+    <section class=card {show('reports')}>
+      <h2>Суточный отчёт</h2>
+      <p class=muted>Сводка панели за последние 24 часа. Отчёт формируется на VDS и не включает содержимое пользовательских логов.</p>
+      <div class=stats>
+        <div class=stat>Устройства<b>{report['devices_seen']}</b></div>
+        <div class=stat>Health checks<b>{report['health_checks']}</b></div>
+        <div class=stat>Ошибки health<b class={'ok' if report['health_checks'] == report['health_ok'] else 'off'}>{report['health_checks'] - report['health_ok']}</b></div>
+        <div class=stat>Активные инциденты<b class={'off' if report['open_incidents'] else 'ok'}>{report['open_incidents']}</b></div>
+      </div>
+      <table style="margin-top:14px"><thead><tr><th>Тип события</th><th>Количество</th></tr></thead><tbody>{''.join(f'<tr><td>{html.escape(k)}</td><td>{v}</td></tr>' for k,v in sorted(report['events'].items())) or '<tr><td colspan=2>Нет событий</td></tr>'}</tbody></table>
+      <div class=actions style="margin-top:14px"><a class="button secondary" href="/operator/report.txt">Скачать TXT</a><a class="button secondary" href="/operator/report.json">Скачать JSON</a></div>
+    </section>
+
+    <section class=grid {show('integrations')}>
+      <form class=card method=post action=/operator/policy><input type=hidden name=section value=webhooks>
+        <h2>Вебхуки событий</h2>
+        <p class=muted>Панель отправляет подписанные JSON-события только на HTTPS URL. Секрет хранится локально и не показывается в интерфейсе.</p>
+        <label><input type=checkbox name=webhook_enabled {checked('webhook_enabled')}> Включить вебхук</label>
+        <label>HTTPS URL<input type=url name=webhook_url value="{html.escape(s.get('webhook_url',''))}" placeholder="https://example.com/quantum-events"></label>
+        <label>Секрет подписи<input type=password name=webhook_secret value="" placeholder="Оставьте пустым, чтобы сохранить текущий"></label>
+        <label>События через запятую<input name=webhook_events value="{webhook_events}" placeholder="incident,release,maintenance,diagnostic"></label>
+        <div class=actions><button>Сохранить</button><button class=secondary formaction=/operator/actions name=action value=test_webhook>Тест вебхука</button></div>
+        <p class=muted>Заголовок подписи: <code>X-Quantum-Signature: sha256=…</code>. Для всех событий укажите <code>all</code>.</p>
+      </form>
+      <section class=card><h2>Последние события для интеграции</h2>
+        <p>Инциденты: <b class={'off' if report['open_incidents'] else 'ok'}>{report['open_incidents']} активных</b></p>
+        <p>Релизы за 24ч: <b>{report['events'].get('release_promoted',0)}</b></p>
+        <p>Добровольные диагностики: <b>{report['events'].get('voluntary_diagnostic',0)}</b></p>
+        <p class=muted>Если получатель временно недоступен, записи остаются в центре инцидентов и аудите.</p>
+      </section>
     </section>
 
     <section class=grid {show('security')}>
@@ -1785,6 +1991,36 @@ class App(BaseHTTPRequestHandler):
             )
             return self.reply(200, body or "No logs", "text/plain; charset=utf-8")
 
+        if path in ("/operator/report.txt", "/operator/report.json"):
+            adm = self.admin()
+            if not adm:
+                return
+            report = report_snapshot(db)
+            if path.endswith(".json"):
+                return self.reply(
+                    200,
+                    json.dumps(report, ensure_ascii=False, indent=2),
+                    "application/json; charset=utf-8",
+                    {"Content-Disposition": 'attachment; filename="quantum-control-report.json"'},
+                )
+            lines = [
+                "Quantum Control — суточный отчёт",
+                f"Сформирован: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(report['generated_at']))}",
+                f"Устройства за 24ч: {report['devices_seen']}",
+                f"Health checks: {report['health_checks']} (успешно {report['health_ok']}, {report['health_uptime_percent']}%)",
+                f"Средняя задержка: {report['average_latency_ms']} ms",
+                f"Активные инциденты: {report['open_incidents']}",
+                "",
+                "События:",
+            ]
+            lines.extend(f"- {kind}: {count}" for kind, count in sorted(report["events"].items()))
+            return self.reply(
+                200,
+                "\n".join(lines) + "\n",
+                "text/plain; charset=utf-8",
+                {"Content-Disposition": 'attachment; filename="quantum-control-report.txt"'},
+            )
+
         if path == "/operator":
             adm = self.admin()
             if not adm:
@@ -1992,6 +2228,11 @@ class App(BaseHTTPRequestHandler):
                     (dev, "", 0, "", int(time.time())),
                 )
                 db.commit()
+                webhook_emit(
+                    settings(db),
+                    "diagnostic.received",
+                    {"device": dev, "ip": ip, "last_error": str(payload.get("last_error", ""))[:400]},
+                )
                 return self.reply(201, '{"ok":true}')
             except Exception:
                 return self.reply(400, '{"error":"invalid_report"}')
@@ -2104,6 +2345,13 @@ class App(BaseHTTPRequestHandler):
                 ok = telegram_send_document(s, archive, f"Quantum Control: ручная резервная копия {time.strftime('%Y-%m-%d %H:%M UTC')}")
                 flash = "Backup отправлен в Telegram" if ok else "Backup создан локально, Telegram недоступен"
                 audit(db, actor, ip, "backup_now", {"ok": ok, "file": os.path.basename(archive)})
+            elif action == "test_webhook":
+                ok = webhook_emit(s, "webhook.test", {"actor": actor, "message": "Quantum Control webhook is working"})
+                flash = "Вебхук OK" if ok else "Вебхук не доставлен: проверьте HTTPS URL, секрет и ответ получателя"
+            elif action == "close_incident":
+                key = (form.get("incident_key", [""])[0] or "").strip()[:160]
+                ok = bool(key) and incident_close(db, key, s)
+                flash = "Инцидент закрыт" if ok else "Активный инцидент не найден"
             elif action == "restart_operator":
                 audit(db, actor, ip, "restart_operator", {})
                 db.commit()
@@ -2333,12 +2581,30 @@ class App(BaseHTTPRequestHandler):
                 "telegram_bot_token": form.get("telegram_bot_token", [""])[0][:200],
                 "telegram_chat_id": form.get("telegram_chat_id", [""])[0][:64],
             }
+        elif section == "webhooks":
+            tab = "integrations"
+            url = (form.get("webhook_url", [""])[0] or "").strip()[:2048]
+            if url and not url.lower().startswith("https://"):
+                return self.reply(400, '{"error":"webhook_https_required"}')
+            events = []
+            for item in (form.get("webhook_events", [""])[0] or "").split(","):
+                item = item.strip().lower()
+                if item and re.fullmatch(r"[a-z][a-z0-9_.-]{0,48}", item) and item not in events:
+                    events.append(item)
+            secret = form.get("webhook_secret", [""])[0]
+            values = {
+                "webhook_enabled": "1" if "webhook_enabled" in form else "0",
+                "webhook_url": url,
+                "webhook_secret": secret[:256] if secret else current.get("webhook_secret", ""),
+                "webhook_events": ",".join(events)[:500],
+            }
         else:
             return self.reply(400, '{"error":"unknown_section"}')
 
         if section in ("service", "features", "nodes", "ab", "branding", "latency", "release") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)
         changes = {k: {"before": current.get(k), "after": v} for k, v in values.items() if current.get(k) != v}
+        maintenance_before = effective_maintenance(current)
         set_settings(db, values)
         db.execute(
             "insert into events values (?,?,?,?,?)",
@@ -2346,6 +2612,16 @@ class App(BaseHTTPRequestHandler):
         )
         audit(db, actor, ip, f"policy:{section}", changes)
         db.commit()
+        if section == "service":
+            updated = dict(current)
+            updated.update(values)
+            maintenance_after = effective_maintenance(updated)
+            if maintenance_before != maintenance_after:
+                webhook_emit(
+                    updated,
+                    "maintenance.changed",
+                    {"enabled": maintenance_after, "actor": actor, "message": updated.get("maintenance_message", "")[:400]},
+                )
         return self.redirect_operator(tab, "Сохранено")
 
 

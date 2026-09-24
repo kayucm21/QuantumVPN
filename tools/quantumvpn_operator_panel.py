@@ -45,10 +45,10 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://tepacom.o190.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://tepacom.o190.com:8443").rstrip("/")
-PANEL_BUILD = "5.9.0"
-VERSION = "5.9.0"
-VERSION_CODE = 115
-DEFAULT_NOTE = "QuantumVPN 5.9.0: Horizon Glass, индекс приватности, режим поездки и живая карта серверов."
+PANEL_BUILD = "5.9.1"
+VERSION = "5.9.1"
+VERSION_CODE = 116
+DEFAULT_NOTE = "QuantumVPN 5.9.1: Horizon Glass 2026 с адаптивными цветами и живой стеклянной навигацией."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()
@@ -529,6 +529,9 @@ def promote_scheduled_release(db, now=None):
         "app_changelog": note[:1000],
         "min_version_code": str(min_code),
         "update_notifications_enabled": "1",
+        "announce": f"Доступен QuantumVPN {version}: Horizon Glass 2026 и адаптивное оформление.",
+        "announce_en": f"QuantumVPN {version} is available: Horizon Glass 2026 and adaptive theming.",
+        "force_update_message": f"Доступно обновление QuantumVPN {version}.",
         "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
         "release_schedule_enabled": "0",
     })

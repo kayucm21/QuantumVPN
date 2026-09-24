@@ -13,7 +13,7 @@ password = os.environ.get("QVPN_VDS_PASSWORD")
 if not password:
     raise SystemExit("QVPN_VDS_PASSWORD is required")
 root = Path(__file__).resolve().parents[1]
-version = "5.9.0"
+version = "5.9.1"
 
 def connect():
     for attempt in range(6):
@@ -42,7 +42,9 @@ files = {
     root / f"artifacts/{version}/RELEASE_NOTES.md": "/tmp/RELEASE_NOTES.md",
     root / f"artifacts/{version}/update.html": "/tmp/update.html",
     root / "tools/quantumvpn_operator_panel.py": "/tmp/quantumvpn_operator_panel.py",
-    root / f"tools/deploy-operator-{version}.sh": f"/tmp/deploy-operator-{version}.sh",
+    # The reusable local script keeps the historical filename; its internal
+    # version is updated alongside the APK release.
+    root / "tools/deploy-operator-5.9.0.sh": f"/tmp/deploy-operator-{version}.sh",
     root / "tools/setup-nginx-downloads.sh": "/tmp/setup-nginx-downloads.sh",
 }
 with client.open_sftp() as sftp:

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version='5.9.0'
-version_code='115'
+version='5.9.1'
+version_code='116'
 release="/var/www/quantumvpn/downloads/$version"
 
 python3 -m py_compile /tmp/quantumvpn_operator_panel.py
@@ -36,14 +36,14 @@ ENV=/etc/quantumvpn-operator.env
 grep -q '^QV_DOWNLOAD_BASE=' "$ENV" && sed -i 's|^QV_DOWNLOAD_BASE=.*|QV_DOWNLOAD_BASE=https://tepacom.o190.com:8443|' "$ENV" || echo 'QV_DOWNLOAD_BASE=https://tepacom.o190.com:8443' >>"$ENV"
 if [[ -f /tmp/setup-nginx-downloads.sh ]]; then bash /tmp/setup-nginx-downloads.sh || true; fi
 
-# Upload new APKs now, but keep 5.8.0 production until the next 17:00 Moscow time.
+# Upload new APKs now, but keep 5.8.0 production until the next 21:00 Moscow time.
 python3 - "$version" "$version_code" <<'PY'
 import datetime, sqlite3, sys, time
 from zoneinfo import ZoneInfo
 version, version_code = sys.argv[1:3]
 tz = ZoneInfo("Europe/Moscow")
 now = datetime.datetime.now(tz)
-target = now.replace(hour=17, minute=0, second=0, microsecond=0)
+target = now.replace(hour=21, minute=0, second=0, microsecond=0)
 if target <= now:
     target += datetime.timedelta(days=1)
 publish_at = int(target.timestamp())
@@ -55,8 +55,11 @@ values = {
     "scheduled_app_version_code": version_code,
     "scheduled_rollout_percent": "100",
     "scheduled_min_version_code": "0",
-    "scheduled_app_changelog": "Horizon Glass 2026; индекс приватности; режим поездки; живая карта серверов; умная батарея; история серверов.",
+    "scheduled_app_changelog": "Horizon Glass 2026; адаптивные цвета; индекс приватности; режим поездки; живая карта серверов; умная батарея; история серверов.",
     "update_notifications_enabled": "1",
+    "announce": "Сегодня в 21:00 по МСК доступно обновление QuantumVPN 5.9.1 с новым Horizon Glass дизайном.",
+    "announce_en": "QuantumVPN 5.9.1 with the new Horizon Glass design will be available at 21:00 Moscow time.",
+    "force_update_message": "Сегодня в 21:00 по МСК будет доступно обновление QuantumVPN 5.9.1.",
 }
 for key, value in values.items():
     db.execute("insert or replace into settings(key,value) values (?,?)", (key, value))
@@ -68,7 +71,7 @@ PY
 
 systemctl restart quantumvpn-operator
 systemctl is-active --quiet quantumvpn-operator
-echo "QuantumVPN $version uploaded; scheduled for 17:00 Europe/Moscow"
+echo "QuantumVPN $version uploaded; scheduled for 21:00 Europe/Moscow"
 rm -f "/tmp/QuantumVPN-$version-operator-debug-*.apk" \
   "/tmp/QuantumVPN-$version-operator-debug-*.apk.sha256" \
   /tmp/release-metadata.json /tmp/build-info.txt /tmp/RELEASE_NOTES.md /tmp/update.html \

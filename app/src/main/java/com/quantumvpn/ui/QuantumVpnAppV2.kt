@@ -102,11 +102,12 @@ private enum class V2Tab(val title: String, val icon: ImageVector) {
 
 /** Liquid Glass Orbit — cyan/blue glassmorphism matching the design mockup. */
 private val LocalAuroraDark = staticCompositionLocalOf { true }
+private val LocalAuroraAccent = staticCompositionLocalOf { Color(0xFF3DE7FF) }
 private object Aurora {
     val Night: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF040B16) else Color(0xFFF3F7FB)
     val VioletNight: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF071526) else Color(0xFFE8F1FA)
     val Glass: Color @Composable get() = if (LocalAuroraDark.current) Color(0xCC0B1E33) else Color(0xE6FFFFFF)
-    val Mint: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF3DE7FF) else Color(0xFF0087A8)
+    val Mint: Color @Composable get() = if (LocalAuroraDark.current) LocalAuroraAccent.current else Color(0xFF0087A8)
     val Violet: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF2A7BFF) else Color(0xFF2563EB)
     val Text: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFFF4FBFF) else Color(0xFF0B1A2A)
     val Muted: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF8FA9BE) else Color(0xFF51657A)
@@ -209,7 +210,8 @@ fun QuantumVpnAppV2(
         ThemeMode.Dark -> true
         ThemeMode.Light -> false
     }
-    CompositionLocalProvider(LocalAuroraDark provides dark) {
+    val adaptiveAccent = if (state.settings.useDynamicColor) MaterialTheme.colorScheme.primary else Color(0xFF3DE7FF)
+    CompositionLocalProvider(LocalAuroraDark provides dark, LocalAuroraAccent provides adaptiveAccent) {
     Surface(color = Aurora.Night, modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
         if (policy.maintenance) {
             V2MaintenanceScreen(policy.maintenanceMessage)
@@ -367,7 +369,13 @@ private fun V2Home(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("QuantumVPN", color = Aurora.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Column(Modifier.weight(1f)) {
+                    Row {
+                        Text("Quantum", color = Aurora.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Text("VPN", color = Aurora.Mint, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Text("HORIZON GLASS · 2026", color = Aurora.Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
+                }
                 Surface(onClick = onSettings, shape = CircleShape, color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), modifier = Modifier.size(42.dp)) {
                     Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Settings, null, tint = Aurora.Mint) }
                 }
@@ -1029,7 +1037,7 @@ private fun V2PrivacyPage(onBack: () -> Unit) {
 @Composable private fun V2Toggle(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) = Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(title, color = Aurora.Text, fontWeight = FontWeight.SemiBold); Text(subtitle, color = Aurora.Muted, fontSize = 12.sp) }; Switch(checked = checked, onCheckedChange = onChange, colors = SwitchDefaults.colors(checkedThumbColor = Aurora.Mint, checkedTrackColor = Aurora.Violet.copy(alpha = .72f))) } }
 @Composable private fun V2StatusRow(title: String, subtitle: String, good: Boolean) = Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.CheckCircle, null, tint = if (good) Aurora.Mint else Aurora.Muted); Column(Modifier.padding(start = 12.dp)) { Text(title, color = Aurora.Text, fontWeight = FontWeight.SemiBold); Text(subtitle, color = Aurora.Muted, fontSize = 12.sp) } } }
 @Composable private fun V2NavRow(title: String, subtitle: String, onClick: () -> Unit) = Surface(onClick = onClick, color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) { Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(title, color = Aurora.Text, fontWeight = FontWeight.SemiBold); Text(subtitle, color = Aurora.Muted, fontSize = 12.sp) }; Text("›", color = Aurora.Mint, fontSize = 24.sp) } }
-@Composable private fun V2BottomBar(tab: V2Tab, onTab: (V2Tab) -> Unit) = Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .7f)), shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp), modifier = Modifier.fillMaxWidth().navigationBarsPadding()) { Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.SpaceEvenly) { V2Tab.entries.forEach { item -> Column(Modifier.clickable { onTab(item) }.padding(horizontal = 8.dp, vertical = 3.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(item.icon, null, tint = if (item == tab) Aurora.Mint else Aurora.Muted, modifier = Modifier.size(22.dp)); Text(item.title, color = if (item == tab) Aurora.Mint else Aurora.Muted, fontSize = 10.sp) } } } }
+@Composable private fun V2BottomBar(tab: V2Tab, onTab: (V2Tab) -> Unit) = Surface(color = Aurora.Glass, border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .7f)), shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp), shadowElevation = 14.dp, modifier = Modifier.fillMaxWidth().navigationBarsPadding()) { Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.SpaceEvenly) { V2Tab.entries.forEach { item -> Column(Modifier.clickable { onTab(item) }.padding(horizontal = 8.dp, vertical = 3.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(item.icon, null, tint = if (item == tab) Aurora.Mint else Aurora.Muted, modifier = Modifier.size(22.dp)); Text(item.title, color = if (item == tab) Aurora.Mint else Aurora.Muted, fontSize = 10.sp) } } } }
 
 @Composable
 private fun V2BrandHeader(subtitle: String) {

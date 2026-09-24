@@ -163,7 +163,7 @@ class DonationRepository(context: Context) {
         const val YOOMONEY_BUTTON_URL =
             "https://yoomoney.ru/quickpay/fundraise/button?billNumber=1KF196EER0I.260922&"
         const val YOOMONEY_PAGE_URL =
-            "https://yoomoney.ru/quickpay/fundraise/button?billNumber=1KF196EER0I.260922"
+            "https://yoomoney.ru/quickpay/fundraise/button?billNumber=1KF196EER0I.260922&sum=0"
 
         private const val PREFS = "quantum_donations"
         private const val KEY_HISTORY = "history_json"

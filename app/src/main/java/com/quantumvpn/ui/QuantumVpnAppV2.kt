@@ -11,14 +11,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import android.annotation.SuppressLint
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import android.webkit.WebChromeClient
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -50,7 +45,6 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.viewinterop.AndroidView
 import com.quantumvpn.updates.UpdateState
 import com.quantumvpn.BuildConfig
 import com.quantumvpn.QuantumVpnApplication
@@ -890,8 +884,21 @@ private fun V2DonationPage(onBack: () -> Unit) {
         ) {
             Column(Modifier.padding(16.dp)) {
                 Text("Оплата ЮMoney", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
-                Text("Всё остаётся в приложении — браузер не открывается", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
-                YooMoneyDonateWebView(Modifier.fillMaxWidth().height(420.dp))
+                Text("Откроется внешний браузер. Сумма на странице начинается с 0 ₽ и не сохраняется приложением.", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
+                Button(
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(DonationRepository.YOOMONEY_PAGE_URL)),
+                            )
+                        }.onFailure { status = "Не удалось открыть браузер" }
+                    },
+                    enabled = !sending,
+                    colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Открыть ЮMoney во внешнем браузере", fontWeight = FontWeight.Bold)
+                }
             }
         }
         Spacer(Modifier.height(14.dp))
@@ -961,51 +968,6 @@ private fun DonationHistoryRow(entry: DonationEntry) {
             }
         }
     }
-}
-
-@SuppressLint("SetJavaScriptEnabled")
-@Composable
-private fun YooMoneyDonateWebView(modifier: Modifier = Modifier) {
-    AndroidView(
-        modifier = modifier,
-        factory = { ctx ->
-            WebView(ctx).apply {
-                setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.loadsImagesAutomatically = true
-                settings.javaScriptCanOpenWindowsAutomatically = false
-                settings.setSupportMultipleWindows(false)
-                settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
-                        // Keep payment flow inside the app WebView — never hand off to Chrome.
-                        val target = url.orEmpty()
-                        return when {
-                            target.startsWith("http://") || target.startsWith("https://") -> {
-                                view?.loadUrl(target)
-                                true
-                            }
-                            else -> true
-                        }
-                    }
-
-                    override fun shouldOverrideUrlLoading(
-                        view: WebView?,
-                        request: android.webkit.WebResourceRequest?,
-                    ): Boolean {
-                        val target = request?.url?.toString().orEmpty()
-                        if (target.startsWith("http://") || target.startsWith("https://")) {
-                            view?.loadUrl(target)
-                        }
-                        return true
-                    }
-                }
-                webChromeClient = WebChromeClient()
-                loadUrl(DonationRepository.YOOMONEY_PAGE_URL)
-            }
-        },
-    )
 }
 
 @Composable

@@ -10,13 +10,13 @@
     {
       "abi": "arm64-v8a",
       "apk_file": "QuantumVPN-5.9.1-operator-debug-arm64-v8a.apk",
-      "apk_sha256": "510964365d4c1274c9f0ddb4fea87e9ad6403fb91517863860c896e9ff78c65f",
+      "apk_sha256": "8f68ebba82e2e6332faab1e3f0998ea85bfbe226bf8695e84281089b6c151743",
       "apk_size": 135920747
     },
     {
       "abi": "armeabi-v7a",
       "apk_file": "QuantumVPN-5.9.1-operator-debug-armeabi-v7a.apk",
-      "apk_sha256": "3b0d5c1350f07e284927e95b76dd361c8ad1f0a2d1f3d4ca84b0d31b155392bd",
+      "apk_sha256": "bc1851d0dd253e49f6e13ec8d28c41eb57080f8c9229a2126c18ce78cccd0ddd",
       "apk_size": 126376055
     }
   ]

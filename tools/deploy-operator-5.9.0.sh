@@ -60,6 +60,7 @@ values = {
     "announce": "Сегодня в 21:00 по МСК доступно обновление QuantumVPN 5.9.1 с новым Horizon Glass дизайном.",
     "announce_en": "QuantumVPN 5.9.1 with the new Horizon Glass design will be available at 21:00 Moscow time.",
     "force_update_message": "Сегодня в 21:00 по МСК будет доступно обновление QuantumVPN 5.9.1.",
+    "app_changelog": "Запланировано на 21:00 МСК: Horizon Glass 2026, адаптивные цвета и обновлённая стеклянная навигация.",
 }
 for key, value in values.items():
     db.execute("insert or replace into settings(key,value) values (?,?)", (key, value))

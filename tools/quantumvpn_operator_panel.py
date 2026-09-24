@@ -993,7 +993,9 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         for ts, amount, device, ip, ver, note in (donation_rows or [])
     ) or "<tr><td colspan=6>Пожертвований пока нет</td></tr>"
     totp_setup = ""
-    if not enabled(s, "totp_enabled", False) or not s.get("totp_secret"):
+    if not role_at_least(actor_role, "operator"):
+        totp_setup = "<p class=muted>Настройки безопасности доступны только ролям operator и owner.</p>"
+    elif not enabled(s, "totp_enabled", False) or not s.get("totp_secret"):
         totp_setup = "<p class=muted>2FA выключена. Включите и сохраните — секрет сгенерируется автоматически.</p>"
     else:
         uri = f"otpauth://totp/QuantumControl:{USER}?secret={s.get('totp_secret')}&issuer=QuantumControl"
@@ -1004,6 +1006,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
 
     flash_html = f"<div class=flash>{html.escape(flash)}</div>" if flash else ""
     outbounds = ", ".join(status.get("outbounds") or []) or "—"
+    telegram_token = s.get("telegram_bot_token", "") if role_at_least(actor_role, "operator") else ""
     monitor_db = conn()
     try:
         monitor_rows = health_snapshot(monitor_db)
@@ -1221,7 +1224,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <h2>Telegram алерты</h2>
         <label><input type=checkbox name=telegram_alerts_enabled {checked('telegram_alerts_enabled')}> Включить</label>
         <label><input type=checkbox name=telegram_backups_enabled {checked('telegram_backups_enabled')}> Резервная копия каждый час</label>
-        <label>Bot token<input name=telegram_bot_token value="{html.escape(s.get('telegram_bot_token',''))}" autocomplete=off></label>
+        <label>Bot token<input name=telegram_bot_token value="{html.escape(telegram_token)}" autocomplete=off></label>
         <label>Chat ID<input name=telegram_chat_id value="{html.escape(s.get('telegram_chat_id',''))}"></label>
         <div class=actions><button>Сохранить</button>
         <button class=secondary formaction=/operator/actions name=action value=telegram_test>Тест сообщения</button>

@@ -194,8 +194,31 @@ class SubscriptionSourceStore(
         val rootObject = JsonConfig.parse(text) as? JsonObject
             ?: throw ImportException("Хранилище источников подписок повреждено.")
         return rootObject.mapNotNull { (id, value) ->
-            (value as? JsonPrimitive)?.contentOrNull?.let { id to it }
+            (value as? JsonPrimitive)?.contentOrNull?.let { id to migrateLegacyHost(it) }
         }.toMap()
+    }
+
+    /**
+     * Migrate subscriptions saved by pre-5.9 clients after the panel domain
+     * rotation. The path/token stays unchanged; only the HTTPS host changes.
+     * This makes the first refresh self-healing instead of requiring a manual
+     * re-import of the subscription.
+     */
+    private fun migrateLegacyHost(raw: String): String {
+        val uri = runCatching { URI(raw) }.getOrNull() ?: return raw
+        val host = uri.host?.lowercase() ?: return raw
+        if (host !in LEGACY_PANEL_HOSTS) return raw
+        return runCatching {
+            URI(
+                uri.scheme,
+                uri.userInfo,
+                CURRENT_PANEL_HOST,
+                uri.port,
+                uri.path,
+                uri.query,
+                null,
+            ).toASCIIString()
+        }.getOrDefault(raw)
     }
 
     private fun write(entries: Map<String, String>) {
@@ -206,4 +229,12 @@ class SubscriptionSourceStore(
     }
 
     private val file: File get() = File(root, "index.json")
+
+    private companion object {
+        const val CURRENT_PANEL_HOST = "pecaocek.ignorelist.com"
+        val LEGACY_PANEL_HOSTS = setOf(
+            "tepacom.o190.com",
+            "tepcawen.chickenkiller.com",
+        )
+    }
 }

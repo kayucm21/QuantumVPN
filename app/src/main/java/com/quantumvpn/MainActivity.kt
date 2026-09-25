@@ -122,6 +122,8 @@ class MainActivity : FragmentActivity() {
         }
         setContent {
             val state by profilesViewModel.state.collectAsState()
+            val clientPolicy by (application as QuantumVpnApplication)
+                .container.clientPolicyRepository.policy.collectAsState()
             val vpnState by vpnController.state.collectAsState()
             val selectorGroups by vpnController.selectorGroups.collectAsState()
             val sessionStats by vpnController.sessionStats.collectAsState()
@@ -130,6 +132,18 @@ class MainActivity : FragmentActivity() {
             val vpnMessage by vpnController.message.collectAsState()
             val updateState by updateController.state.collectAsState()
             val systemDark = isSystemInDarkTheme()
+            var previousMaintenance by remember { mutableStateOf<Boolean?>(null) }
+            LaunchedEffect(clientPolicy.maintenance) {
+                val wasInMaintenance = previousMaintenance
+                previousMaintenance = clientPolicy.maintenance
+                // A policy transition back to normal service must refresh the
+                // stored subscription immediately. Previously this only happened
+                // on Activity resume or the 30-minute background loop, leaving
+                // users with an empty/stale server list after maintenance ended.
+                if (wasInMaintenance == true && !clientPolicy.maintenance) {
+                    profilesViewModel.refreshAllSubscriptionsQuietly(silent = true)
+                }
+            }
             LaunchedEffect(
                 state.settings.scheduleNightAutoConnect,
                 state.settings.scheduleMorningDisconnect,

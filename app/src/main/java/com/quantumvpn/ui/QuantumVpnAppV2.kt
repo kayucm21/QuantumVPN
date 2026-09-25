@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -361,7 +362,6 @@ private fun V2OnboardingScreen(
 ) {
     val context = LocalContext.current
     var networkOnline by remember { mutableStateOf(false) }
-    var step by rememberSaveable { mutableStateOf(0) }
     LaunchedEffect(Unit) {
         while (true) {
             val manager = context.getSystemService(ConnectivityManager::class.java)
@@ -380,6 +380,8 @@ private fun V2OnboardingScreen(
         Triple("Обновление", if (updateReady) "Версия приложения актуальна" else "Проверяем обновления…", updateReady),
     )
     val ready = checks.all { it.third }
+    val progress = checks.count { it.third }.toFloat() / checks.size.toFloat()
+    val progressPercent = (progress * 100f).toInt()
     Column(
         Modifier.fillMaxSize()
             .background(Brush.verticalGradient(listOf(Color(0xFF061B2B), Aurora.Night)))
@@ -387,11 +389,32 @@ private fun V2OnboardingScreen(
             .padding(horizontal = 24.dp, vertical = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        V2BrandHeader("Первый запуск · защищённое соединение")
-        Spacer(Modifier.height(18.dp))
-        Text("Добро пожаловать", color = Aurora.Text, fontSize = 29.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
-        Text("Настроим QuantumVPN за несколько секунд", color = Aurora.Muted, fontSize = 14.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp))
-        Spacer(Modifier.height(24.dp))
+        V2BrandHeader("Защита соединения")
+        Spacer(Modifier.height(4.dp))
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(244.dp)) {
+            CircularProgressIndicator(
+                progress = { progress.coerceAtLeast(0.06f) },
+                color = Aurora.Mint,
+                trackColor = Aurora.Border.copy(alpha = .48f),
+                strokeWidth = 11.dp,
+                modifier = Modifier.size(222.dp),
+            )
+            Surface(
+                color = Aurora.Glass.copy(alpha = .84f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Violet.copy(alpha = .72f)),
+                shape = RoundedCornerShape(58.dp),
+                modifier = Modifier.size(150.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Lock, null, tint = Aurora.Mint, modifier = Modifier.size(58.dp))
+                }
+            }
+            Text("$progressPercent%", color = Aurora.Text, fontSize = 25.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 208.dp))
+        }
+        Spacer(Modifier.height(14.dp))
+        Text(if (ready) "Готово" else "Загружаем серверы…", color = Aurora.Text, fontSize = 23.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+        Text("Проверяем сеть, серверы и обновления", color = Aurora.Muted, fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 7.dp))
+        Spacer(Modifier.height(20.dp))
         Surface(
             color = Aurora.Glass.copy(alpha = .88f),
             border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .55f)),
@@ -805,73 +828,67 @@ private fun V2Settings(
     }
     Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
         Text("Настройки", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(18.dp))
-        Text("Оформление", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(ThemeMode.Light, ThemeMode.Dark, ThemeMode.System).forEach { mode ->
-                Surface(
-                    onClick = { onTheme(mode) },
-                    color = if (theme == mode) Aurora.Mint else Aurora.Glass,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, if (theme == mode) Aurora.Mint else Aurora.Border),
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text(
-                        when (mode) {
-                            ThemeMode.Light -> "Светлая"
-                            ThemeMode.Dark -> "Тёмная"
-                            ThemeMode.System -> "Системная"
-                        },
-                        color = if (theme == mode) Aurora.Night else Aurora.Muted,
-                        textAlign = TextAlign.Center,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(vertical = 12.dp),
-                    )
+        Text("Основные функции собраны в компактные группы", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+        V2SettingsGroup("Оформление") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(ThemeMode.System, ThemeMode.Dark, ThemeMode.Light).forEach { mode ->
+                    Surface(
+                        onClick = { onTheme(mode) },
+                        color = if (theme == mode) Aurora.Mint else Aurora.Glass,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, if (theme == mode) Aurora.Mint else Aurora.Border),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(
+                            when (mode) {
+                                ThemeMode.Light -> "Светлая"
+                                ThemeMode.Dark -> "Тёмная"
+                                ThemeMode.System -> "Системная"
+                            },
+                            color = if (theme == mode) Aurora.Night else Aurora.Muted,
+                            textAlign = TextAlign.Center,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(vertical = 10.dp),
+                        )
+                    }
                 }
             }
+            V2CompactToggle("Цвета Android", dynamicColor, onDynamicColor)
         }
         Spacer(Modifier.height(10.dp))
-        V2Toggle("Цвета устройства", "Использовать акцент Android Dynamic Color", dynamicColor, onDynamicColor)
-        Spacer(Modifier.height(16.dp))
-        V2Toggle("Автоподключение", "Подключать VPN при запуске на мобильной сети", autoConnect, onAutoConnect)
-        Spacer(Modifier.height(10.dp))
-        V2Toggle("Уведомления", "Показывать статус соединения", notifications, onNotifications)
-        Spacer(Modifier.height(10.dp))
-        V2Toggle("Защита незнакомого Wi‑Fi", "Предложить VPN после страницы входа", protectUnknownWifi, onProtectUnknownWifi)
-        Spacer(Modifier.height(10.dp))
-        V2Toggle("Режим поездки", "Защита роуминга, автообход и быстрый failover", travelMode, onTravelMode)
-        Spacer(Modifier.height(10.dp))
-        Text("Безопасность", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
-        V2Toggle("Блокировка рекламы", "DNS-фильтры работают только во время VPN-сессии", adBlock, onAdBlock)
-        Spacer(Modifier.height(10.dp))
-        V2Toggle("Аварийное отключение", "Блокировать трафик при разрыве VPN", killSwitch, onKillSwitch)
-        Spacer(Modifier.height(10.dp))
-        V2NavRow(
-            "Центр уведомлений",
-            if (policy.maintenance) "Технические работы активны" else "Обновления и объявления сервиса",
-            onClick = { notificationsOpen = true },
-        )
-        Spacer(Modifier.height(10.dp))
-        if (policy.features.diagnostics) V2Toggle("Диагностика сети", "Помогать улучшать стабильность (добровольно)", true) { }
-        Spacer(Modifier.height(18.dp))
-        V2NavRow("Пожертвование", "Поддержать проект через ЮMoney · история сборов", onClick = { donateOpen = true })
-        Spacer(Modifier.height(10.dp))
-        if (policy.features.diagnostics) V2NavRow("Отправить логи", "Добровольный диагностический отчёт", onClick = {
-            scope.launch {
-                logStatus = "Отправка…"
-                logStatus = if (VoluntaryDiagnosticReporter(context).send(diagnostics).isSuccess) {
-                    "Отчёт отправлен в панель"
-                } else {
-                    "Не удалось отправить отчёт"
-                }
+        V2SettingsGroup("Безопасность") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                V2MiniToggle("DNS и реклама", adBlock, onAdBlock, Modifier.weight(1f))
+                V2MiniToggle("Kill Switch", killSwitch, onKillSwitch, Modifier.weight(1f))
             }
-        })
-        if (logStatus.isNotBlank()) Text(logStatus, color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+            Text("Фильтр DNS и блокировка трафика действуют во время VPN-сессии.", color = Aurora.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+        }
         Spacer(Modifier.height(10.dp))
-        V2NavRow("О приложении", "Версия и информация", onClick = { aboutOpen = true })
+        V2SettingsGroup("Сеть") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                V2MiniToggle("Автоподключение", autoConnect, onAutoConnect, Modifier.weight(1f))
+                V2MiniToggle("Неизвестный Wi‑Fi", protectUnknownWifi, onProtectUnknownWifi, Modifier.weight(1f))
+            }
+            V2CompactToggle("Режим поездки", travelMode, onTravelMode)
+        }
         Spacer(Modifier.height(10.dp))
-        V2NavRow("Конфиденциальность", "Что хранится на устройстве и что отправляется", onClick = { privacyOpen = true })
+        V2SettingsGroup("Сервис и обратная связь") {
+            V2CompactToggle("Уведомления", notifications, onNotifications)
+            V2NavRow("Центр уведомлений", if (policy.maintenance) "Технические работы активны" else "Обновления и объявления сервиса", onClick = { notificationsOpen = true })
+            if (policy.features.diagnostics) V2NavRow("Отправить логи", "Добровольный диагностический отчёт", onClick = {
+                scope.launch {
+                    logStatus = "Отправка…"
+                    logStatus = if (VoluntaryDiagnosticReporter(context).send(diagnostics).isSuccess) "Отчёт отправлен в панель" else "Не удалось отправить отчёт"
+                }
+            })
+            if (logStatus.isNotBlank()) Text(logStatus, color = Aurora.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            V2NavRow("Пожертвование", "Открыть ЮMoney во внешнем браузере", onClick = { donateOpen = true })
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                V2MiniNav("О приложении", onClick = { aboutOpen = true }, modifier = Modifier.weight(1f))
+                V2MiniNav("Приватность", onClick = { privacyOpen = true }, modifier = Modifier.weight(1f))
+            }
+        }
     }
 }
 
@@ -1120,6 +1137,51 @@ private fun V2PrivacyPage(
             V2StatusRow(item, if (enabled) "Активно" else "Можно включить в настройках", enabled)
             Spacer(Modifier.height(10.dp))
         }
+    }
+}
+
+@Composable
+private fun V2SettingsGroup(title: String, content: @Composable () -> Unit) {
+    Surface(
+        color = Aurora.Glass,
+        border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(13.dp)) {
+            Text(title, color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+private fun V2CompactToggle(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(top = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, color = Aurora.Text, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = onChange, modifier = Modifier.height(30.dp), colors = SwitchDefaults.colors(checkedThumbColor = Aurora.Mint, checkedTrackColor = Aurora.Violet.copy(alpha = .72f)))
+    }
+}
+
+@Composable
+private fun V2MiniToggle(title: String, checked: Boolean, onChange: (Boolean) -> Unit, modifier: Modifier) {
+    Surface(
+        color = Aurora.Night.copy(alpha = .28f),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .75f)),
+        shape = RoundedCornerShape(13.dp),
+        modifier = modifier,
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Text(title, color = Aurora.Text, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Switch(checked = checked, onCheckedChange = onChange, modifier = Modifier.height(30.dp), colors = SwitchDefaults.colors(checkedThumbColor = Aurora.Mint, checkedTrackColor = Aurora.Violet.copy(alpha = .72f)))
+        }
+    }
+}
+
+@Composable
+private fun V2MiniNav(title: String, onClick: () -> Unit, modifier: Modifier) {
+    Surface(onClick = onClick, color = Aurora.Night.copy(alpha = .28f), border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .75f)), shape = RoundedCornerShape(13.dp), modifier = modifier) {
+        Text(title, color = Aurora.Text, fontSize = 11.sp, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp, horizontal = 6.dp))
     }
 }
 

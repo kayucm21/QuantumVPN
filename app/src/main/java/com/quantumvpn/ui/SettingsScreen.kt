@@ -439,8 +439,8 @@ internal fun UpdateControls(
                 CircularProgressIndicator(modifier = Modifier.padding(end = 12.dp))
                 Text(
                     when (state.operation) {
-                        UpdateOperation.Check -> "GitHub недоступен напрямую. Временно включаем VPN для проверки…"
-                        UpdateOperation.Download -> "Загрузка заблокирована. Временно включаем VPN для updater…"
+                        UpdateOperation.Check -> "Панель обновлений недоступна напрямую. Повторяем проверку…"
+                        UpdateOperation.Download -> "Загрузка с панели прервана. Повторяем попытку…"
                     },
                 )
             }
@@ -455,7 +455,7 @@ internal fun UpdateControls(
             }
             Text("$source · установлена ${state.currentVersion}.")
             Text(
-                "Источник: FTP (при недоступности — GitHub).",
+                "Источник: операторская панель VDS.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

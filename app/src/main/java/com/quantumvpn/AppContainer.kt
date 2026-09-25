@@ -43,10 +43,6 @@ import com.quantumvpn.ui.UiSettingsStore
 import com.quantumvpn.updates.UpdateController
 import com.quantumvpn.updates.AppUpdateVpnFallback
 import com.quantumvpn.updates.AndroidUpdateInstallIntentFactory
-import com.quantumvpn.updates.FtpAwareHttpClient
-import com.quantumvpn.updates.FtpUpdateSource
-import com.quantumvpn.updates.GitHubUpdateSource
-import com.quantumvpn.updates.PreferFtpThenGitHubSource
 import com.quantumvpn.vpn.AndroidPackageAvailability
 import com.quantumvpn.vpn.AppCatalog
 import com.quantumvpn.vpn.AppSelectionStore
@@ -122,20 +118,8 @@ class AppContainer(
         vpnController = vpnController,
         crashStore = appCrashStore,
     ).also(DiagnosticExporter::cleanupStaleFiles)
-    private val ftpUpdateSource = if (BuildConfig.FTP_UPDATES_ENABLED) {
-        FtpUpdateSource(
-            host = BuildConfig.FTP_UPDATE_HOST,
-            username = BuildConfig.FTP_UPDATE_USER,
-            password = BuildConfig.FTP_UPDATE_PASSWORD,
-            remoteDir = BuildConfig.FTP_UPDATE_DIR,
-            applicationId = appContext.packageName,
-        )
-    } else {
-        null
-    }
-    // RosPanel-backed auto-update: the operator publishes a release on the panel and the
-    // app pulls it. Falls back to the existing FTP/GitHub composite when the panel has no
-    // release published (or is unreachable).
+    // The operator panel is the only update source for this private deployment. Keeping the
+    // source panel-only avoids confusing GitHub publication errors when a VDS release exists.
     val panelUpdateSource = if (BuildConfig.PANEL_UPDATE_BASE_URL.isNotBlank()) {
         PanelUpdateSource(
             baseUrl = BuildConfig.PANEL_UPDATE_BASE_URL,
@@ -147,17 +131,12 @@ class AppContainer(
     } else {
         null
     }
-    val compositeSource = PreferFtpThenGitHubSource(
-        ftp = ftpUpdateSource,
-        github = GitHubUpdateSource(BuildConfig.UPDATE_REPOSITORY, appContext.packageName),
-    )
-    // In-app / FTP updates disabled — APKs are distributed manually.
     val updateController = UpdateController(
         context = appContext,
         repository = BuildConfig.UPDATE_REPOSITORY,
         currentVersionName = BuildConfig.VERSION_NAME,
         currentVersionCode = BuildConfig.VERSION_CODE.toLong(),
-        source = PanelFirstUpdateSource(panelUpdateSource, compositeSource),
+        source = PanelFirstUpdateSource(panelUpdateSource),
         http = com.quantumvpn.updates.PanelHttpsClient(),
         vpnFallback = AppUpdateVpnFallback(appContext, uiSettingsStore, vpnController),
         installIntentFactory = AndroidUpdateInstallIntentFactory(appContext),

@@ -1,20 +1,19 @@
 package com.quantumvpn.updates
 
 /**
- * Tries the RosPanel update source first; if the panel has no release published (it throws
- * UpdateException) or is unreachable, falls back to the existing FTP/GitHub composite so the
- * app keeps working when the operator prefers GitHub/FTP distribution.
+ * Uses the operator panel as the single update source.
+ *
+ * Older builds used to fall back to FTP/GitHub when the panel was unavailable. That made a
+ * private VDS deployment look broken (and exposed a GitHub publication error) even though the
+ * panel had a valid release. New builds must report the panel error directly instead.
  */
 class PanelFirstUpdateSource(
     private val panel: UpdateReleaseSource?,
-    private val fallback: UpdateReleaseSource,
+    private val fallback: UpdateReleaseSource? = null,
 ) : UpdateReleaseSource {
     override fun latest(channel: UpdateChannel): UpdateCandidate {
-        if (panel == null) return fallback.latest(channel)
-        return try {
-            panel.latest(channel)
-        } catch (_: UpdateException) {
-            fallback.latest(channel)
-        }
+        return panel?.latest(channel)
+            ?: fallback?.latest(channel)
+            ?: throw UpdateException("Источник обновлений панели не настроен.")
     }
 }

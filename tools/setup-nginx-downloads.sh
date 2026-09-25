@@ -21,8 +21,8 @@ grep -q '^QV_BIND=' "$ENV" && sed -i 's/^QV_BIND=.*/QV_BIND=127.0.0.1/' "$ENV" |
 grep -q '^QV_TLS_TERMINATED=' "$ENV" && sed -i 's/^QV_TLS_TERMINATED=.*/QV_TLS_TERMINATED=1/' "$ENV" || echo 'QV_TLS_TERMINATED=1' >>"$ENV"
 grep -q '^QV_BACKLOG=' "$ENV" && sed -i 's/^QV_BACKLOG=.*/QV_BACKLOG=512/' "$ENV" || echo 'QV_BACKLOG=512' >>"$ENV"
 # APK URLs on :443 (mobile carriers often reset :8443 around ~30MB).
-grep -q '^QV_DOWNLOAD_BASE=' "$ENV" && sed -i 's|^QV_DOWNLOAD_BASE=.*|QV_DOWNLOAD_BASE=https://tepacom.o190.com:8443|' "$ENV" || echo 'QV_DOWNLOAD_BASE=https://tepacom.o190.com:8443' >>"$ENV"
-grep -q '^QV_PUBLIC_BASE=' "$ENV" && sed -i 's|^QV_PUBLIC_BASE=.*|QV_PUBLIC_BASE=https://tepacom.o190.com:8443|' "$ENV" || echo 'QV_PUBLIC_BASE=https://tepacom.o190.com:8443' >>"$ENV"
+grep -q '^QV_DOWNLOAD_BASE=' "$ENV" && sed -i 's|^QV_DOWNLOAD_BASE=.*|QV_DOWNLOAD_BASE=https://pecaocek.ignorelist.com:8443|' "$ENV" || echo 'QV_DOWNLOAD_BASE=https://pecaocek.ignorelist.com:8443' >>"$ENV"
+grep -q '^QV_PUBLIC_BASE=' "$ENV" && sed -i 's|^QV_PUBLIC_BASE=.*|QV_PUBLIC_BASE=https://pecaocek.ignorelist.com:8443|' "$ENV" || echo 'QV_PUBLIC_BASE=https://pecaocek.ignorelist.com:8443' >>"$ENV"
 
 cat >/etc/sysctl.d/99-quantumvpn-downloads.conf <<'SYSCTL'
 net.core.rmem_max = 16777216
@@ -37,7 +37,7 @@ cat >/etc/nginx/sites-available/quantumvpn-operator <<'NGINX'
 # Public APK path via RosPanel/xray HTTPS :443 fallback (dest 127.0.0.1:18766).
 server {
     listen 127.0.0.1:18766;
-    server_name tepacom.o190.com _;
+    server_name pecaocek.ignorelist.com _;
 
     client_max_body_size 200m;
     sendfile on;
@@ -76,7 +76,7 @@ server {
 server {
     listen 8443 ssl reuseport;
     listen [::]:8443 ssl reuseport;
-    server_name tepacom.o190.com _;
+    server_name pecaocek.ignorelist.com _;
 
     ssl_certificate     /var/lib/rospanel/certs/cert.pem;
     ssl_certificate_key /var/lib/rospanel/certs/key.pem;
@@ -127,7 +127,7 @@ install -d -m 755 /var/www/quantumvpn/downloads
 chmod -R a+rX /var/www/quantumvpn/downloads || true
 
 # Point xray VLESS TLS fallback at nginx ONLY when explicitly enabled.
-# Broken fallback (18766 without nginx) takes down https://tepacom.o190.com/:443.
+# Broken fallback (18766 without nginx) takes down https://pecaocek.ignorelist.com/:443.
 if [[ "${QV_ENABLE_443_FALLBACK:-0}" == "1" && -f /var/lib/rospanel/xray/config.json ]]; then
   python3 - <<'PY'
 import json

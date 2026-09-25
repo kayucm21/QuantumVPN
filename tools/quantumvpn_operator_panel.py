@@ -43,9 +43,9 @@ UPSTREAM = os.environ["QV_SUBSCRIPTION_UPSTREAM"]
 ROSPANEL_DB = os.environ.get("QV_ROSPANEL_DB", "/var/lib/rospanel/rospanel.db")
 ROSPANEL_API = os.environ.get("QV_ROSPANEL_API", "").rstrip("/")
 DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/downloads")
-PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://tepacom.o190.com:8443")
+PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
-DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://tepacom.o190.com:8443").rstrip("/")
+DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
 PANEL_BUILD = "5.9.5"
 VERSION = "5.9.5"
 VERSION_CODE = 120
@@ -456,7 +456,7 @@ def audit(db, actor, ip, action, detail):
 
 def rospanel_ui_base() -> str:
     if not ROSPANEL_API:
-        return "https://tepacom.o190.com/"
+        return "https://pecaocek.ignorelist.com/"
     return ROSPANEL_API[:-3] if ROSPANEL_API.endswith("/v1") else ROSPANEL_API
 
 

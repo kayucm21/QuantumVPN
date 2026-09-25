@@ -310,7 +310,7 @@ fun QuantumVpnAppV2(
                 confirmButton = {
                     TextButton(onClick = {
                         val url = update.candidate?.apkAsset?.downloadUrl
-                            ?: "https://tepacom.o190.com:8443/update"
+                            ?: "https://pecaocek.ignorelist.com:8443/update"
                         runCatching {
                             ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                         }

@@ -22,12 +22,12 @@
 	}
 }
 
-http://tepacom.o190.com {
+http://pecaocek.ignorelist.com {
 	bind 0.0.0.0
-	redir https://tepacom.o190.com{uri} permanent
+	redir https://pecaocek.ignorelist.com{uri} permanent
 }
 
-https://tepacom.o190.com {
+https://pecaocek.ignorelist.com {
         # QuantumVPN operator panel and client-control API.
         @operator path /operator /operator/* /api/client/policy /api/client/diagnostic /api/v1/subscription
         handle @operator {
@@ -63,11 +63,11 @@ https://tepacom.o190.com {
 	tls {
 		issuer acme {
 			dir https://acme.zerossl.com/v2/DV90
-			email admin@tepacom.o190.com
+			email admin@pecaocek.ignorelist.com
 		}
 		issuer acme {
 			dir https://acme-v02.api.letsencrypt.org/directory
-			email admin@tepacom.o190.com
+			email admin@pecaocek.ignorelist.com
 		}
 	}
 	# Панель 3x-ui по секретному пути → локальный HTTPS-бэкенд x-ui.

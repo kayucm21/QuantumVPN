@@ -33,7 +33,7 @@ test -f "$backup" || cp -p /opt/quantumvpn-operator/app.py "$backup"
 install -m 750 /tmp/quantumvpn_operator_panel.py /opt/quantumvpn-operator/app.py
 
 ENV=/etc/quantumvpn-operator.env
-grep -q '^QV_DOWNLOAD_BASE=' "$ENV" && sed -i 's|^QV_DOWNLOAD_BASE=.*|QV_DOWNLOAD_BASE=https://tepacom.o190.com:8443|' "$ENV" || echo 'QV_DOWNLOAD_BASE=https://tepacom.o190.com:8443' >>"$ENV"
+grep -q '^QV_DOWNLOAD_BASE=' "$ENV" && sed -i 's|^QV_DOWNLOAD_BASE=.*|QV_DOWNLOAD_BASE=https://pecaocek.ignorelist.com:8443|' "$ENV" || echo 'QV_DOWNLOAD_BASE=https://pecaocek.ignorelist.com:8443' >>"$ENV"
 if [[ -f /tmp/setup-nginx-downloads.sh ]]; then
   bash /tmp/setup-nginx-downloads.sh || true
 fi

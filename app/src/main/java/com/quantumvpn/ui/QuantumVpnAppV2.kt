@@ -512,8 +512,17 @@ private fun V2Home(
                         Text("Текущий сервер", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
                         Text(server, color = Aurora.Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    Surface(color = Color(0xFF2EE59D).copy(alpha = .18f), shape = RoundedCornerShape(999.dp)) {
-                        Text(ping?.let { "$it мс" } ?: "—", color = Color(0xFF2EE59D), fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                    Surface(
+                        color = if (ping != null) Color(0xFF2EE59D).copy(alpha = .18f) else Aurora.Danger.copy(alpha = .16f),
+                        shape = RoundedCornerShape(999.dp),
+                    ) {
+                        Text(
+                            ping?.let { "$it мс" } ?: "Время подключения истекло",
+                            color = ping?.let { Color(0xFF2EE59D) } ?: Aurora.Danger,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = if (ping == null) 10.sp else 14.sp,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        )
                     }
                 }
             }
@@ -554,7 +563,7 @@ private fun V2Home(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    V2HomeStat("📶", ping?.let { "$it мс" } ?: "—", "Пинг", Color(0xFF2EE59D))
+                    V2HomeStat("📶", ping?.let { "$it мс" } ?: "Таймаут", "Пинг", if (ping != null) Color(0xFF2EE59D) else Aurora.Danger)
                     V2HomeStat("↓", stats.samples.lastOrNull()?.let { formatBytes(it.downloadBytesPerSecond) + "/с" } ?: "—", "Загрузка", Aurora.Mint)
                     V2HomeStat("↑", stats.samples.lastOrNull()?.let { formatBytes(it.uploadBytesPerSecond) + "/с" } ?: "—", "Отдача", Aurora.Violet)
                 }
@@ -664,8 +673,18 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
                         Text(server.type.uppercase(), color = Aurora.Muted, fontSize = 12.sp)
                     }
                     val ping = server.pingMillis ?: offlinePings[server.tag]
-                    Surface(color = Aurora.Mint.copy(alpha = .12f), border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .65f)), shape = RoundedCornerShape(14.dp)) {
-                        Text(ping?.let { "$it мс · ${ServerHealthScore.combined(it, reliability(server))}" } ?: "…", color = Aurora.Mint, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                    Surface(
+                        color = if (ping != null) Aurora.Mint.copy(alpha = .12f) else Aurora.Danger.copy(alpha = .14f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, if (ping != null) Aurora.Mint.copy(alpha = .65f) else Aurora.Danger.copy(alpha = .7f)),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Text(
+                            ping?.let { "$it мс · ${ServerHealthScore.combined(it, reliability(server))}" } ?: "Время подключения истекло",
+                            color = if (ping != null) Aurora.Mint else Aurora.Danger,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = if (ping == null) 10.sp else 14.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
                     }
                 }
             }

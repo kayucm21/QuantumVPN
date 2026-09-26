@@ -114,6 +114,10 @@ val releaseSigningValueCount = listOf(
 require(releaseSigningValueCount == 0 || releaseSigningValueCount == 4) {
     "Release signing requires all four ZAPRET_SIGNING_* env vars or keystore.properties entries."
 }
+val releaseMinifyEnabled = providers.gradleProperty("zapretReleaseMinify")
+    .map(String::toBoolean)
+    .orElse(true)
+    .get()
 
 android {
     namespace = "com.quantumvpn"
@@ -212,8 +216,10 @@ android {
             // so the APK is installable; CI/production should set the four env vars.
             signingConfig = signingConfigs.findByName("release")
                 ?: signingConfigs.getByName("debug")
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // Keep production builds minified by default. A constrained local build can
+            // opt out with -PzapretReleaseMinify=false while retaining release signing.
+            isMinifyEnabled = releaseMinifyEnabled
+            isShrinkResources = releaseMinifyEnabled
             if (requestedApkAbi == null) {
                 ndk {
                     // A direct assembleRelease remains small and predictable. The release

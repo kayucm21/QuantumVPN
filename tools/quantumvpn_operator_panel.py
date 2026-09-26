@@ -46,10 +46,10 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
-PANEL_BUILD = "5.9.5"
-VERSION = "5.9.5"
-VERSION_CODE = 120
-DEFAULT_NOTE = "QuantumVPN 5.9.5: центр флота, история сессий и удалённые флаги."
+PANEL_BUILD = "5.9.9"
+VERSION = "5.9.9"
+VERSION_CODE = 124
+DEFAULT_NOTE = "QuantumVPN 5.9.9: живые метрики сети, центр обновлений и добровольная диагностика."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()

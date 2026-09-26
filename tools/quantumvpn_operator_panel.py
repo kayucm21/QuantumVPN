@@ -29,6 +29,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:  # Optional at import time; backups fail closed if unavailable.
+    AESGCM = None
+
 
 class OperatorHTTPServer(ThreadingHTTPServer):
     # Default backlog is 5 — APK downloads get RST mid-transfer and clients restart forever.
@@ -100,6 +105,54 @@ def session_secret() -> bytes:
         open(path, "wb").write(secrets.token_bytes(32))
         os.chmod(path, 0o600)
     return open(path, "rb").read()
+
+
+def backup_key() -> bytes:
+    """Load or create the local AES-256 key used for encrypted backups."""
+    raw = os.environ.get("QV_BACKUP_KEY", "").strip()
+    if raw:
+        try:
+            key = bytes.fromhex(raw) if re.fullmatch(r"[0-9a-fA-F]{64}", raw) else base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        except Exception as exc:
+            raise RuntimeError("QV_BACKUP_KEY must be 32-byte hex or base64") from exc
+        if len(key) != 32:
+            raise RuntimeError("QV_BACKUP_KEY must decode to 32 bytes")
+        return key
+    path = os.path.join(ROOT, "backup.key")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        key = open(path, "rb").read()
+    else:
+        key = secrets.token_bytes(32)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(key)
+    if len(key) != 32:
+        raise RuntimeError("backup.key is invalid; refusing to create an unencrypted backup")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return key
+
+
+def encrypt_backup_archive(archive: str) -> str:
+    """Encrypt a backup with AES-256-GCM and remove its plaintext copy."""
+    if AESGCM is None:
+        raise RuntimeError("cryptography is required for encrypted backups")
+    nonce = secrets.token_bytes(12)
+    plaintext = open(archive, "rb").read()
+    ciphertext = AESGCM(backup_key()).encrypt(nonce, plaintext, b"QuantumControl backup v1")
+    encrypted = archive + ".enc"
+    temporary = encrypted + ".part"
+    with open(temporary, "wb") as stream:
+        stream.write(b"QVBK1")
+        stream.write(nonce)
+        stream.write(ciphertext)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, encrypted)
+    os.remove(archive)
+    return encrypted
 
 
 def sign_session(payload: dict) -> str:
@@ -958,16 +1011,17 @@ def create_backup_archive():
             os.remove(temp_db)
         except OSError:
             pass
-    # Keep seven days locally; Telegram remains the remote copy.
+    encrypted = encrypt_backup_archive(archive)
+    # Keep seven days locally; Telegram receives only encrypted .zip.enc files.
     cutoff = time.time() - 7 * 86400
     for name in os.listdir(folder):
         path = os.path.join(folder, name)
-        if name.endswith(".zip") and os.path.getmtime(path) < cutoff:
+        if name.endswith((".zip", ".zip.enc")) and os.path.getmtime(path) < cutoff:
             try:
                 os.remove(path)
             except OSError:
                 pass
-    return archive
+    return encrypted
 
 
 def hourly_backup_worker():
@@ -1651,8 +1705,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label>Chat ID<input name=telegram_chat_id value="{html.escape(s.get('telegram_chat_id',''))}"></label>
         <div class=actions><button>Сохранить</button>
         <button class=secondary formaction=/operator/actions name=action value=telegram_test>Тест сообщения</button>
-        <button class=secondary formaction=/operator/actions name=action value=backup_now>Создать backup сейчас</button>
-        <a class="button secondary" href="/operator/backup.zip">Скачать backup</a></div>
+        <button class=secondary formaction=/operator/actions name=action value=backup_now>Создать зашифрованный backup</button>
+        <a class="button secondary" href="/operator/backup.zip">Скачать зашифрованный backup</a></div>
         <p class=muted>Архив содержит SQLite-конфигурацию, настройки панели и ключ сессии. Передача выполняется только в указанный Telegram-чат.</p>
       </form>
     </section>
@@ -1783,6 +1837,18 @@ class App(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        if PUBLIC_BASE.lower().startswith("https://"):
+            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        if content_type.startswith("text/html"):
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            )
         if headers:
             for k, v in headers.items():
                 self.send_header(k, v)
@@ -2158,7 +2224,7 @@ class App(BaseHTTPRequestHandler):
                 return self.reply(
                     200,
                     payload,
-                    "application/zip",
+                    "application/octet-stream",
                     {"Content-Disposition": f'attachment; filename="{os.path.basename(archive)}"'},
                 )
             except OSError:
@@ -2442,12 +2508,15 @@ class App(BaseHTTPRequestHandler):
                 return self.reply(403, "Invalid origin")
 
         if path == "/operator/login":
-            length = int(self.headers.get("Content-Length", "0"))
+            ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
+            login_limit = max(3, min(20, int(s.get("login_rate_limit_per_min") or 5)))
+            if rate_limited(f"login:{ip}", login_limit):
+                return self.reply(429, render_login("Слишком много попыток. Попробуйте позже."), "text/html; charset=utf-8", {"Retry-After": "60"})
+            length = min(int(self.headers.get("Content-Length", "0")), 16_384)
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             user = form.get("username", [""])[0]
             password = form.get("password", [""])[0]
             code = form.get("totp", [""])[0]
-            ip = self.client_address[0]
             if not ip_allowed(ip, s):
                 return self.reply(403, render_login("IP не в allowlist"), "text/html; charset=utf-8")
             identity = authenticate_admin(db, user, password)

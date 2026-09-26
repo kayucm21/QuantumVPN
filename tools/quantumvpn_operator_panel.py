@@ -51,7 +51,7 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
-PANEL_BUILD = "5.10.0"
+PANEL_BUILD = "5.10.1"
 VERSION = "5.10.0"
 VERSION_CODE = 125
 DEFAULT_NOTE = "QuantumVPN 5.10.0: проверка сети и серверов при запуске, понятные таймауты и живые метрики."
@@ -1420,7 +1420,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </aside>
       <section class=panel-content>
     <section class=hero>
-      <div class=hero-top><div class=accent>QUANTUM CONTROL · ROSPANEL · build {html.escape(PANEL_BUILD)}</div><span class=system-pill>● Система в норме</span><span class=top-date>{time.strftime('%d %b %Y, %H:%M')}<br><small>UTC+3</small></span></div>
+      <div class=hero-top><div class=accent>QUANTUM CONTROL · ROSPANEL · build {html.escape(PANEL_BUILD)}</div><span id=system-pill class=system-pill>● Система в норме</span><span class=top-date>{time.strftime('%d %b %Y, %H:%M')}<br><small>UTC+3</small></span></div>
     </section>
     {flash_html}
 
@@ -1741,6 +1741,19 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
 
     <script>
     const tab = new URLSearchParams(location.search).get('tab') || 'dashboard';
+    if (tab === 'dashboard') {{
+      // Keep the command centre current without forcing a manual refresh.
+      // The health worker samples services every minute; this reloads the compact
+      // projection after the next sample and leaves long-lived log streams alone.
+      const pill = document.getElementById('system-pill');
+      let left = 60;
+      const timer = window.setInterval(() => {{
+        left -= 1;
+        if (pill && left > 0) pill.setAttribute('title', `Следующее обновление через ${{left}} с`);
+        if (left <= 0) window.location.reload();
+      }}, 1000);
+      window.addEventListener('beforeunload', () => window.clearInterval(timer));
+    }}
     if (tab === 'logs') {{
       const output = document.getElementById('live-log');
       const state = document.getElementById('live-state');

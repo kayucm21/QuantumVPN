@@ -288,6 +288,7 @@ fun QuantumVpnAppV2(
                         killSwitch = state.settings.blockNonVpnTraffic,
                         onAdBlock = viewModel::setAdBlockEnabled,
                         onKillSwitch = viewModel::setBlockNonVpnTraffic,
+                        onCheckUpdate = onCheckUpdate,
                     )
                 }
             }
@@ -710,6 +711,12 @@ private fun V2Statistics(
             V2Metric("Загрузка", speed?.let { formatBytes(it.downloadBytesPerSecond) + "/с" } ?: "0 Б/с", Modifier.weight(1f))
             V2Metric("Отдача", speed?.let { formatBytes(it.uploadBytesPerSecond) + "/с" } ?: "0 Б/с", Modifier.weight(1f))
         }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            V2Metric("Джиттер", stats.jitterMillis?.let { "$it мс" } ?: "—", Modifier.weight(1f))
+            V2Metric("Потери", stats.pingLossPercent?.let { "$it%" } ?: "—", Modifier.weight(1f))
+            V2Metric("Проб", if (stats.pingAttempts > 0) "${stats.pingSuccesses}/${stats.pingAttempts}" else "—", Modifier.weight(1f))
+        }
         Spacer(Modifier.height(14.dp))
         TrafficChart(stats)
         var now by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -762,10 +769,12 @@ private fun V2Settings(
     onTravelMode: (Boolean) -> Unit,
     onAdBlock: (Boolean) -> Unit,
     onKillSwitch: (Boolean) -> Unit,
+    onCheckUpdate: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var logStatus by remember { mutableStateOf("") }
+    var logConsentOpen by rememberSaveable { mutableStateOf(false) }
     var privacyOpen by rememberSaveable { mutableStateOf(false) }
     var notificationsOpen by rememberSaveable { mutableStateOf(false) }
     var aboutOpen by rememberSaveable { mutableStateOf(false) }
@@ -826,6 +835,23 @@ private fun V2Settings(
         }
         return
     }
+    if (logConsentOpen) {
+        AlertDialog(
+            onDismissRequest = { logConsentOpen = false },
+            title = { Text("Отправить диагностику?") },
+            text = { Text("Будут отправлены только обезличенные журналы и сведения об ошибке. Пароли, ссылки подписок и содержимое трафика не отправляются.") },
+            confirmButton = {
+                Button(onClick = {
+                    logConsentOpen = false
+                    scope.launch {
+                        logStatus = "Отправка…"
+                        logStatus = if (VoluntaryDiagnosticReporter(context).send(diagnostics).isSuccess) "Отчёт отправлен в панель" else "Не удалось отправить отчёт"
+                    }
+                }) { Text("Отправить") }
+            },
+            dismissButton = { TextButton(onClick = { logConsentOpen = false }) { Text("Отмена") } },
+        )
+    }
     Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Aurora.Night))).verticalScroll(rememberScrollState()).padding(20.dp)) {
         Text("Настройки", style = MaterialTheme.typography.displaySmall, color = Aurora.Text, fontWeight = FontWeight.Bold)
         Text("Основные функции собраны в компактные группы", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
@@ -876,11 +902,9 @@ private fun V2Settings(
         V2SettingsGroup("Сервис и обратная связь") {
             V2CompactToggle("Уведомления", notifications, onNotifications)
             V2NavRow("Центр уведомлений", if (policy.maintenance) "Технические работы активны" else "Обновления и объявления сервиса", onClick = { notificationsOpen = true })
+            V2NavRow("Проверить обновления", "Проверить подпись и новую версию сейчас", onClick = onCheckUpdate)
             if (policy.features.diagnostics) V2NavRow("Отправить логи", "Добровольный диагностический отчёт", onClick = {
-                scope.launch {
-                    logStatus = "Отправка…"
-                    logStatus = if (VoluntaryDiagnosticReporter(context).send(diagnostics).isSuccess) "Отчёт отправлен в панель" else "Не удалось отправить отчёт"
-                }
+                logConsentOpen = true
             })
             if (logStatus.isNotBlank()) Text(logStatus, color = Aurora.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
             V2NavRow("Пожертвование", "Открыть ЮMoney во внешнем браузере", onClick = { donateOpen = true })

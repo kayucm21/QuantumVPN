@@ -51,4 +51,19 @@ class SessionTrafficAccumulatorTest {
         assertNull(accumulator.value.externalIp)
         assertNull(accumulator.value.pingMillis)
     }
+
+    @Test
+    fun `ping quality exposes jitter and loss for the current session`() {
+        val accumulator = SessionTrafficAccumulator()
+        accumulator.start(11, "profile", 500)
+
+        accumulator.updatePing(11, 20)
+        accumulator.updatePing(11, null)
+        accumulator.updatePing(11, 30)
+
+        assertEquals(3, accumulator.value.pingAttempts)
+        assertEquals(2, accumulator.value.pingSuccesses)
+        assertEquals(33, accumulator.value.pingLossPercent)
+        assertEquals(10L, accumulator.value.jitterMillis)
+    }
 }

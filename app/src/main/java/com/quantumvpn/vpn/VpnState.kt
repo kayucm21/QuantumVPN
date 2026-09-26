@@ -54,6 +54,8 @@ data class VpnSessionStats(
     val exitFlagEmoji: String? = null,
     val pingMillis: Long? = null,
     val pingSamples: List<Long> = emptyList(),
+    val pingAttempts: Int = 0,
+    val pingSuccesses: Int = 0,
     val uploadTotalBytes: Long = 0,
     val downloadTotalBytes: Long = 0,
     val samples: List<TrafficSample> = emptyList(),
@@ -61,6 +63,19 @@ data class VpnSessionStats(
     val adBlockedPerMinute: Int = 0,
     val adBlockedSessionTotal: Long = 0L,
 ) {
+    /** Mean absolute delta between consecutive probes, or null before two samples. */
+    val jitterMillis: Long?
+        get() = pingSamples.zipWithNext { a, b -> kotlin.math.abs(b - a) }
+            .takeIf { it.isNotEmpty() }
+            ?.average()
+            ?.toLong()
+
+    /** Loss over the current session's probe attempts. */
+    val pingLossPercent: Int?
+        get() = pingAttempts.takeIf { it > 0 }?.let {
+            ((it - pingSuccesses.coerceIn(0, it)) * 100 / it).coerceIn(0, 100)
+        }
+
     val exitLocation: ExitLocation?
         get() = when {
             !exitCountry.isNullOrBlank() -> ExitLocation(

@@ -7,6 +7,8 @@ internal class SessionTrafficAccumulator(
     private var generation: Long = Long.MIN_VALUE
     private val samples = ArrayDeque<TrafficSample>(capacity)
     private val pingSamples = ArrayDeque<Long>(capacity)
+    private var pingAttempts = 0
+    private var pingSuccesses = 0
 
     var value: VpnSessionStats = VpnSessionStats()
         private set
@@ -23,6 +25,8 @@ internal class SessionTrafficAccumulator(
         this.generation = generation
         samples.clear()
         pingSamples.clear()
+        pingAttempts = 0
+        pingSuccesses = 0
         value = VpnSessionStats(
             profileId = profileId,
             connectedAtEpochMillis = connectedAtEpochMillis,
@@ -34,6 +38,8 @@ internal class SessionTrafficAccumulator(
         generation = Long.MIN_VALUE
         samples.clear()
         pingSamples.clear()
+        pingAttempts = 0
+        pingSuccesses = 0
         value = VpnSessionStats()
         return value
     }
@@ -91,13 +97,17 @@ internal class SessionTrafficAccumulator(
     fun updatePing(generation: Long, pingMillis: Long?): VpnSessionStats? {
         if (generation != this.generation) return null
         val sanitized = pingMillis?.coerceAtLeast(0)
+        pingAttempts = (pingAttempts + 1).coerceAtMost(100_000)
         if (sanitized != null) {
+            pingSuccesses = (pingSuccesses + 1).coerceAtMost(pingAttempts)
             if (pingSamples.size == capacity) pingSamples.removeFirst()
             pingSamples.addLast(sanitized)
         }
         value = value.copy(
             pingMillis = sanitized,
             pingSamples = pingSamples.toList(),
+            pingAttempts = pingAttempts,
+            pingSuccesses = pingSuccesses,
         )
         return value
     }
@@ -124,6 +134,8 @@ internal class SessionTrafficAccumulator(
             exitFlagEmoji = null,
             pingMillis = null,
             pingSamples = emptyList(),
+            pingAttempts = 0,
+            pingSuccesses = 0,
         )
         return value
     }

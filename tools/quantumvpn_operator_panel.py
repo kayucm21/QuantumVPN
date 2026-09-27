@@ -1895,12 +1895,16 @@ class App(BaseHTTPRequestHandler):
             request_host = (self.headers.get("Host") or expected.netloc).split(",", 1)[0].strip()
             request_host_name = request_host.split(":", 1)[0].strip("[]").lower()
             expected_name = (expected.hostname or "").lower()
-            scheme = (self.headers.get("X-Forwarded-Proto") or expected.scheme or "https").split(",", 1)[0].strip().lower()
+            # Trust the configured public scheme instead of X-Forwarded-Proto:
+            # nginx may pass the upstream HTTP scheme even for the public TLS
+            # endpoint, which caused valid browser form posts to be rejected.
+            scheme = (expected.scheme or "https").lower()
             if parsed.scheme.lower() != scheme:
                 return False
             if not parsed.hostname or parsed.hostname.lower() not in {request_host_name, expected_name}:
                 return False
-            # An omitted browser port means the default port for the scheme.
+            # The public hostname is owned by this panel. Accept an omitted
+            # port, :8443, or the reverse-proxy's external port.
             parsed_port = parsed.port
             expected_port = expected.port
             host_port = None
@@ -1909,7 +1913,7 @@ class App(BaseHTTPRequestHandler):
                     host_port = int(request_host.rsplit(":", 1)[-1])
                 except ValueError:
                     host_port = None
-            return parsed_port in (None, expected_port, host_port)
+            return parsed_port in (None, expected_port, host_port, 443, 8443)
         except (ValueError, TypeError):
             return False
 

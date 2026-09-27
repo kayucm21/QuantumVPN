@@ -12,6 +12,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -192,6 +193,7 @@ fun FastVpnHomeContent(
     ModernHomeContent(
         title = title,
         vpnState = vpnState,
+        sessionStats = sessionStats,
         sessionTimerLabel = sessionTimerLabel,
         serverFlag = serverFlag,
         serverLabel = serverLabel,
@@ -209,6 +211,7 @@ fun FastVpnHomeContent(
         onOpenServers = onOpenServers,
         onToggleAdBlock = onToggleAdBlock,
         onOpenAdBlockSettings = onOpenAdBlockSettings,
+        modifier = modifier,
     )
     return
 
@@ -533,6 +536,7 @@ fun FastVpnHomeContent(
 private fun ModernHomeContent(
     title: String,
     vpnState: VpnConnectionState,
+    sessionStats: VpnSessionStats,
     sessionTimerLabel: String,
     serverFlag: String?,
     serverLabel: String,
@@ -550,75 +554,392 @@ private fun ModernHomeContent(
     onOpenServers: () -> Unit,
     onToggleAdBlock: (Boolean) -> Unit,
     onOpenAdBlockSettings: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val connected = vpnState is VpnConnectionState.Connected
     val busy = vpnState is VpnConnectionState.Starting || vpnState is VpnConnectionState.Stopping
-    val stateText = when {
-        connected -> "Защита включена"
-        busy -> "Подключение…"
-        else -> "Безопасное соединение"
+    val stateText = when (vpnState) {
+        is VpnConnectionState.Connected -> "Защищено"
+        is VpnConnectionState.Starting -> "Подключение…"
+        is VpnConnectionState.Stopping -> "Отключение…"
+        is VpnConnectionState.Error -> "Ошибка подключения"
+        VpnConnectionState.Stopped -> "Не защищено"
+    }
+    val stateHint = when (vpnState) {
+        is VpnConnectionState.Connected -> "Ваш трафик защищён"
+        is VpnConnectionState.Starting -> vpnState.message.ifBlank { "Проверяем защищённый канал…" }
+        is VpnConnectionState.Stopping -> "Завершаем VPN-сессию…"
+        is VpnConnectionState.Error -> friendlyVpnErrorHint(vpnState.message)
+        VpnConnectionState.Stopped -> "Нажмите кнопку, чтобы включить защиту"
+    }
+    val stateColor = when (vpnState) {
+        is VpnConnectionState.Connected -> CosmicTokens.StatusGreen
+        is VpnConnectionState.Starting, is VpnConnectionState.Stopping -> CosmicTokens.Orbit
+        is VpnConnectionState.Error -> CosmicTokens.StatusYellow
+        VpnConnectionState.Stopped -> Color(0xFFFF9AA8)
+    }
+    val actionLabel = when {
+        connected -> "Отключить"
+        busy -> "Остановить"
+        else -> "Подключить"
     }
     Box(
-        modifier = Modifier.fillMaxSize().background(
-            Brush.verticalGradient(listOf(Color(0xFF071B2A), Color(0xFF04111E), Color(0xFF02070D))),
-        ),
+        modifier = modifier.fillMaxSize(),
     ) {
-        Globe3DBackdrop(
+        AuroraGlassBackdrop(
             modifier = Modifier.fillMaxSize(),
-            pulse = connected && !reduceMotion,
-            reduceMotion = reduceMotion,
-            countryCode = null,
+            motionEnabled = !reduceMotion,
         )
         Column(
-            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 18.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column {
-                    Text(title, color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-                    Text("Ваш безопасный интернет", color = CosmicTokens.OnVoidMuted, fontSize = 13.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AuroraBrandMark(
+                        connected = connected,
+                        modifier = Modifier.size(42.dp),
+                    )
+                    Column(modifier = Modifier.padding(start = 10.dp)) {
+                        Text(title, color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+                        Text("Свобода без границ", color = CosmicTokens.OnVoidMuted, fontSize = 13.sp)
+                    }
                 }
                 IconButton(onClick = onOpenMenu) {
-                    Surface(shape = CircleShape, color = CosmicTokens.Card, modifier = Modifier.size(42.dp)) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color(0xFF152344).copy(alpha = 0.82f),
+                        modifier = Modifier.size(42.dp),
+                    ) {
                         Box(contentAlignment = Alignment.Center) { GridMenuIcon(Color.White, Modifier.size(18.dp)) }
                     }
                 }
             }
-            Spacer(Modifier.height(38.dp))
-            Surface(
-                shape = CircleShape,
-                color = if (connected) CosmicTokens.StatusGreen.copy(alpha = 0.15f) else CosmicTokens.Card.copy(alpha = 0.85f),
-                border = androidx.compose.foundation.BorderStroke(2.dp, if (connected) CosmicTokens.StatusGreen else Color.White.copy(alpha = 0.20f)),
-                modifier = Modifier.size(218.dp),
+            Spacer(Modifier.height(16.dp))
+            AuroraStatusPill(
+                stateText = stateText,
+                stateColor = stateColor,
+                subtitle = stateHint,
+            )
+            Spacer(Modifier.height(18.dp))
+            AuroraConnectButton(
+                connected = connected,
+                busy = busy,
+                enabled = connectEnabled,
+                reduceMotion = reduceMotion,
+                actionLabel = actionLabel,
+                onClick = onToggleConnect,
+            )
+            Spacer(Modifier.height(20.dp))
+            AuroraGlass(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenServers)
+                    .semantics { contentDescription = "Выбрать сервер" },
+                tint = Color(0xFF0E2A42),
             ) {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
+                Row(
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(if (connected) "✓" else "◉", color = if (connected) CosmicTokens.StatusGreen else Color.White, fontSize = 50.sp)
-                    Text(stateText, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-                    Text(if (connected || busy) sessionTimerLabel else "Нажмите для подключения", color = CosmicTokens.OnVoidMuted, fontSize = 12.sp)
+                    Text(serverFlag ?: "🌐", fontSize = 26.sp)
+                    Column(modifier = Modifier.weight(1f).padding(start = 13.dp, end = 8.dp)) {
+                        Text("Сервер", color = CosmicTokens.OnVoidMuted, fontSize = 12.sp)
+                        Text(
+                            serverLabel,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 17.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    AuroraPingBadge(serverPingLabel)
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.72f),
+                        modifier = Modifier.padding(start = 10.dp),
+                    )
                 }
             }
-            Spacer(Modifier.height(22.dp))
-            FastPowerButton(
-                connected = connected, busy = busy, enabled = connectEnabled, reduceMotion = reduceMotion,
-                globe3d = true, onClick = onToggleConnect, onSwipeLeft = {}, onSwipeRight = {},
-            )
-            Spacer(Modifier.height(24.dp))
-            ServerSelectCard(serverFlag, serverLabel, serverPingLabel, onOpenServers)
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                AuroraMetricCard(
+                    modifier = Modifier.weight(1f),
+                    label = "Трафик",
+                    value = formatBytes(
+                        (sessionStats.downloadTotalBytes + sessionStats.uploadTotalBytes).coerceAtLeast(0L),
+                    ),
+                    accent = CosmicTokens.StatusGreen,
+                    mark = "↕",
+                )
+                AuroraMetricCard(
+                    modifier = Modifier.weight(1f),
+                    label = if (connected || busy) "Время" else "Статус",
+                    value = if (connected || busy) sessionTimerLabel else "Готово",
+                    accent = CosmicTokens.Orbit,
+                    mark = if (connected) "◷" else "◌",
+                )
+            }
             Spacer(Modifier.height(12.dp))
             AdBlockBar(
                 enabled = adBlockActive, configured = adBlockEnabled, ruleCount = adBlockRuleCount,
                 onlineDns = adBlockOnlineDns, level = adBlockLevel, blockedSessionTotal = adBlockedSessionTotal,
                 onToggle = onToggleAdBlock, onOpenSettings = onOpenAdBlockSettings,
             )
-            Spacer(Modifier.height(22.dp))
+            Spacer(Modifier.height(12.dp))
+            Text(
+                if (connected) "Защита DNS и блокировка рекламы активны в VPN-сессии"
+                else "VPN не подключён — системный интернет работает как обычно",
+                color = CosmicTokens.OnVoidMuted.copy(alpha = 0.82f),
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
+    }
+}
+
+@Composable
+internal fun AuroraBrandMark(
+    connected: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val glow = if (connected) CosmicTokens.StatusGreen else CosmicTokens.Orbit
+    Canvas(modifier = modifier) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val radius = size.minDimension * 0.45f
+        drawCircle(
+            brush = Brush.radialGradient(
+                listOf(glow.copy(alpha = 0.55f), glow.copy(alpha = 0.12f), Color.Transparent),
+                center = center,
+                radius = radius * 1.3f,
+            ),
+            center = center,
+            radius = radius * 1.3f,
+        )
+        drawCircle(color = Color(0xFF0A1830), radius = radius, center = center)
+        drawCircle(color = glow, radius = radius, center = center, style = Stroke(width = 2.dp.toPx()))
+        val stroke = 3.dp.toPx()
+        drawArc(
+            color = Color.White.copy(alpha = 0.92f),
+            startAngle = -42f,
+            sweepAngle = 252f,
+            useCenter = false,
+            topLeft = Offset(center.x - radius * 0.46f, center.y - radius * 0.46f),
+            size = Size(radius * 0.92f, radius * 0.92f),
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+        drawLine(
+            color = Color.White.copy(alpha = 0.92f),
+            start = Offset(center.x, center.y - radius * 0.48f),
+            end = Offset(center.x, center.y - radius * 0.06f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+    }
+}
+
+@Composable
+internal fun AuroraStatusPill(
+    stateText: String,
+    stateColor: Color,
+    subtitle: String,
+) {
+    AuroraGlass(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 20.dp,
+        tint = Color(0xFF102846),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Canvas(Modifier.size(12.dp)) {
+                drawCircle(stateColor.copy(alpha = 0.26f), radius = size.minDimension * 0.5f)
+                drawCircle(stateColor, radius = size.minDimension * 0.24f)
+            }
+            Column(modifier = Modifier.padding(start = 9.dp)) {
+                Text(stateText, color = stateColor, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text(
+                    subtitle,
+                    color = CosmicTokens.OnVoidMuted,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun AuroraConnectButton(
+    connected: Boolean,
+    busy: Boolean,
+    enabled: Boolean,
+    reduceMotion: Boolean,
+    actionLabel: String,
+    onClick: () -> Unit,
+) {
+    val transition = rememberInfiniteTransition(label = "aurora-connect")
+    val orbit by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(4_200, easing = LinearEasing), RepeatMode.Restart),
+        label = "aurora-orbit",
+    )
+    val pulse by transition.animateFloat(
+        initialValue = 0.92f,
+        targetValue = 1.08f,
+        animationSpec = infiniteRepeatable(tween(1_800, easing = LinearEasing), RepeatMode.Reverse),
+        label = "aurora-pulse",
+    )
+    val activePulse = if (connected && !busy && !reduceMotion) pulse else 1f
+    val accent = when {
+        connected -> CosmicTokens.StatusGreen
+        busy -> CosmicTokens.Orbit
+        else -> Color(0xFF55EEC6)
+    }
+    Box(
+        modifier = Modifier
+            .size(214.dp)
+            .semantics { contentDescription = actionLabel },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val outer = size.minDimension * 0.47f
+            drawCircle(
+                brush = Brush.radialGradient(
+                    listOf(accent.copy(alpha = 0.28f * activePulse), Color.Transparent),
+                    center = center,
+                    radius = outer * 1.28f,
+                ),
+                center = center,
+                radius = outer * 1.28f,
+            )
+            drawCircle(
+                color = Color.White.copy(alpha = 0.13f),
+                radius = outer,
+                center = center,
+                style = Stroke(width = 1.2.dp.toPx()),
+            )
+            if (busy || connected) {
+                drawArc(
+                    color = accent.copy(alpha = 0.88f),
+                    startAngle = if (reduceMotion) -88f else orbit - 90f,
+                    sweepAngle = if (busy) 124f else 198f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - outer, center.y - outer),
+                    size = Size(outer * 2f, outer * 2f),
+                    style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round),
+                )
+            }
+        }
+        Box(
+            modifier = Modifier
+                .size(156.dp)
+                .clip(CircleShape)
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            accent.copy(alpha = 0.62f),
+                            Color(0xFF0E2D3C),
+                            Color(0xFF071225),
+                        ),
+                    ),
+                )
+                .border(1.dp, accent.copy(alpha = 0.78f), CircleShape)
+                .clickable(enabled = enabled, onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (busy) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    strokeWidth = 3.dp,
+                    modifier = Modifier.size(38.dp),
+                )
+            } else {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Canvas(Modifier.size(48.dp)) {
+                        val stroke = 5.dp.toPx()
+                        drawArc(
+                            color = Color.White,
+                            startAngle = -42f,
+                            sweepAngle = 264f,
+                            useCenter = false,
+                            topLeft = Offset(stroke, stroke),
+                            size = Size(size.width - stroke * 2f, size.height - stroke * 2f),
+                            style = Stroke(width = stroke, cap = StrokeCap.Round),
+                        )
+                        drawLine(
+                            color = Color.White,
+                            start = Offset(size.width / 2f, stroke * 0.45f),
+                            end = Offset(size.width / 2f, size.height * 0.47f),
+                            strokeWidth = stroke,
+                            cap = StrokeCap.Round,
+                        )
+                    }
+                    Spacer(Modifier.height(3.dp))
+                    Text(actionLabel, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AuroraPingBadge(pingLabel: String?) {
+    val label = pingLabel?.takeIf { it.isNotBlank() } ?: "—"
+    AuroraGlass(cornerRadius = 14.dp, tint = Color(0xFF06493D)) {
+        Text(
+            text = label,
+            color = if (pingLabel.isNullOrBlank()) CosmicTokens.OnVoidMuted else CosmicTokens.StatusGreen,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+        )
+    }
+}
+
+@Composable
+internal fun AuroraMetricCard(
+    modifier: Modifier,
+    label: String,
+    value: String,
+    accent: Color,
+    mark: String,
+) {
+    AuroraGlass(modifier = modifier, cornerRadius = 20.dp, tint = Color(0xFF102540)) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(mark, color = accent, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+            Column(modifier = Modifier.padding(start = 8.dp)) {
+                Text(label, color = CosmicTokens.OnVoidMuted, fontSize = 11.sp)
+                Text(
+                    value,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

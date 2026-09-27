@@ -92,6 +92,70 @@ class OperatorTests(unittest.TestCase):
         self.assertTrue(policy["maintenance"])
         self.assertFalse(policy["features"]["vpn_connect"])
 
+    def test_scheduled_release_requires_both_nonempty_abis(self):
+        version = "9.9.9"
+        version_code = 9999
+        now = int(time.time())
+        setting_keys = (
+            "app_version",
+            "app_version_code",
+            "rollout_percent",
+            "app_changelog",
+            "min_version_code",
+            "update_notifications_enabled",
+            "announce",
+            "announce_en",
+            "force_update_message",
+            "config_revision",
+            "release_schedule_enabled",
+            "release_publish_at",
+            "scheduled_app_version",
+            "scheduled_app_version_code",
+            "scheduled_rollout_percent",
+            "scheduled_app_changelog",
+            "scheduled_min_version_code",
+        )
+        with closing(self.panel.conn()) as db:
+            original = {key: self.panel.settings(db).get(key, "") for key in setting_keys}
+            try:
+                self.panel.set_settings(db, {
+                    "release_schedule_enabled": "1",
+                    "release_publish_at": str(now - 1),
+                    "scheduled_app_version": version,
+                    "scheduled_app_version_code": str(version_code),
+                    "scheduled_rollout_percent": "100",
+                    "scheduled_app_changelog": "ready when both APKs exist",
+                })
+                db.commit()
+                folder = Path(self.tmp.name) / version
+                folder.mkdir(exist_ok=True)
+                (folder / f"QuantumVPN-{version}-operator-debug-arm64-v8a.apk").write_bytes(b"arm64")
+                (folder / f"QuantumVPN-{version}-operator-debug-armeabi-v7a.apk").write_bytes(b"")
+
+                self.assertFalse(self.panel.promote_scheduled_release(db, now=now))
+                deferred = self.panel.settings(db)
+                self.assertEqual(deferred["app_version"], original["app_version"])
+                self.assertEqual(deferred["release_schedule_enabled"], "1")
+                row = db.execute(
+                    "select detail from events where kind='release_promotion_deferred' order by ts desc limit 1"
+                ).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(json.loads(row[0])["missing_abis"], ["armeabi-v7a"])
+
+                (folder / f"QuantumVPN-{version}-operator-debug-armeabi-v7a.apk").write_bytes(b"armv7")
+                self.assertTrue(self.panel.promote_scheduled_release(db, now=now))
+                promoted = self.panel.settings(db)
+                self.assertEqual(promoted["app_version"], version)
+                self.assertEqual(promoted["release_schedule_enabled"], "0")
+            finally:
+                self.panel.set_settings(db, original)
+                db.execute(
+                    "delete from events where kind in ('release_promotion_deferred', 'release_promoted') and detail like ?",
+                    (f'%"version": "{version}"%',),
+                )
+                db.commit()
+                self.panel.release_info.cache_clear()
+
 
 if __name__ == "__main__":
     unittest.main()

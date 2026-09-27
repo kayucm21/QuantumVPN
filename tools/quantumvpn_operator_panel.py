@@ -51,6 +51,7 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
+REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
 PANEL_BUILD = "5.10.3"
 VERSION = "5.10.0"
 VERSION_CODE = 125
@@ -216,6 +217,26 @@ def release_info(version: str, version_code: int, note: str, abi: str, size: int
         "note": note or DEFAULT_NOTE,
         "application_id": "com.quantumvpn.debug",
     }
+
+
+def scheduled_release_missing_abis(version: str):
+    """Return required APK ABIs that are missing, empty, or outside DOWNLOAD_ROOT."""
+    root = os.path.realpath(DOWNLOAD_ROOT)
+    missing = []
+    for abi in REQUIRED_RELEASE_ABIS:
+        name = f"QuantumVPN-{version}-operator-debug-{abi}.apk"
+        path = os.path.join(DOWNLOAD_ROOT, version, name)
+        try:
+            # Do not allow a scheduled release to be satisfied by a symlink that
+            # resolves outside the public download directory.
+            if os.path.commonpath((root, os.path.realpath(path))) != root:
+                missing.append(abi)
+                continue
+            if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                missing.append(abi)
+        except (OSError, ValueError):
+            missing.append(abi)
+    return missing
 
 
 def conn():
@@ -1025,6 +1046,28 @@ def promote_scheduled_release(db, now=None):
     if publish_at <= 0 or publish_at > now or not version or code <= 0:
         return False
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        return False
+    missing_abis = scheduled_release_missing_abis(version)
+    if missing_abis:
+        detail = json.dumps({
+            "version": version,
+            "version_code": code,
+            "publish_at": publish_at,
+            "missing_abis": missing_abis,
+        }, ensure_ascii=False, sort_keys=True)
+        # The worker runs every 20 seconds. Record this once per exact
+        # scheduled-release state instead of endlessly filling the event log
+        # while an APK upload is incomplete.
+        already_logged = db.execute(
+            "select 1 from events where kind=? and device=? and detail=? limit 1",
+            ("release_promotion_deferred", "operator", detail),
+        ).fetchone()
+        if not already_logged:
+            db.execute(
+                "insert into events values (?,?,?,?,?)",
+                (now, "release_promotion_deferred", "operator", "", detail),
+            )
+            db.commit()
         return False
     rollout = max(1, min(100, int(s.get("scheduled_rollout_percent", "100") or 100)))
     note = s.get("scheduled_app_changelog") or DEFAULT_NOTE

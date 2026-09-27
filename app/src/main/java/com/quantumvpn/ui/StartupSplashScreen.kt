@@ -363,60 +363,234 @@ private fun V2StartupSplash(
             else -> "Готово"
         }
     }
+    val step = when (updateState) {
+        is UpdateState.Ready -> 3
+        is UpdateState.Downloading, is UpdateState.Available -> 2
+        is UpdateState.Checking, is UpdateState.RetryingViaVpn -> 1
+        else -> when {
+            ready -> 3
+            availableServers > 0 -> 2
+            else -> 1
+        }
+    }
     Box(
-        Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF05111F), Color(0xFF071A2C), Color(0xFF040B16)))),
+        modifier = Modifier
+            .fillMaxSize()
+            .semantics { contentDescription = "Загрузка QuantumVPN $pct%" },
     ) {
-        Globe3DBackdrop(Modifier.fillMaxSize(), pulse = true, reduceMotion = false, countryCode = null)
+        AuroraGlassBackdrop(Modifier.fillMaxSize(), motionEnabled = true)
         Column(
-            Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 36.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 34.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(Modifier.height(28.dp))
-            Text("QuantumVPN", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 32.sp)
-            Text("ORBIT · Защита соединения", color = Color(0xFF8FA9BE), fontSize = 16.sp, modifier = Modifier.padding(top = 6.dp))
-            Spacer(Modifier.weight(1f))
-            Spacer(Modifier.weight(1f))
-            Text(status, color = Color(0xFFB7CDDE), fontSize = 14.sp, maxLines = 2)
-            Spacer(Modifier.height(12.dp))
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(12.dp)
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(Color(0xFF1E4C6B)),
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(
-                    Modifier
-                        .fillMaxWidth(displayedProgress.coerceIn(0.02f, 1f))
-                        .height(12.dp)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(
-                                    Color(0xFF1AB8D4).copy(alpha = glow),
-                                    Color(0xFF3DE7FF),
-                                    Color(0xFF7B5CFF).copy(alpha = glow),
-                                ),
-                            ),
-                        ),
-                )
-                Canvas(Modifier.fillMaxSize()) {
-                    val x = size.width * shimmer
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(Color.White.copy(alpha = 0.55f), Color.Transparent),
-                            center = Offset(x, size.height / 2f),
-                            radius = size.width * 0.18f,
-                        ),
-                        radius = size.width * 0.18f,
-                        center = Offset(x, size.height / 2f),
-                    )
+                AuroraBrandMark(connected = ready, modifier = Modifier.size(42.dp))
+                Column(modifier = Modifier.padding(start = 10.dp)) {
+                    Text("QuantumVPN", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 24.sp)
+                    Text("Защита соединения", color = Color(0xFFB2C5DA), fontSize = 13.sp)
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            Text("$pct%", color = Color(0xFF3DE7FF), fontWeight = FontWeight.Bold, fontSize = 14.sp)
-            Spacer(Modifier.height(18.dp))
-            Text("Более открытый мир начинается здесь", color = Color(0xFF6B8499), fontSize = 12.sp)
+            Spacer(Modifier.height(28.dp))
+            Text("Готовим защищённый канал", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 21.sp)
+            Text(
+                "Проверяем сеть, обновления и доступные серверы",
+                color = Color(0xFFB6C7D8),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            Spacer(Modifier.weight(0.65f))
+            AuroraStartupEmblem(
+                progress = displayedProgress,
+                glow = glow,
+                shimmer = shimmer,
+            )
+            Spacer(Modifier.weight(0.55f))
+            AuroraGlass(
+                modifier = Modifier.fillMaxWidth(),
+                cornerRadius = 24.dp,
+                tint = Color(0xFF102842),
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(status, color = Color(0xFFD8E4EF), fontSize = 14.sp, maxLines = 2)
+                        Text("$pct%", color = Color(0xFF58F6CE), fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(9.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(Color(0xFF23415C).copy(alpha = 0.72f)),
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth(displayedProgress.coerceIn(0.02f, 1f))
+                                .height(9.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(
+                                            Color(0xFF54F4CF).copy(alpha = glow),
+                                            Color(0xFF75FFD9),
+                                            Color(0xFFC395FF).copy(alpha = glow),
+                                        ),
+                                    ),
+                                ),
+                        )
+                        Canvas(Modifier.fillMaxSize()) {
+                            val x = size.width * shimmer
+                            drawCircle(
+                                brush = Brush.radialGradient(
+                                    colors = listOf(Color.White.copy(alpha = 0.65f), Color.Transparent),
+                                    center = Offset(x, size.height / 2f),
+                                    radius = size.width * 0.15f,
+                                ),
+                                radius = size.width * 0.15f,
+                                center = Offset(x, size.height / 2f),
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(22.dp))
+            AuroraStartupSteps(step = step)
+            Spacer(Modifier.height(12.dp))
+            Text("Больше свободы. Больше возможностей. Везде с вами.", color = Color(0xFF93AABE), fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun AuroraStartupEmblem(
+    progress: Float,
+    glow: Float,
+    shimmer: Float,
+) {
+    Box(
+        modifier = Modifier.size(206.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val ringRadius = size.minDimension * 0.45f
+            drawCircle(
+                brush = Brush.radialGradient(
+                    listOf(Color(0xFF55F6CD).copy(alpha = 0.25f * glow), Color.Transparent),
+                    center = center,
+                    radius = ringRadius * 1.3f,
+                ),
+                center = center,
+                radius = ringRadius * 1.3f,
+            )
+            drawArc(
+                color = Color.White.copy(alpha = 0.18f),
+                startAngle = -90f,
+                sweepAngle = 360f,
+                useCenter = false,
+                topLeft = Offset(center.x - ringRadius, center.y - ringRadius),
+                size = Size(ringRadius * 2f, ringRadius * 2f),
+                style = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round),
+            )
+            drawArc(
+                brush = Brush.sweepGradient(
+                    listOf(
+                        Color(0xFF54F4CF),
+                        Color(0xFFC395FF),
+                        Color(0xFF54F4CF),
+                    ),
+                    center = center,
+                ),
+                startAngle = -90f,
+                sweepAngle = (progress.coerceIn(0.02f, 1f) * 360f),
+                useCenter = false,
+                topLeft = Offset(center.x - ringRadius, center.y - ringRadius),
+                size = Size(ringRadius * 2f, ringRadius * 2f),
+                style = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round),
+            )
+            val orbitX = center.x + ringRadius * 0.93f * (shimmer * 2f - 1f)
+            drawCircle(Color(0xFFEEFFFF), radius = 3.dp.toPx(), center = Offset(orbitX, center.y - ringRadius * 0.34f))
+        }
+        Box(
+            modifier = Modifier
+                .size(126.dp)
+                .clip(RoundedCornerShape(38.dp))
+                .background(
+                    Brush.radialGradient(
+                        listOf(Color(0xFF173E57), Color(0xFF0B1C35), Color(0xFF071224)),
+                    ),
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(Modifier.size(72.dp)) {
+                val w = size.width
+                val h = size.height
+                val shield = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(w * 0.5f, h * 0.08f)
+                    lineTo(w * 0.84f, h * 0.23f)
+                    lineTo(w * 0.78f, h * 0.67f)
+                    quadraticBezierTo(w * 0.5f, h * 0.9f, w * 0.22f, h * 0.67f)
+                    lineTo(w * 0.16f, h * 0.23f)
+                    close()
+                }
+                drawPath(shield, Color(0xFF5CF5D0), style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round))
+                drawRoundRect(
+                    color = Color(0xFF5CF5D0),
+                    topLeft = Offset(w * 0.31f, h * 0.45f),
+                    size = Size(w * 0.38f, h * 0.28f),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(7.dp.toPx(), 7.dp.toPx()),
+                )
+                drawArc(
+                    color = Color(0xFF5CF5D0),
+                    startAngle = 180f,
+                    sweepAngle = 180f,
+                    useCenter = false,
+                    topLeft = Offset(w * 0.36f, h * 0.25f),
+                    size = Size(w * 0.28f, h * 0.31f),
+                    style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round),
+                )
+                drawCircle(Color(0xFF082034), radius = 4.dp.toPx(), center = Offset(w * 0.5f, h * 0.58f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun AuroraStartupSteps(step: Int) {
+    val items = listOf("Сеть", "Серверы", "Готово")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        items.forEachIndexed { index, label ->
+            val active = index + 1 <= step
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(if (active) Color(0xFF42EFC5).copy(alpha = 0.2f) else Color.White.copy(alpha = 0.08f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (active) "✓" else "${index + 1}",
+                        color = if (active) Color(0xFF5CF5D0) else Color(0xFF92A8BC),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Text(label, color = if (active) Color(0xFFD6FDF4) else Color(0xFF92A8BC), fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
+            }
         }
     }
 }

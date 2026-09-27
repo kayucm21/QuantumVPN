@@ -1887,8 +1887,15 @@ class App(BaseHTTPRequestHandler):
         Hostname and scheme are checked, while foreign hosts remain blocked.
         """
         origin = (self.headers.get("Origin") or "").strip()
-        if not origin or origin.lower() == "null":
-            return not origin
+        if not origin:
+            return True
+        # The embedded Codex/Android browser submits a top-level form with a
+        # serialized Origin of ``null``.  It is still same-site: the request
+        # Host is this panel and the browser's fetch metadata (when present)
+        # confirms same-origin/same-site.  Reject explicit cross-site metadata.
+        if origin.lower() == "null":
+            fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+            return not fetch_site or fetch_site in {"same-origin", "same-site", "none"}
         try:
             parsed = urlsplit(origin.rstrip("/"))
             expected = urlsplit(PUBLIC_BASE.rstrip("/"))
@@ -2636,6 +2643,20 @@ class App(BaseHTTPRequestHandler):
                 return self.reply(400, '{"error":"invalid_donation"}')
 
         if path.startswith("/operator/") and not self.same_origin_request():
+            # Keep a redacted diagnostic in the service journal so reverse-proxy
+            # origin mismatches can be fixed without logging credentials.
+            print(
+                "origin rejected: origin=%r host=%r sec_fetch=%r referer=%r forwarded=%r public=%r"
+                % (
+                    self.headers.get("Origin"),
+                    self.headers.get("Host"),
+                    self.headers.get("Sec-Fetch-Site"),
+                    self.headers.get("Referer"),
+                    self.headers.get("X-Forwarded-Proto"),
+                    PUBLIC_BASE,
+                ),
+                flush=True,
+            )
             return self.reply(403, "Invalid origin")
 
         if path == "/operator/login":

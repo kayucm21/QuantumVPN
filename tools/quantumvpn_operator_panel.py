@@ -51,7 +51,7 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
-PANEL_BUILD = "5.10.1"
+PANEL_BUILD = "5.10.2"
 VERSION = "5.10.0"
 VERSION_CODE = 125
 DEFAULT_NOTE = "QuantumVPN 5.10.0: проверка сети и серверов при запуске, понятные таймауты и живые метрики."
@@ -346,6 +346,11 @@ def conn():
                 "latency_state": "unknown",
                 "latency_last_probe": "0",
                 "latency_best_ms": "0",
+                "load_balancer_enabled": "1",
+                "load_balancer_strategy": "latency_health",
+                "load_balancer_max_latency_ms": "250",
+                "load_balancer_last_target": "",
+                "load_balancer_last_decision": "0",
                 "rate_limit_per_min": "120",
                 "webhook_enabled": "0",
                 "webhook_url": "",
@@ -660,6 +665,51 @@ def health_snapshot(db, limit=24):
     return [dict(row) for row in rows]
 
 
+def load_balancer_snapshot(db, s):
+    """Return a deterministic, health-aware node recommendation for the panel.
+
+    The operator never silently rewrites subscription data. It ranks the
+    configured TCP probe targets and exposes the decision through the policy
+    API so clients and operators can see why a target was preferred.
+    """
+    enabled_flag = enabled(s, "load_balancer_enabled", True)
+    try:
+        max_latency = max(20, min(5000, int(s.get("load_balancer_max_latency_ms", "250") or 250)))
+    except (TypeError, ValueError):
+        max_latency = 250
+    rows = db.execute(
+        "select ts,target,ok,latency_ms,detail from server_health "
+        "where target like 'latency:%' order by ts desc limit 160"
+    ).fetchall()
+    latest = {}
+    for row in rows:
+        target = str(row[1])
+        latest.setdefault(target, row)
+    candidates = []
+    for target, row in latest.items():
+        latency = int(row[3] or 0)
+        ok = bool(row[2])
+        score = 0 if not ok else max(1, min(100, round(100 - (latency / max_latency) * 70)))
+        candidates.append({
+            "target": target.removeprefix("latency:"),
+            "ok": ok,
+            "latency_ms": latency,
+            "score": score,
+            "last_check": int(row[0]),
+            "detail": str(row[4] or "")[:160],
+        })
+    candidates.sort(key=lambda item: (-int(item["ok"]), -int(item["score"]), int(item["latency_ms"] or 999999)))
+    selected = candidates[0]["target"] if enabled_flag and candidates and candidates[0]["ok"] else ""
+    return {
+        "enabled": enabled_flag,
+        "strategy": s.get("load_balancer_strategy") or "latency_health",
+        "max_latency_ms": max_latency,
+        "selected": selected,
+        "decision_at": int(s.get("load_balancer_last_decision", "0") or 0),
+        "candidates": candidates[:12],
+    }
+
+
 def webhook_emit(s, event: str, payload: dict):
     """Send a signed, opt-in event to the operator's HTTPS webhook.
 
@@ -857,7 +907,26 @@ def latency_worker():
                     "latency_last_probe": str(int(time.time())),
                     "latency_best_ms": str(best),
                 })
-                db.commit()
+                if enabled(s, "load_balancer_enabled", True):
+                    decision = load_balancer_snapshot(db, {**s, "latency_best_ms": str(best)})
+                    previous = s.get("load_balancer_last_target", "")
+                    selected = decision.get("selected", "")
+                    set_settings(db, {
+                        "load_balancer_last_target": selected,
+                        "load_balancer_last_decision": str(int(time.time())),
+                    })
+                    if selected and selected != previous:
+                        db.execute(
+                            "insert into events values (?,?,?,?,?)",
+                            (
+                                int(time.time()),
+                                "balancer_decision",
+                                "operator",
+                                "",
+                                json.dumps({"selected": selected, "previous": previous, "strategy": decision.get("strategy")}, ensure_ascii=False),
+                            ),
+                        )
+            db.commit()
             db.close()
         except Exception:
             time.sleep(5)
@@ -1306,6 +1375,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
             "select id,opened_at,closed_at,severity,source,title,detail,dedupe_key from incidents order by closed_at asc, opened_at desc limit 200"
         ).fetchall()]
         report = report_snapshot(monitor_db)
+        balancer = load_balancer_snapshot(monitor_db, s)
     finally:
         monitor_db.close()
     latest_monitor = {}
@@ -1557,7 +1627,18 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <p class=muted>Панель помечает недоступные/нестабильные направления для автоматического выбора клиента. Для реального снижения 150–200 мс нужен VDS ближе к пользователям или дополнительная нода в другом регионе.</p>
         <button>Сохранить оптимизацию</button>
       </form>
-      <section class=card><h2>Последние TCP‑замеры</h2>
+      <section class=card>
+        <h2>Балансировщик нагрузки</h2>
+        <label><input type=checkbox name=load_balancer_enabled form=latency-balancer-form {checked('load_balancer_enabled')}> Включать лучший доступный маршрут</label>
+        <form id=latency-balancer-form method=post action=/operator/policy>
+          <input type=hidden name=section value=latency_balancer>
+          <label>Стратегия<select name=load_balancer_strategy><option value=latency_health {'selected' if s.get('load_balancer_strategy','latency_health') == 'latency_health' else ''}>Пинг + доступность</option><option value=stable {'selected' if s.get('load_balancer_strategy') == 'stable' else ''}>Стабильность</option></select></label>
+          <label>Максимальный пинг для выбора, мс<input type=number name=load_balancer_max_latency_ms min=20 max=5000 value="{html.escape(s.get('load_balancer_max_latency_ms','250'))}"></label>
+          <p class=muted>Выбор выполняется только по последним TCP‑проверкам. Нерабочие направления не рекомендуются.</p>
+          <button>Сохранить балансировщик</button>
+        </form>
+        <div class=notice><b>Сейчас выбран:</b> {html.escape(balancer.get('selected') or 'нет доступной ноды')} · стратегия {html.escape(str(balancer.get('strategy')))}</div>
+        <h2 style="margin-top:18px">Последние TCP‑замеры</h2>
         <table><thead><tr><th>Цель</th><th>Статус</th><th>Задержка</th><th>Время</th></tr></thead><tbody>{monitor_html}</tbody></table>
       </section>
     </section>
@@ -1797,6 +1878,40 @@ class App(BaseHTTPRequestHandler):
         ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
         raw = self.headers.get("X-Device-Id") or self.headers.get("X-HWID") or ""
         return device_id(raw) if raw else device_id(self.headers.get("User-Agent", "")[:120]), ip
+
+    def same_origin_request(self):
+        """Accept the panel's real public origin behind an HTTPS reverse proxy.
+
+        Browsers may omit the explicit port in Origin while nginx keeps :8443
+        in Host. Comparing the raw strings rejected legitimate form submits.
+        Hostname and scheme are checked, while foreign hosts remain blocked.
+        """
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin or origin.lower() == "null":
+            return not origin
+        try:
+            parsed = urlsplit(origin.rstrip("/"))
+            expected = urlsplit(PUBLIC_BASE.rstrip("/"))
+            request_host = (self.headers.get("Host") or expected.netloc).split(",", 1)[0].strip()
+            request_host_name = request_host.split(":", 1)[0].strip("[]").lower()
+            expected_name = (expected.hostname or "").lower()
+            scheme = (self.headers.get("X-Forwarded-Proto") or expected.scheme or "https").split(",", 1)[0].strip().lower()
+            if parsed.scheme.lower() != scheme:
+                return False
+            if not parsed.hostname or parsed.hostname.lower() not in {request_host_name, expected_name}:
+                return False
+            # An omitted browser port means the default port for the scheme.
+            parsed_port = parsed.port
+            expected_port = expected.port
+            host_port = None
+            if ":" in request_host.rsplit("]", 1)[-1]:
+                try:
+                    host_port = int(request_host.rsplit(":", 1)[-1])
+                except ValueError:
+                    host_port = None
+            return parsed_port in (None, expected_port, host_port)
+        except (ValueError, TypeError):
+            return False
 
     def donations_payload(self, db):
         self.ensure_donations_table(db)
@@ -2080,6 +2195,7 @@ class App(BaseHTTPRequestHandler):
             status["upstream"] = probe_upstream()
             status["summary"] = rospanel_summary()
             status["monitor"] = {"interval_seconds": 60, "samples": health_snapshot(db)}
+            status["load_balancer"] = load_balancer_snapshot(db, s)
             return self.reply(200, json.dumps(status))
 
         if path.startswith("/api/client/donations"):
@@ -2153,6 +2269,7 @@ class App(BaseHTTPRequestHandler):
                     "state": s.get("latency_state") or "unknown",
                     "best_ms": int(s.get("latency_best_ms", "0") or 0),
                 },
+                "load_balancer": load_balancer_snapshot(db, s),
                 "min_version_code": min_vc,
                 "force_update": force_update,
                 "force_update_message": s.get("force_update_message") or "",
@@ -2514,11 +2631,8 @@ class App(BaseHTTPRequestHandler):
             except Exception:
                 return self.reply(400, '{"error":"invalid_donation"}')
 
-        if path.startswith("/operator/") and self.headers.get("Origin") not in (None, PUBLIC_BASE):
-            # allow same-host without Origin; block foreign browser origins
-            origin = self.headers.get("Origin")
-            if origin and origin != PUBLIC_BASE:
-                return self.reply(403, "Invalid origin")
+        if path.startswith("/operator/") and not self.same_origin_request():
+            return self.reply(403, "Invalid origin")
 
         if path == "/operator/login":
             ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
@@ -2813,6 +2927,20 @@ class App(BaseHTTPRequestHandler):
                 "latency_probe_interval": str(probe_interval),
                 "latency_max_ms": str(max_latency),
                 "latency_probe_targets": targets,
+            }
+        elif section == "latency_balancer":
+            tab = "latency"
+            try:
+                max_balancer_latency = max(20, min(5000, int(form.get("load_balancer_max_latency_ms", ["250"])[0])))
+            except Exception:
+                return self.reply(400, '{"error":"invalid_balancer_settings"}')
+            strategy = form.get("load_balancer_strategy", ["latency_health"])[0]
+            if strategy not in ("latency_health", "stable"):
+                strategy = "latency_health"
+            values = {
+                "load_balancer_enabled": "1" if "load_balancer_enabled" in form else "0",
+                "load_balancer_strategy": strategy,
+                "load_balancer_max_latency_ms": str(max_balancer_latency),
             }
         elif section == "security":
             tab = "security"

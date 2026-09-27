@@ -51,7 +51,7 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
-PANEL_BUILD = "5.10.2"
+PANEL_BUILD = "5.10.3"
 VERSION = "5.10.0"
 VERSION_CODE = 125
 DEFAULT_NOTE = "QuantumVPN 5.10.0: проверка сети и серверов при запуске, понятные таймауты и живые метрики."
@@ -351,6 +351,11 @@ def conn():
                 "load_balancer_max_latency_ms": "250",
                 "load_balancer_last_target": "",
                 "load_balancer_last_decision": "0",
+                "auto_quarantine_enabled": "1",
+                "auto_quarantine_failures": "3",
+                "auto_quarantine_recovery_checks": "2",
+                "auto_quarantine_ttl_minutes": "30",
+                "node_quarantine": "{}",
                 "rate_limit_per_min": "120",
                 "webhook_enabled": "0",
                 "webhook_url": "",
@@ -665,6 +670,71 @@ def health_snapshot(db, limit=24):
     return [dict(row) for row in rows]
 
 
+def active_quarantine(s):
+    """Return non-expired automatic quarantine entries keyed by host:port."""
+    try:
+        raw = json.loads(s.get("node_quarantine") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    now = int(time.time())
+    return {
+        str(target): value
+        for target, value in raw.items()
+        if isinstance(value, dict) and int(value.get("until", 0) or 0) > now
+    }
+
+
+def update_auto_quarantine(db, s, targets):
+    """Quarantine repeatedly failing probe targets without touching live configs."""
+    if not enabled(s, "auto_quarantine_enabled", True):
+        return active_quarantine(s)
+    try:
+        failure_limit = max(2, min(10, int(s.get("auto_quarantine_failures", "3") or 3)))
+        recovery_limit = max(1, min(10, int(s.get("auto_quarantine_recovery_checks", "2") or 2)))
+        ttl = max(5, min(1440, int(s.get("auto_quarantine_ttl_minutes", "30") or 30))) * 60
+    except (TypeError, ValueError):
+        failure_limit, recovery_limit, ttl = 3, 2, 1800
+    try:
+        state = json.loads(s.get("node_quarantine") or "{}")
+        if not isinstance(state, dict):
+            state = {}
+    except (TypeError, ValueError):
+        state = {}
+    now = int(time.time())
+    for host, port in targets:
+        key = f"{host}:{port}"
+        rows = db.execute(
+            "select ok from server_health where target=? order by ts desc limit ?",
+            (f"latency:{key}", max(failure_limit, recovery_limit) + 2),
+        ).fetchall()
+        failures = 0
+        for row in rows:
+            if int(row[0] or 0):
+                break
+            failures += 1
+        recoveries = 0
+        for row in rows:
+            if not int(row[0] or 0):
+                break
+            recoveries += 1
+        active = state.get(key)
+        if failures >= failure_limit:
+            if not isinstance(active, dict) or int(active.get("until", 0) or 0) <= now:
+                state[key] = {"until": now + ttl, "failures": failures, "since": now}
+                db.execute(
+                    "insert into events values (?,?,?,?,?)",
+                    (now, "node_quarantined", "system", "", json.dumps({"target": key, "failures": failures, "ttl_minutes": ttl // 60}, ensure_ascii=False)),
+                )
+        elif isinstance(active, dict) and (recoveries >= recovery_limit or int(active.get("until", 0) or 0) <= now):
+            state.pop(key, None)
+            db.execute(
+                "insert into events values (?,?,?,?,?)",
+                (now, "node_quarantine_recovered", "system", "", json.dumps({"target": key, "checks": recoveries}, ensure_ascii=False)),
+            )
+    set_settings(db, {"node_quarantine": json.dumps(state, ensure_ascii=False, separators=(",", ":"))})
+    return active_quarantine({**s, "node_quarantine": json.dumps(state)})
+
+
 def load_balancer_snapshot(db, s):
     """Return a deterministic, health-aware node recommendation for the panel.
 
@@ -686,7 +756,11 @@ def load_balancer_snapshot(db, s):
         target = str(row[1])
         latest.setdefault(target, row)
     candidates = []
+    quarantined = active_quarantine(s)
     for target, row in latest.items():
+        short_target = target.removeprefix("latency:")
+        if short_target in quarantined:
+            continue
         latency = int(row[3] or 0)
         ok = bool(row[2])
         score = 0 if not ok else max(1, min(100, round(100 - (latency / max_latency) * 70)))
@@ -706,6 +780,7 @@ def load_balancer_snapshot(db, s):
         "max_latency_ms": max_latency,
         "selected": selected,
         "decision_at": int(s.get("load_balancer_last_decision", "0") or 0),
+        "quarantined": sorted(quarantined),
         "candidates": candidates[:12],
     }
 
@@ -899,6 +974,11 @@ def latency_worker():
                     record_health(db, f"latency:{host}:{port}", result)
                     if result.get("ok"):
                         samples.append(int(result.get("latency_ms") or 0))
+                # Keep the quarantine state in the panel database.  The next
+                # policy response and balancer decision automatically exclude
+                # targets that repeatedly fail their health checks.
+                quarantine = update_auto_quarantine(db, s, targets)
+                s = {**s, "node_quarantine": json.dumps(quarantine)}
                 max_ms = max(20, min(5000, int(s.get("latency_max_ms", "120") or 120)))
                 best = min(samples) if samples else 0
                 state = "healthy" if samples and best <= max_ms else ("degraded" if samples else "offline")
@@ -1378,6 +1458,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         balancer = load_balancer_snapshot(monitor_db, s)
     finally:
         monitor_db.close()
+    quarantined_nodes = balancer.get("quarantined") or []
+    quarantine_html = ", ".join(html.escape(str(x)) for x in quarantined_nodes) or "нет"
     latest_monitor = {}
     for item in monitor_rows:
         latest_monitor.setdefault(item["target"], item)
@@ -1624,7 +1706,13 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label>Интервал проверки, секунд<input type=number name=latency_probe_interval min=15 max=300 value="{html.escape(s.get('latency_probe_interval','30'))}"></label>
         <label>Порог деградации, мс<input type=number name=latency_max_ms min=20 max=5000 value="{html.escape(s.get('latency_max_ms','120'))}"></label>
         <label>TCP‑цели (host:port, через запятую)<textarea name=latency_probe_targets>{html.escape(s.get('latency_probe_targets','1.1.1.1:443,8.8.8.8:443'))}</textarea></label>
+        <h3 style="margin-top:16px">Автоматический карантин</h3>
+        <label><input type=checkbox name=auto_quarantine_enabled {checked('auto_quarantine_enabled')}> Исключать нестабильные ноды из балансировки</label>
+        <label>Ошибок до исключения<input type=number name=auto_quarantine_failures min=2 max=10 value="{html.escape(s.get('auto_quarantine_failures','3'))}"></label>
+        <label>Проверок для возврата<input type=number name=auto_quarantine_recovery_checks min=1 max=10 value="{html.escape(s.get('auto_quarantine_recovery_checks','2'))}"></label>
+        <label>Время карантина, минут<input type=number name=auto_quarantine_ttl_minutes min=5 max=1440 value="{html.escape(s.get('auto_quarantine_ttl_minutes','30'))}"></label>
         <p class=muted>Панель помечает недоступные/нестабильные направления для автоматического выбора клиента. Для реального снижения 150–200 мс нужен VDS ближе к пользователям или дополнительная нода в другом регионе.</p>
+        <p class=notice><b>Сейчас в карантине:</b> {quarantine_html}</p>
         <button>Сохранить оптимизацию</button>
       </form>
       <section class=card>
@@ -2253,6 +2341,9 @@ class App(BaseHTTPRequestHandler):
                 client_vc = 0
             min_vc = int(s.get("min_version_code") or 0)
             force_update = bool(min_vc and client_vc and client_vc < min_vc)
+            quarantined_nodes = sorted(active_quarantine(s))
+            manual_forbidden = [x.strip() for x in (s.get("nodes_forbidden") or "").split(",") if x.strip()]
+            forbidden_nodes = list(dict.fromkeys(manual_forbidden + quarantined_nodes))
             result = {
                 "platform": "android",
                 "maintenance": maintenance,
@@ -2272,7 +2363,14 @@ class App(BaseHTTPRequestHandler):
                     "accent_hex": (s.get("brand_accent") or "#3DE7FF")[:7],
                 },
                 "nodes_recommended": [x.strip() for x in (s.get("nodes_recommended") or "").split(",") if x.strip()],
-                "nodes_forbidden": [x.strip() for x in (s.get("nodes_forbidden") or "").split(",") if x.strip()],
+                "nodes_forbidden": forbidden_nodes,
+                "nodes_quarantined": quarantined_nodes,
+                "node_health_policy": {
+                    "auto_quarantine": enabled(s, "auto_quarantine_enabled", True),
+                    "failures_before_quarantine": max(2, min(10, int(s.get("auto_quarantine_failures", "3") or 3))),
+                    "recovery_checks": max(1, min(10, int(s.get("auto_quarantine_recovery_checks", "2") or 2))),
+                    "ttl_minutes": max(5, min(1440, int(s.get("auto_quarantine_ttl_minutes", "30") or 30))),
+                },
                 "latency_optimization": {
                     "enabled": enabled(s, "latency_optimization_enabled", True),
                     "probe_interval_seconds": max(15, min(300, int(s.get("latency_probe_interval", "30") or 30))),
@@ -2942,6 +3040,9 @@ class App(BaseHTTPRequestHandler):
             try:
                 probe_interval = max(15, min(300, int(form.get("latency_probe_interval", ["30"])[0])))
                 max_latency = max(20, min(5000, int(form.get("latency_max_ms", ["120"])[0])))
+                quarantine_failures = max(2, min(10, int(form.get("auto_quarantine_failures", ["3"])[0])))
+                quarantine_recovery = max(1, min(10, int(form.get("auto_quarantine_recovery_checks", ["2"])[0])))
+                quarantine_ttl = max(5, min(1440, int(form.get("auto_quarantine_ttl_minutes", ["30"])[0])))
             except Exception:
                 return self.reply(400, '{"error":"invalid_latency_settings"}')
             targets = ",".join(f"{host}:{port}" for host, port in parse_latency_targets(form.get("latency_probe_targets", [""])[0]))
@@ -2952,6 +3053,10 @@ class App(BaseHTTPRequestHandler):
                 "latency_probe_interval": str(probe_interval),
                 "latency_max_ms": str(max_latency),
                 "latency_probe_targets": targets,
+                "auto_quarantine_enabled": "1" if "auto_quarantine_enabled" in form else "0",
+                "auto_quarantine_failures": str(quarantine_failures),
+                "auto_quarantine_recovery_checks": str(quarantine_recovery),
+                "auto_quarantine_ttl_minutes": str(quarantine_ttl),
             }
         elif section == "latency_balancer":
             tab = "latency"

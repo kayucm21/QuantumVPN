@@ -164,7 +164,6 @@ class MainActivity : FragmentActivity() {
                     openPrivateDnsSettingsIfStrict = false,
                 )
             }
-            var startupServersChecked by remember { mutableStateOf(false) }
             LaunchedEffect(state.initialized, state.profiles.size) {
                 if (state.initialized && state.profiles.isEmpty() && state.importPreview == null) {
                     profilesViewModel.installManagedSubscription()
@@ -178,32 +177,12 @@ class MainActivity : FragmentActivity() {
                     profilesViewModel.confirmImport(preview.suggestedName)
                 }
             }
-            LaunchedEffect(state.homeSelectorGroups) {
-                if (state.homeSelectorGroups.any { it.items.isNotEmpty() }) startupServersChecked = true
-            }
-            LaunchedEffect(Unit) {
-                kotlinx.coroutines.delay(15_000)
-                startupServersChecked = true
-            }
             var splashDone by remember { mutableStateOf(false) }
-            var updateGaveUp by remember { mutableStateOf(false) }
             var autoInstallStarted by remember { mutableStateOf(false) }
             var systemDownloadStarted by remember { mutableStateOf(false) }
             // Только проверка на сплэше; качает системный DownloadManager → установщик Android.
             LaunchedEffect(Unit) {
                 updateController.checkOnce(UpdateChannel.Stable, autoDownload = false)
-                kotlinx.coroutines.delay(90_000)
-                when (val s = updateController.state.value) {
-                    is UpdateState.Downloading,
-                    is UpdateState.Available,
-                    is UpdateState.Ready,
-                    is UpdateState.Checking,
-                    is UpdateState.RetryingViaVpn -> Unit
-                    is UpdateState.Failure -> {
-                        if (s.candidate == null) updateGaveUp = true
-                    }
-                    else -> updateGaveUp = true
-                }
             }
             LaunchedEffect(updateState) {
                 when (val s = updateState) {
@@ -227,7 +206,6 @@ class MainActivity : FragmentActivity() {
                         } else if (candidate != null && !splashDone) {
                             // Last resort: open APK URL in browser so Chrome can finish the download.
                             runCatching { systemApkInstaller.openInBrowser(candidate) }
-                            updateGaveUp = true
                         }
                     }
                     else -> Unit
@@ -240,17 +218,6 @@ class MainActivity : FragmentActivity() {
                     delay(750)
                 }
             }
-            val updateBlocking = when (val s = updateState) {
-                is UpdateState.Checking,
-                is UpdateState.RetryingViaVpn,
-                is UpdateState.Downloading,
-                is UpdateState.Available,
-                is UpdateState.Ready -> true
-                is UpdateState.Failure -> s.candidate != null && !updateGaveUp
-                is UpdateState.Idle -> !updateGaveUp
-                is UpdateState.UpToDate -> false
-            }
-            val updateSettled = !updateBlocking
             val darkTheme = if (!splashDone) {
                 true
             } else {
@@ -322,7 +289,9 @@ class MainActivity : FragmentActivity() {
                 }
                 if (!splashDone) {
                     StartupSplashScreen(
-                        ready = state.initialized && startupServersChecked && updateSettled,
+                        // A slow update endpoint must never hide the connect button.
+                        // The updater and its notification continue in the background.
+                        ready = state.initialized,
                         updateState = updateState,
                         availableServers = state.homeSelectorGroups.sumOf { it.items.size },
                         onFinished = { splashDone = true },

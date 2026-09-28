@@ -43,7 +43,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.CompositionLocalProvider
@@ -334,7 +334,10 @@ fun QuantumVpnAppV2(
         remoteAccent(policy.branding.accentHex)
     }
     CompositionLocalProvider(LocalAuroraDark provides dark, LocalAuroraAccent provides adaptiveAccent) {
-    Surface(color = Aurora.Night, modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
+    // V2BottomBar owns the navigation-bar inset. Applying safeDrawingPadding here
+    // as well reserved the bottom inset twice and lifted the controls above the
+    // Android system buttons.
+    Surface(color = Aurora.Night, modifier = Modifier.fillMaxSize().statusBarsPadding()) {
         if (policy.maintenance) {
             V2MaintenanceScreen(policy.maintenanceMessage)
             return@Surface

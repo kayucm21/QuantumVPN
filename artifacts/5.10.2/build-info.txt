@@ -1,0 +1,3 @@
+version=5.10.2
+versionCode=127
+features=aurora-ui-startup-nonblocking,bottom-inset-fix,immediate-update-notification,live-server-ping

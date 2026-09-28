@@ -19,7 +19,6 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1602,7 +1601,11 @@ private fun V2BottomBar(tab: V2Tab, onTab: (V2Tab) -> Unit) = Surface(
     border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .74f)),
     shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
     shadowElevation = 14.dp,
-    modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
+    // Some Android/OEM builds report a bogus navigation-bar inset (hundreds of
+    // dp) when edge-to-edge is enabled.  A fixed compact bottom margin keeps
+    // this bar next to the system buttons instead of lifting it into the
+    // middle of the screen.
+    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
 ) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 7.dp, vertical = 7.dp),

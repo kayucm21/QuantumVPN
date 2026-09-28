@@ -52,7 +52,7 @@ PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.7"
+PANEL_BUILD = "5.10.7-control.1"
 VERSION = "5.10.7"
 VERSION_CODE = 132
 DEFAULT_NOTE = "QuantumVPN 5.10.7: нижняя навигация поднята выше системных кнопок, а стартовый экран ждёт завершения загрузки и проверки обновления."
@@ -360,6 +360,12 @@ def conn():
                 "telegram_chat_id": "",
                 "telegram_alerts_enabled": "0",
                 "telegram_backups_enabled": "0",
+                "telegram_daily_digest_enabled": "0",
+                "telegram_digest_time_msk": "09:00",
+                "telegram_digest_last_sent_date": "",
+                "telegram_digest_last_attempt": "0",
+                "health_monitor_enabled": "1",
+                "health_monitor_interval_seconds": "60",
                 "latency_optimization_enabled": "1",
                 "latency_probe_interval": "30",
                 "latency_max_ms": "120",
@@ -912,36 +918,65 @@ def report_snapshot(db):
     }
 
 
+def run_health_check(db, s=None):
+    """Run one bounded health cycle and keep incidents in sync.
+
+    It is deliberately read-only with respect to RosPanel/Xray: a check can
+    open or close an incident, but never restarts or reconfigures a service.
+    The same function is used by the timer and the operator's manual button.
+    """
+    s = s or settings(db)
+    upstream = probe_upstream()
+    record_health(db, "subscription_upstream", upstream)
+    if upstream.get("ok"):
+        incident_close(db, "upstream", s)
+    else:
+        incident_open(
+            db,
+            "upstream",
+            "critical",
+            "subscription_upstream",
+            "Подписка недоступна",
+            str(upstream.get("error") or "нет ответа"),
+            s,
+        )
+    services = service_status()
+    for target in ("rospanel", "xray", "operator"):
+        value = services.get(target, "unknown")
+        record_health(db, target, {"ok": value in ("active", "running", "ok"), "status": value})
+        key = f"service:{target}"
+        if value in ("active", "running", "ok"):
+            incident_close(db, key, s)
+        else:
+            incident_open(db, key, "critical", target, f"Сервис {target} недоступен", f"status={value}", s)
+    if services.get("disk_used_pct", 0) >= 90:
+        incident_open(db, "disk", "warning", "disk", "Заканчивается место на диске", f"used={services.get('disk_used_pct')}%", s)
+    else:
+        incident_close(db, "disk", s)
+    db.commit()
+    return {"upstream": upstream, "services": services}
+
+
 def health_worker():
-    """Check the subscription upstream and local VPN services periodically."""
+    """Periodically sample subscription and local service health."""
     while True:
+        interval = 60
+        db = None
         try:
             db = conn()
             s = settings(db)
-            upstream = probe_upstream()
-            record_health(db, "subscription_upstream", upstream)
-            if upstream.get("ok"):
-                incident_close(db, "upstream", s)
-            else:
-                incident_open(db, "upstream", "critical", "subscription_upstream", "Подписка недоступна", str(upstream.get("error") or "нет ответа"), s)
-            services = service_status()
-            for target in ("rospanel", "xray", "operator"):
-                value = services.get(target, "unknown")
-                record_health(db, target, {"ok": value in ("active", "running", "ok"), "status": value})
-                key = f"service:{target}"
-                if value in ("active", "running", "ok"):
-                    incident_close(db, key, s)
-                else:
-                    incident_open(db, key, "critical", target, f"Сервис {target} недоступен", f"status={value}", s)
-            if services.get("disk_used_pct", 0) >= 90:
-                incident_open(db, "disk", "warning", "disk", "Заканчивается место на диске", f"used={services.get('disk_used_pct')}%", s)
-            else:
-                incident_close(db, "disk", s)
-            db.commit()
-            db.close()
+            interval = max(30, min(600, int(s.get("health_monitor_interval_seconds", "60") or 60)))
+            if enabled(s, "health_monitor_enabled", True):
+                run_health_check(db, s)
         except Exception:
             pass
-        time.sleep(60)
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        time.sleep(interval)
 
 
 def parse_latency_targets(raw: str):
@@ -979,58 +1014,71 @@ def probe_tcp_latency(host: str, port: int):
                 pass
 
 
+def run_latency_probe(db, s=None):
+    """Run one TCP-latency pass without changing live VPN configuration."""
+    s = s or settings(db)
+    if not enabled(s, "latency_optimization_enabled", True):
+        return {"enabled": False, "samples": [], "best_ms": 0}
+    targets = parse_latency_targets(s.get("latency_probe_targets", ""))
+    samples = []
+    for host, port in targets:
+        result = probe_tcp_latency(host, port)
+        record_health(db, f"latency:{host}:{port}", result)
+        if result.get("ok"):
+            samples.append(int(result.get("latency_ms") or 0))
+    # Keep the quarantine state in the panel database.  The next policy
+    # response and balancer decision automatically exclude failing targets.
+    quarantine = update_auto_quarantine(db, s, targets)
+    s = {**s, "node_quarantine": json.dumps(quarantine)}
+    max_ms = max(20, min(5000, int(s.get("latency_max_ms", "120") or 120)))
+    best = min(samples) if samples else 0
+    state = "healthy" if samples and best <= max_ms else ("degraded" if samples else "offline")
+    set_settings(db, {
+        "latency_state": state,
+        "latency_last_probe": str(int(time.time())),
+        "latency_best_ms": str(best),
+    })
+    decision = load_balancer_snapshot(db, {**s, "latency_best_ms": str(best)})
+    if enabled(s, "load_balancer_enabled", True):
+        previous = s.get("load_balancer_last_target", "")
+        selected = decision.get("selected", "")
+        set_settings(db, {
+            "load_balancer_last_target": selected,
+            "load_balancer_last_decision": str(int(time.time())),
+        })
+        if selected and selected != previous:
+            db.execute(
+                "insert into events values (?,?,?,?,?)",
+                (
+                    int(time.time()),
+                    "balancer_decision",
+                    "operator",
+                    "",
+                    json.dumps({"selected": selected, "previous": previous, "strategy": decision.get("strategy")}, ensure_ascii=False),
+                ),
+            )
+    db.commit()
+    return {"enabled": True, "samples": samples, "best_ms": best, "state": state, "balancer": decision}
+
+
 def latency_worker():
     """Measure the VDS egress path without requiring raw ICMP privileges."""
     while True:
         interval = 30
+        db = None
         try:
             db = conn()
             s = settings(db)
             interval = max(15, min(300, int(s.get("latency_probe_interval", "30") or 30)))
-            if enabled(s, "latency_optimization_enabled", True):
-                targets = parse_latency_targets(s.get("latency_probe_targets", ""))
-                samples = []
-                for host, port in targets:
-                    result = probe_tcp_latency(host, port)
-                    record_health(db, f"latency:{host}:{port}", result)
-                    if result.get("ok"):
-                        samples.append(int(result.get("latency_ms") or 0))
-                # Keep the quarantine state in the panel database.  The next
-                # policy response and balancer decision automatically exclude
-                # targets that repeatedly fail their health checks.
-                quarantine = update_auto_quarantine(db, s, targets)
-                s = {**s, "node_quarantine": json.dumps(quarantine)}
-                max_ms = max(20, min(5000, int(s.get("latency_max_ms", "120") or 120)))
-                best = min(samples) if samples else 0
-                state = "healthy" if samples and best <= max_ms else ("degraded" if samples else "offline")
-                set_settings(db, {
-                    "latency_state": state,
-                    "latency_last_probe": str(int(time.time())),
-                    "latency_best_ms": str(best),
-                })
-                if enabled(s, "load_balancer_enabled", True):
-                    decision = load_balancer_snapshot(db, {**s, "latency_best_ms": str(best)})
-                    previous = s.get("load_balancer_last_target", "")
-                    selected = decision.get("selected", "")
-                    set_settings(db, {
-                        "load_balancer_last_target": selected,
-                        "load_balancer_last_decision": str(int(time.time())),
-                    })
-                    if selected and selected != previous:
-                        db.execute(
-                            "insert into events values (?,?,?,?,?)",
-                            (
-                                int(time.time()),
-                                "balancer_decision",
-                                "operator",
-                                "",
-                                json.dumps({"selected": selected, "previous": previous, "strategy": decision.get("strategy")}, ensure_ascii=False),
-                            ),
-                        )
-            db.commit()
-            db.close()
+            run_latency_probe(db, s)
         except Exception:
             time.sleep(5)
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
         time.sleep(interval)
 
 
@@ -1117,6 +1165,36 @@ def scheduled_release_worker():
         except Exception:
             pass
         time.sleep(20)
+
+
+def release_guard_snapshot(s):
+    """Report whether production/scheduled releases have both required APKs.
+
+    This is intentionally a preflight report, not a publishing action. It lets
+    an operator see a missing ARM64 or ARMv7 artifact before any client sees a
+    new release.
+    """
+    def inspect(name, version, code):
+        version = (version or "").strip()
+        try:
+            code = int(code or 0)
+        except (TypeError, ValueError):
+            code = 0
+        valid_version = bool(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version))
+        missing = scheduled_release_missing_abis(version) if valid_version else list(REQUIRED_RELEASE_ABIS)
+        return {
+            "name": name,
+            "version": version or "—",
+            "version_code": code,
+            "ready": valid_version and code > 0 and not missing,
+            "missing_abis": missing,
+        }
+
+    production = inspect("Production", s.get("app_version") or VERSION, s.get("app_version_code") or VERSION_CODE)
+    scheduled_version = (s.get("scheduled_app_version") or "").strip()
+    scheduled = inspect("По расписанию", scheduled_version, s.get("scheduled_app_version_code"))
+    scheduled["configured"] = bool(scheduled_version or enabled(s, "release_schedule_enabled", False))
+    return {"production": production, "scheduled": scheduled}
 
 
 def telegram_send(s, text: str):
@@ -1216,6 +1294,26 @@ def create_backup_archive():
     return encrypted
 
 
+def latest_backup_info():
+    """Return only safe metadata about the newest encrypted local backup."""
+    folder = os.path.join(ROOT, "backups")
+    try:
+        names = [
+            os.path.join(folder, name)
+            for name in os.listdir(folder)
+            if name.endswith(".zip.enc") and os.path.isfile(os.path.join(folder, name))
+        ]
+        path = max(names, key=os.path.getmtime)
+        return {
+            "exists": True,
+            "name": os.path.basename(path),
+            "ts": int(os.path.getmtime(path)),
+            "size": os.path.getsize(path),
+        }
+    except (OSError, ValueError):
+        return {"exists": False, "name": "", "ts": 0, "size": 0}
+
+
 def hourly_backup_worker():
     """Send a database/session backup once per wall-clock hour when enabled."""
     while True:
@@ -1237,6 +1335,55 @@ def hourly_backup_worker():
             db.close()
         except Exception:
             time.sleep(30)
+
+
+def moscow_clock(now=None):
+    """Return a stable MSK date/time tuple without depending on server TZ."""
+    stamp = time.gmtime((time.time() if now is None else now) + 3 * 3600)
+    return time.strftime("%Y-%m-%d", stamp), time.strftime("%H:%M", stamp)
+
+
+def maybe_send_daily_digest(db, s, now=None):
+    """Send one opt-in, compact daily operations digest to the Telegram chat."""
+    if not enabled(s, "telegram_daily_digest_enabled", False):
+        return False
+    if not (s.get("telegram_bot_token") or "").strip() or not (s.get("telegram_chat_id") or "").strip():
+        return False
+    target = (s.get("telegram_digest_time_msk") or "09:00").strip()
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", target):
+        return False
+    date, clock = moscow_clock(now)
+    if clock != target or s.get("telegram_digest_last_sent_date") == date:
+        return False
+    moment = int(time.time() if now is None else now)
+    try:
+        last_attempt = int(s.get("telegram_digest_last_attempt", "0") or 0)
+    except (TypeError, ValueError):
+        last_attempt = 0
+    # A failed Telegram request is retried, but no more than once in 15 min.
+    if moment - last_attempt < 900:
+        return False
+    set_settings(db, {"telegram_digest_last_attempt": str(moment)})
+    report = report_snapshot(db)
+    balancer = load_balancer_snapshot(db, s)
+    selected = balancer.get("selected") or "нет доступной цели"
+    message = (
+        "[Quantum Control] Суточная сводка (МСК)\n"
+        f"Доступность: {report['health_uptime_percent']}% · проверок: {report['health_checks']}\n"
+        f"Инциденты: {report['open_incidents']} · устройств: {report['devices_seen']}\n"
+        f"Средняя задержка: {report['average_latency_ms']} мс\n"
+        f"Маршрут балансировщика: {selected}"
+    )
+    if not telegram_send(s, message):
+        db.commit()
+        return False
+    set_settings(db, {"telegram_digest_last_sent_date": date})
+    db.execute(
+        "insert into events values (?,?,?,?,?)",
+        (moment, "daily_digest_sent", "operator", "", json.dumps({"date_msk": date, "time_msk": target}, ensure_ascii=False)),
+    )
+    db.commit()
+    return True
 
 
 def alert_worker():
@@ -1268,6 +1415,7 @@ def alert_worker():
                                 _ALERT_STATE["last"][key] = now
                         elif not bad:
                             _ALERT_STATE["last"].pop(key, None)
+            maybe_send_daily_digest(db, s)
             db.close()
         except Exception:
             pass
@@ -1501,6 +1649,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         balancer = load_balancer_snapshot(monitor_db, s)
     finally:
         monitor_db.close()
+    release_guard = release_guard_snapshot(s)
+    backup_info = latest_backup_info()
     quarantined_nodes = balancer.get("quarantined") or []
     quarantine_html = ", ".join(html.escape(str(x)) for x in quarantined_nodes) or "нет"
     latest_monitor = {}
@@ -1515,6 +1665,32 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     latency_best = min((int(row.get("latency_ms") or 0) for row in latency_rows if row.get("ok")), default=0)
     latency_state = s.get("latency_state") or "unknown"
     latency_label = {"healthy": "стабильно", "degraded": "нестабильно", "offline": "нет ответа"}.get(latency_state, "ожидание")
+    health_monitor_interval = html.escape(s.get("health_monitor_interval_seconds", "60"))
+    digest_time_msk = html.escape(s.get("telegram_digest_time_msk", "09:00"))
+    last_digest = html.escape(s.get("telegram_digest_last_sent_date") or "ещё не отправлялся")
+    health_monitor_label = "включён" if enabled(s, "health_monitor_enabled", True) else "приостановлен"
+    backup_label = (
+        time.strftime("%d.%m.%Y %H:%M", time.localtime(backup_info["ts"]))
+        if backup_info.get("exists") else "ещё нет"
+    )
+    def release_guard_row(item):
+        if item.get("ready"):
+            state = "готов"
+            css_class = "ok"
+            detail = "ARM64 и ARMv7 найдены"
+        elif not item.get("configured") and item.get("name") == "По расписанию":
+            state = "не настроен"
+            css_class = "muted"
+            detail = "запланированного релиза нет"
+        else:
+            state = "не готов"
+            css_class = "off"
+            detail = "нет: " + ", ".join(item.get("missing_abis") or REQUIRED_RELEASE_ABIS)
+        return (
+            f"<tr><td><b>{html.escape(item['name'])}</b></td><td>{html.escape(item['version'])}</td>"
+            f"<td>{int(item['version_code'] or 0) or '—'}</td><td class='{css_class}'>{state}</td><td>{html.escape(detail)}</td></tr>"
+        )
+    release_guard_html = release_guard_row(release_guard["production"]) + release_guard_row(release_guard["scheduled"])
     def incident_row(item):
         close = "—"
         if not item["closed_at"]:
@@ -1607,7 +1783,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a class="{'active' if section in ('incidents','logs','reports') else ''}" href="/operator?tab=incidents"><span class=nav-ico>♧</span> События</a>
         <a class="{'active' if section in ('audit','integrations','security','admins') else ''}" href="/operator?tab=audit"><span class=nav-ico>▤</span> Аудит</a>
         <details class=nav-group><summary>Ещё</summary>
-          <a href="/operator?tab=fleet">Центр флота</a><a href="/operator?tab=devices">Устройства</a><a href="/operator?tab=features">Функции</a><a href="/operator?tab=branding">Оформление</a><a href="/operator?tab=donations">Пожертвования</a><a href="/operator?tab=reports">Отчёты</a><a href="/operator?tab=integrations">Интеграции</a><a href="/operator?tab=security">Безопасность</a><a href="/operator?tab=logs">Живые логи</a>
+          <a href="/operator?tab=fleet">Центр флота</a><a href="/operator?tab=automation">Автопилот</a><a href="/operator?tab=devices">Устройства</a><a href="/operator?tab=features">Функции</a><a href="/operator?tab=branding">Оформление</a><a href="/operator?tab=donations">Пожертвования</a><a href="/operator?tab=reports">Отчёты</a><a href="/operator?tab=integrations">Интеграции</a><a href="/operator?tab=security">Безопасность</a><a href="/operator?tab=logs">Живые логи</a>
           {('<a href="/operator?tab=admins">Администраторы</a>' if role_at_least(actor_role, 'owner') else '')}
         </details>
         <a href="/operator/logout">Выход</a>
@@ -1771,6 +1947,41 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <div class=notice><b>Сейчас выбран:</b> {html.escape(balancer.get('selected') or 'нет доступной ноды')} · стратегия {html.escape(str(balancer.get('strategy')))}</div>
         <h2 style="margin-top:18px">Последние TCP‑замеры</h2>
         <table><thead><tr><th>Цель</th><th>Статус</th><th>Задержка</th><th>Время</th></tr></thead><tbody>{monitor_html}</tbody></table>
+      </section>
+    </section>
+
+    <section class=grid {show('automation')}>
+      <form class=card method=post action=/operator/policy><input type=hidden name=section value=automation>
+        <h2>Автопилот панели</h2>
+        <p class=muted>Проверки только читают состояние сервисов и подписки. Они не перезапускают RosPanel, Xray и не меняют конфигурацию нод.</p>
+        <label><input type=checkbox name=health_monitor_enabled {checked('health_monitor_enabled')}> Мониторинг сервисов и подписки</label>
+        <label>Интервал мониторинга, секунд<input type=number name=health_monitor_interval_seconds min=30 max=600 value="{health_monitor_interval}"></label>
+        <label><input type=checkbox name=telegram_daily_digest_enabled {checked('telegram_daily_digest_enabled')}> Суточная сводка в Telegram</label>
+        <label>Время сводки (МСК)<input type=time name=telegram_digest_time_msk value="{digest_time_msk}"></label>
+        <p class=muted>Последняя отправленная сводка: {last_digest}. Для отправки должны быть заполнены Bot token и Chat ID в «Безопасность».</p>
+        <button>Сохранить автопилот</button>
+      </form>
+      <section class=card>
+        <h2>Готовность релизов</h2>
+        <p class=muted>Публикация по расписанию блокируется, пока на VDS нет обоих файлов: ARM64 и ARMv7.</p>
+        <table><thead><tr><th>Канал</th><th>Версия</th><th>Code</th><th>Статус</th><th>Проверка</th></tr></thead><tbody>{release_guard_html}</tbody></table>
+        <div class=actions style="margin-top:14px"><a class="button secondary" href="/operator?tab=release">Открыть релизы</a></div>
+      </section>
+      <section class=card>
+        <h2>Состояние автоматики</h2>
+        <div class=stats>
+          <div class=stat>Мониторинг<b class={'ok' if enabled(s, 'health_monitor_enabled', True) else 'off'}>{health_monitor_label}</b></div>
+          <div class=stat>Маршрут<b>{html.escape(balancer.get('selected') or '—')}</b></div>
+          <div class=stat>Пинг<b>{html.escape(str(s.get('latency_best_ms') or '—'))} мс</b></div>
+          <div class=stat>Backup<b>{backup_label}</b></div>
+        </div>
+        <form class=actions style="margin-top:14px" method=post action=/operator/actions>
+          <input type=hidden name=return_tab value=automation>
+          <button class=secondary name=action value=run_health_check>Проверить сервисы</button>
+          <button class=secondary name=action value=run_latency_probe>Обновить пинг</button>
+          <button class=secondary name=action value=release_preflight>Проверить релизы</button>
+        </form>
+        <p class=muted style="margin-top:12px">Проверки выполняются в фоне. Обновите вкладку через несколько секунд, чтобы увидеть результат в журнале.</p>
       </section>
     </section>
 
@@ -2336,8 +2547,14 @@ class App(BaseHTTPRequestHandler):
             status["services"] = service_status()
             status["upstream"] = probe_upstream()
             status["summary"] = rospanel_summary()
-            status["monitor"] = {"interval_seconds": 60, "samples": health_snapshot(db)}
+            status["monitor"] = {
+                "enabled": enabled(s, "health_monitor_enabled", True),
+                "interval_seconds": int(s.get("health_monitor_interval_seconds", "60") or 60),
+                "samples": health_snapshot(db),
+            }
             status["load_balancer"] = load_balancer_snapshot(db, s)
+            status["release_guard"] = release_guard_snapshot(s)
+            status["backup"] = latest_backup_info()
             return self.reply(200, json.dumps(status))
 
         if path.startswith("/api/client/donations"):
@@ -2864,6 +3081,9 @@ class App(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             action = form.get("action", [""])[0]
+            return_tab = form.get("return_tab", ["dashboard"])[0]
+            if return_tab not in {"dashboard", "automation", "latency", "release", "service", "incidents", "security"}:
+                return_tab = "dashboard"
             flash = "Готово"
             if action == "bump_revision":
                 rev = int(s.get("config_revision") or 1) + 1
@@ -2887,6 +3107,50 @@ class App(BaseHTTPRequestHandler):
                 key = (form.get("incident_key", [""])[0] or "").strip()[:160]
                 ok = bool(key) and incident_close(db, key, s)
                 flash = "Инцидент закрыт" if ok else "Активный инцидент не найден"
+            elif action in ("run_health_check", "run_latency_probe"):
+                def background_probe(kind=action, requested_by=actor, requested_ip=ip):
+                    probe_db = None
+                    try:
+                        probe_db = conn()
+                        snapshot = settings(probe_db)
+                        result = run_health_check(probe_db, snapshot) if kind == "run_health_check" else run_latency_probe(probe_db, snapshot)
+                        probe_db.execute(
+                            "insert into events values (?,?,?,?,?)",
+                            (
+                                int(time.time()),
+                                "manual_health_check" if kind == "run_health_check" else "manual_latency_probe",
+                                requested_by,
+                                requested_ip,
+                                json.dumps({"ok": True, "result": result}, ensure_ascii=False)[:1500],
+                            ),
+                        )
+                        probe_db.commit()
+                    except Exception as exc:
+                        if probe_db is not None:
+                            try:
+                                probe_db.execute(
+                                    "insert into events values (?,?,?,?,?)",
+                                    (int(time.time()), "manual_probe_error", requested_by, requested_ip, str(exc)[:500]),
+                                )
+                                probe_db.commit()
+                            except Exception:
+                                pass
+                    finally:
+                        if probe_db is not None:
+                            try:
+                                probe_db.close()
+                            except Exception:
+                                pass
+                threading.Thread(target=background_probe, daemon=True).start()
+                flash = "Проверка запущена в фоне"
+            elif action == "release_preflight":
+                guard = release_guard_snapshot(s)
+                failures = [item["name"] for item in guard.values() if item.get("configured", True) and not item.get("ready")]
+                flash = "Релизы готовы: ARM64 и ARMv7 на месте" if not failures else "Не готовы: " + ", ".join(failures)
+                db.execute(
+                    "insert into events values (?,?,?,?,?)",
+                    (int(time.time()), "release_preflight", actor, ip, json.dumps(guard, ensure_ascii=False)),
+                )
             elif action == "restart_operator":
                 audit(db, actor, ip, "restart_operator", {})
                 db.commit()
@@ -2901,7 +3165,7 @@ class App(BaseHTTPRequestHandler):
                 flash = "Неизвестное действие"
             audit(db, actor, ip, action or "action", {"flash": flash})
             db.commit()
-            return self.redirect_operator("dashboard", flash)
+            return self.redirect_operator(return_tab, flash)
 
         if path in ("/operator/device", "/operator/device/clear-diagnostic"):
             length = int(self.headers.get("Content-Length", "0"))
@@ -3115,6 +3379,21 @@ class App(BaseHTTPRequestHandler):
                 "load_balancer_strategy": strategy,
                 "load_balancer_max_latency_ms": str(max_balancer_latency),
             }
+        elif section == "automation":
+            tab = "automation"
+            try:
+                health_interval = max(30, min(600, int(form.get("health_monitor_interval_seconds", ["60"])[0])))
+            except Exception:
+                return self.reply(400, '{"error":"invalid_health_monitor_interval"}')
+            digest_time = (form.get("telegram_digest_time_msk", ["09:00"])[0] or "").strip()
+            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", digest_time):
+                return self.reply(400, '{"error":"invalid_digest_time_msk"}')
+            values = {
+                "health_monitor_enabled": "1" if "health_monitor_enabled" in form else "0",
+                "health_monitor_interval_seconds": str(health_interval),
+                "telegram_daily_digest_enabled": "1" if "telegram_daily_digest_enabled" in form else "0",
+                "telegram_digest_time_msk": digest_time,
+            }
         elif section == "security":
             tab = "security"
             try:
@@ -3161,7 +3440,7 @@ class App(BaseHTTPRequestHandler):
         else:
             return self.reply(400, '{"error":"unknown_section"}')
 
-        if section in ("service", "features", "nodes", "ab", "branding", "latency", "release") and any(current.get(k) != v for k, v in values.items()):
+        if section in ("service", "features", "nodes", "ab", "branding", "latency", "release", "automation") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)
         changes = {k: {"before": current.get(k), "after": v} for k, v in values.items() if current.get(k) != v}
         maintenance_before = effective_maintenance(current)

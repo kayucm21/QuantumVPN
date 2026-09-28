@@ -47,6 +47,8 @@ class OperatorTests(unittest.TestCase):
 
     def test_forms_preserve_other_settings(self):
         token = base64.b64encode(b"test:test").decode()
+        with closing(self.panel.conn()) as db:
+            initial_audit_count = db.execute("select count(*) from audit where action like 'policy:%'").fetchone()[0]
         for body in (b"section=service&maintenance=on&maintenance_message=test", b"section=subscription&subscription_main_enabled=on"):
             with urlopen(Request(self.base + "/operator/policy", data=body, headers={"Authorization": "Basic " + token})) as response:
                 self.assertEqual(response.status, 200)
@@ -54,7 +56,10 @@ class OperatorTests(unittest.TestCase):
             settings = self.panel.settings(db)
             self.assertEqual(settings["maintenance"], "1")
             self.assertEqual(settings["subscription_main_enabled"], "1")
-            self.assertEqual(db.execute("select count(*) from audit where action like 'policy:%'").fetchone()[0], 2)
+            self.assertEqual(
+                db.execute("select count(*) from audit where action like 'policy:%'").fetchone()[0],
+                initial_audit_count + 2,
+            )
 
     def test_operator_download_buttons_use_current_version(self):
         token = base64.b64encode(b"test:test").decode()
@@ -155,6 +160,28 @@ class OperatorTests(unittest.TestCase):
                 )
                 db.commit()
                 self.panel.release_info.cache_clear()
+
+    def test_automation_policy_and_release_guard(self):
+        token = base64.b64encode(b"test:test").decode()
+        body = (
+            b"section=automation&health_monitor_enabled=on&health_monitor_interval_seconds=45"
+            b"&telegram_daily_digest_enabled=on&telegram_digest_time_msk=21%3A00"
+        )
+        with urlopen(Request(self.base + "/operator/policy", data=body, headers={"Authorization": "Basic " + token})) as response:
+            self.assertEqual(response.status, 200)
+        with closing(self.panel.conn()) as db:
+            current = self.panel.settings(db)
+            self.assertEqual(current["health_monitor_enabled"], "1")
+            self.assertEqual(current["health_monitor_interval_seconds"], "45")
+            self.assertEqual(current["telegram_daily_digest_enabled"], "1")
+            self.assertEqual(current["telegram_digest_time_msk"], "21:00")
+            guard = self.panel.release_guard_snapshot(current)
+        self.assertTrue(guard["production"]["ready"])
+        self.assertFalse(guard["scheduled"]["configured"])
+        with urlopen(Request(self.base + "/operator?tab=automation", headers={"Authorization": "Basic " + token})) as response:
+            page = response.read().decode("utf-8")
+        self.assertIn("Автопилот панели", page)
+        self.assertIn("Готовность релизов", page)
 
 
 if __name__ == "__main__":

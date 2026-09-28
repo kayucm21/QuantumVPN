@@ -792,6 +792,7 @@ internal fun AuroraConnectButton(
     enabled: Boolean,
     reduceMotion: Boolean,
     actionLabel: String,
+    compact: Boolean = false,
     onClick: () -> Unit,
 ) {
     val transition = rememberInfiniteTransition(label = "aurora-connect")
@@ -813,9 +814,12 @@ internal fun AuroraConnectButton(
         busy -> CosmicTokens.Orbit
         else -> Color(0xFF55EEC6)
     }
+    val outerSize = if (compact) 176.dp else 214.dp
+    val coreSize = if (compact) 126.dp else 156.dp
+    val iconSize = if (compact) 42.dp else 48.dp
     Box(
         modifier = Modifier
-            .size(214.dp)
+            .size(outerSize)
             .semantics { contentDescription = actionLabel },
         contentAlignment = Alignment.Center,
     ) {
@@ -851,7 +855,7 @@ internal fun AuroraConnectButton(
         }
         Box(
             modifier = Modifier
-                .size(156.dp)
+                .size(coreSize)
                 .clip(CircleShape)
                 .background(
                     Brush.radialGradient(
@@ -874,7 +878,7 @@ internal fun AuroraConnectButton(
                 )
             } else {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Canvas(Modifier.size(48.dp)) {
+                    Canvas(Modifier.size(iconSize)) {
                         val stroke = 5.dp.toPx()
                         drawArc(
                             color = Color.White,

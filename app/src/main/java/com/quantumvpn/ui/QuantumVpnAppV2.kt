@@ -6,6 +6,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -631,20 +632,20 @@ private fun V2Home(
         Column(
             Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 18.dp)
-                .padding(bottom = 24.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .padding(bottom = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                AuroraBrandMark(connected = connected, modifier = Modifier.size(42.dp))
-                Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                    Text(policy.branding.name, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                AuroraBrandMark(connected = connected, modifier = Modifier.size(34.dp))
+                Column(Modifier.weight(1f).padding(start = 8.dp)) {
+                    Text(policy.branding.name, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     Text(
                         policy.branding.tagline.ifBlank { "Свобода без границ" },
                         color = Color(0xFFB4C7DD),
-                        fontSize = 11.sp,
-                        letterSpacing = 1.1.sp,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 Surface(
@@ -652,32 +653,33 @@ private fun V2Home(
                     shape = CircleShape,
                     color = Color(0xFF152344).copy(alpha = .86f),
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .13f)),
-                    modifier = Modifier.size(42.dp),
+                    modifier = Modifier.size(34.dp),
                 ) {
-                    Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Settings, null, tint = Color(0xFF6AF7D0)) }
+                    Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Settings, null, tint = Color(0xFF6AF7D0), modifier = Modifier.size(19.dp)) }
                 }
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(7.dp))
             AuroraStatusPill(stateText = stateText, stateColor = stateColor, subtitle = stateHint)
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(6.dp))
             AuroraConnectButton(
                 connected = connected,
                 busy = busy,
                 enabled = !busy,
                 reduceMotion = busy,
                 actionLabel = actionLabel,
+                compact = true,
                 onClick = onConnect,
             )
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(7.dp))
             AuroraGlass(
                 modifier = Modifier.fillMaxWidth().clickable(onClick = onServers),
                 tint = Color(0xFF0E2A42),
             ) {
-                Row(Modifier.padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(serverFlag(server), fontSize = 26.sp)
-                    Column(Modifier.weight(1f).padding(start = 13.dp, end = 8.dp)) {
+                Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(serverFlag(server), fontSize = 22.sp)
+                    Column(Modifier.weight(1f).padding(start = 10.dp, end = 7.dp)) {
                         Text("Сервер", color = Color(0xFFB4C7DD), fontSize = 12.sp)
-                        Text(server, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(server, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Surface(
                         color = if (ping != null) Color(0xFF0B594B).copy(alpha = .75f) else Color(0xFF4A2133).copy(alpha = .76f),
@@ -687,67 +689,44 @@ private fun V2Home(
                             ping?.let { "$it мс" } ?: "Таймаут",
                             color = if (ping != null) Color(0xFF5CF5D0) else Aurora.Danger,
                             fontWeight = FontWeight.SemiBold,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
                         )
                     }
-                    Text("›", color = Color.White.copy(alpha = .72f), fontSize = 26.sp, modifier = Modifier.padding(start = 8.dp))
+                    Text("›", color = Color.White.copy(alpha = .72f), fontSize = 22.sp, modifier = Modifier.padding(start = 7.dp))
                 }
             }
-            Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                AuroraMetricCard(
-                    modifier = Modifier.weight(1f),
-                    label = "Пинг",
-                    value = ping?.let { "$it мс" } ?: "Таймаут",
-                    accent = if (ping != null) Color(0xFF5CF5D0) else Aurora.Danger,
-                    mark = "⌁",
-                )
-                AuroraMetricCard(
-                    modifier = Modifier.weight(1f),
-                    label = "Приватность",
-                    value = "$privacyScore/100",
-                    accent = Color(0xFFC395FF),
-                    mark = "◈",
-                )
-            }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
             AuroraGlass(
                 modifier = Modifier.fillMaxWidth(),
-                cornerRadius = 20.dp,
+                cornerRadius = 18.dp,
                 tint = Color(0xFF102540),
             ) {
                 Row(
-                    Modifier.fillMaxWidth().padding(vertical = 13.dp, horizontal = 8.dp),
+                    Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 6.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    V2HomeStat("⌁", ping?.let { "$it мс" } ?: "Таймаут", "Пинг", if (ping != null) Color(0xFF5CF5D0) else Aurora.Danger)
                     V2HomeStat("↓", stats.samples.lastOrNull()?.let { formatBytes(it.downloadBytesPerSecond) + "/с" } ?: "—", "Загрузка", Color(0xFF5CF5D0))
-                    V2HomeStat("↑", stats.samples.lastOrNull()?.let { formatBytes(it.uploadBytesPerSecond) + "/с" } ?: "—", "Отдача", Color(0xFFC395FF))
-                    V2HomeStat("⌁", ping?.let { "$it мс" } ?: "Таймаут", "Сеть", if (ping != null) Color(0xFF5CF5D0) else Aurora.Danger)
+                    V2HomeStat("◈", "$privacyScore/100", "Защита", Color(0xFFC395FF))
                 }
             }
-            Spacer(Modifier.height(12.dp))
             AuroraGlass(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp, tint = Color(0xFF103145)) {
                 Row(
-                    Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
+                    Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(if (adBlock) "◌" else "○", color = if (adBlock) Color(0xFF5CF5D0) else Color(0xFFB4C7DD), fontSize = 22.sp)
-                    Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                        Text("Защита DNS и рекламы", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                        Text(
-                            if (adBlock && connected) "Фильтр активен в VPN-сессии" else if (adBlock) "Включится после подключения VPN" else "Фильтр отключён в настройках",
-                            color = Color(0xFFB4C7DD),
-                            fontSize = 12.sp,
-                        )
+                    Text(if (adBlock) "◌" else "○", color = if (adBlock) Color(0xFF5CF5D0) else Color(0xFFB4C7DD), fontSize = 18.sp)
+                    Column(Modifier.weight(1f).padding(start = 8.dp)) {
+                        Text("DNS и блокировка рекламы", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        Text(if (adBlock && connected) "Активны" else if (adBlock) "Включатся с VPN" else "Отключены", color = Color(0xFFB4C7DD), fontSize = 10.sp)
                     }
                     Text(if (adBlock) "ВКЛ" else "ВЫКЛ", color = if (adBlock) Color(0xFF5CF5D0) else Color(0xFFB4C7DD), fontWeight = FontWeight.Bold, fontSize = 11.sp)
                 }
             }
-            Spacer(Modifier.height(12.dp))
             if (!hasProfile) {
-                Text("Загружаем встроенный список серверов…", color = Color(0xFF5CF5D0), fontSize = 12.sp)
+                Text("Загружаем встроенный список серверов…", color = Color(0xFF5CF5D0), fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
             }
         }
     }
@@ -764,26 +743,30 @@ private fun V2HomeStat(icon: String, value: String, label: String, accent: Color
 
 @Composable
 private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, selected: String?, offlinePings: Map<String, Int>, onSelect: (String, String) -> Unit, profileId: String?, reliabilityScores: Map<String, Int>, updatedAt: Long?, busy: Boolean, onRefresh: () -> Unit) {
-    var query by rememberSaveable { mutableStateOf("") }
-    var filter by rememberSaveable { mutableStateOf("Все") }
     val allServers = groups.flatMap { it.items }
-    val servers = allServers.filter { item ->
-        val matchesText = query.isBlank() || item.tag.contains(query, true) || item.type.contains(query, true)
-        val region = serverRegion(item.tag)
-        val matchesFilter = filter == "Все" || region == filter
-        matchesText && matchesFilter
-    }
     val livePings = allServers.count { it.pingMillis != null || offlinePings[it.tag] != null }
     val updatedLabel = updatedAt?.let {
         "Список обновлён " + java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it))
     } ?: "Загружаем встроенный список…"
+    fun reliability(server: com.quantumvpn.vpn.RuntimeOutboundItem): Int {
+        val owner = groups.firstOrNull { group -> group.items.any { it.tag == server.tag } }
+        val key = if (profileId != null && owner != null) {
+            DeadServerQuarantineStore.serverKey(profileId, owner.tag, server.tag)
+        } else server.tag
+        return reliabilityScores[key] ?: reliabilityScores[server.tag] ?: 50
+    }
+    val rankedServers = allServers.sortedWith(
+        compareByDescending<com.quantumvpn.vpn.RuntimeOutboundItem> { it.tag == selected }
+            .thenBy { it.pingMillis ?: offlinePings[it.tag] ?: Int.MAX_VALUE }
+            .thenByDescending(::reliability),
+    )
+    val quickServers = rankedServers.take(4)
     V2AuroraBackdrop(Modifier.fillMaxSize()) {
         Column(
             Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp)
-                .padding(bottom = 22.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .padding(bottom = 8.dp),
         ) {
             V2AuroraHeader(
                 title = "Серверы",
@@ -791,89 +774,28 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
                 status = if (allServers.isEmpty()) "ОЖИДАНИЕ" else "$livePings/${allServers.size}",
                 statusPositive = allServers.isNotEmpty() && livePings > 0,
             )
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                TextButton(onClick = onRefresh, enabled = !busy) {
-                    Text(if (busy) "Обновляем…" else "Обновить список", color = Aurora.Mint)
-                }
-            }
             V2GlassPanel(
-                modifier = Modifier.fillMaxWidth().height(172.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 accent = Aurora.Violet,
             ) {
-                Box(Modifier.fillMaxSize()) {
-                    Globe3DBackdrop(Modifier.fillMaxSize(), pulse = true, reduceMotion = false, countryCode = null)
-                    Column(
-                        Modifier.fillMaxSize().padding(18.dp),
-                        verticalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Карта сети", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
-                                Text("Доступные маршруты в реальном времени", color = Aurora.Muted, fontSize = 12.sp)
-                            }
-                            Surface(
-                                color = Aurora.Mint.copy(alpha = .13f),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .62f)),
-                                shape = RoundedCornerShape(999.dp),
-                            ) {
-                                Text("● LIVE", color = Aurora.Mint, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
-                            }
-                        }
-                        Text("${servers.size} серверов по текущему фильтру · $livePings с измеренным пингом", color = Aurora.Text, fontSize = 12.sp)
+                Row(Modifier.padding(horizontal = 14.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("◉", color = Aurora.Mint, fontSize = 18.sp)
+                    Text("Быстрый выбор · ${allServers.size} серверов", color = Aurora.Text, fontSize = 12.sp, modifier = Modifier.weight(1f).padding(start = 8.dp))
+                    TextButton(onClick = onRefresh, enabled = !busy, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                        Text(if (busy) "…" else "Обновить", color = Aurora.Mint, fontSize = 11.sp)
                     }
                 }
             }
-            Spacer(Modifier.height(14.dp))
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                singleLine = true,
-                label = { Text("Найти страну или сервер") },
-                placeholder = { Text("Например: Москва, VLESS") },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                listOf("Все", "Европа", "Азия", "Америка").forEach { option ->
-                    Surface(
-                        onClick = { filter = option },
-                        shape = RoundedCornerShape(18.dp),
-                        color = if (filter == option) Aurora.Mint else Aurora.Glass.copy(alpha = .86f),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, if (filter == option) Aurora.Mint else Aurora.Border),
-                    ) {
-                        Text(
-                            option,
-                            color = if (filter == option) Aurora.Night else Aurora.Text,
-                            fontWeight = if (filter == option) FontWeight.SemiBold else FontWeight.Normal,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
-                            fontSize = 12.sp,
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.height(14.dp))
-        fun reliability(server: com.quantumvpn.vpn.RuntimeOutboundItem): Int {
-            val owner = groups.firstOrNull { group -> group.items.any { it.tag == server.tag } }
-            val key = if (profileId != null && owner != null) {
-                DeadServerQuarantineStore.serverKey(profileId, owner.tag, server.tag)
-            } else server.tag
-            return reliabilityScores[key] ?: reliabilityScores[server.tag] ?: 50
-        }
-            if (servers.isEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            if (quickServers.isEmpty()) {
                 V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Aurora.Danger) {
-                    Column(Modifier.padding(18.dp)) {
+                    Column(Modifier.padding(14.dp)) {
                         Text("Серверы не найдены", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
                         Text("Обновите встроенную подписку или проверьте подключение к сети.", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
                     }
                 }
             }
-            servers.forEach { server ->
+            quickServers.forEach { server ->
                 val ping = server.pingMillis ?: offlinePings[server.tag]
                 val selectedServer = server.tag == selected
                 Surface(
@@ -884,41 +806,50 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
                         if (selectedServer) Aurora.Mint.copy(alpha = .84f) else Aurora.Border.copy(alpha = .88f),
                     ),
                     shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp),
                 ) {
-                    Row(Modifier.padding(horizontal = 15.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Surface(
                             color = Aurora.Night.copy(alpha = .34f),
-                            shape = RoundedCornerShape(14.dp),
+                            shape = RoundedCornerShape(12.dp),
                         ) {
-                            Text(serverFlag(server.tag), fontSize = 23.sp, modifier = Modifier.padding(8.dp))
+                            Text(serverFlag(server.tag), fontSize = 19.sp, modifier = Modifier.padding(6.dp))
                         }
-                        Column(Modifier.weight(1f).padding(start = 12.dp, end = 8.dp)) {
-                            Text(server.tag, color = Aurora.Text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Column(Modifier.weight(1f).padding(start = 9.dp, end = 6.dp)) {
+                            Text(server.tag, color = Aurora.Text, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(
                                 buildString {
                                     append(server.type.uppercase())
                                     if (selectedServer) append(" · выбран")
                                 },
                                 color = Aurora.Muted,
-                                fontSize = 12.sp,
+                                fontSize = 10.sp,
                             )
                         }
                         Surface(
                             color = if (ping != null) Aurora.Mint.copy(alpha = .13f) else Aurora.Danger.copy(alpha = .14f),
                             border = androidx.compose.foundation.BorderStroke(1.dp, if (ping != null) Aurora.Mint.copy(alpha = .68f) else Aurora.Danger.copy(alpha = .72f)),
-                            shape = RoundedCornerShape(14.dp),
+                            shape = RoundedCornerShape(12.dp),
                         ) {
                             Text(
                                 ping?.let { "$it мс · ${ServerHealthScore.combined(it, reliability(server))}" } ?: "Таймаут",
                                 color = if (ping != null) Aurora.Mint else Aurora.Danger,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = if (ping == null) 11.sp else 13.sp,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                             )
                         }
                     }
                 }
+            }
+            if (allServers.size > quickServers.size) {
+                Text(
+                    "Показаны лучшие ${quickServers.size} из ${allServers.size} · список обновляется автоматически",
+                    color = Aurora.Muted,
+                    fontSize = 10.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(top = 1.dp),
+                )
             }
         }
     }
@@ -948,9 +879,8 @@ private fun V2Statistics(
         Column(
             Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp)
-                .padding(bottom = 22.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .padding(bottom = 8.dp),
         ) {
             V2AuroraHeader(
                 title = "Статистика",
@@ -963,19 +893,19 @@ private fun V2Statistics(
                 modifier = Modifier.fillMaxWidth(),
                 accent = if (connected) Aurora.Mint else Aurora.Danger,
             ) {
-                Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.padding(horizontal = 13.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
                     Surface(
                         color = (if (connected) Aurora.Mint else Aurora.Danger).copy(alpha = .14f),
-                        shape = RoundedCornerShape(16.dp),
+                        shape = RoundedCornerShape(13.dp),
                     ) {
-                        Text(if (connected) "◉" else "○", color = if (connected) Aurora.Mint else Aurora.Danger, fontSize = 28.sp, modifier = Modifier.padding(10.dp))
+                        Text(if (connected) "◉" else "○", color = if (connected) Aurora.Mint else Aurora.Danger, fontSize = 20.sp, modifier = Modifier.padding(7.dp))
                     }
-                    Column(Modifier.padding(start = 14.dp).weight(1f)) {
-                        Text(if (connected) "Защита активна" else "Защита выключена", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                        Text(if (connected) "Защита активна" else "Защита выключена", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         Text(
-                            if (connected) "Трафик, пинг и график обновляются автоматически" else "Подключите VPN, чтобы увидеть живую статистику",
+                            if (connected) "Пинг и трафик обновляются автоматически" else "Подключите VPN для живой статистики",
                             color = Aurora.Muted,
-                            fontSize = 12.sp,
+                            fontSize = 10.sp,
                             modifier = Modifier.padding(top = 3.dp),
                         )
                     }
@@ -991,64 +921,13 @@ private fun V2Statistics(
                 V2Metric("Отдача", speed?.let { formatBytes(it.uploadBytesPerSecond) + "/с" } ?: "0 Б/с", Modifier.weight(1f))
                 V2Metric("Потери", stats.pingLossPercent?.let { "$it%" } ?: "—", Modifier.weight(1f))
             }
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                V2Metric("Джиттер", stats.jitterMillis?.let { "$it мс" } ?: "—", Modifier.weight(1f))
-                V2Metric("Проверки", if (stats.pingAttempts > 0) "${stats.pingSuccesses}/${stats.pingAttempts}" else "—", Modifier.weight(1f))
-            }
-            Spacer(Modifier.height(14.dp))
-            TrafficChart(stats)
+            Spacer(Modifier.height(9.dp))
+            TrafficChart(stats, compact = true)
             V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = if (networkHealthy) Aurora.Mint else Aurora.Danger) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    V2StatisticLine(
-                        label = "Время подключения",
-                        value = "%02d:%02d:%02d".format(seconds / 3_600, seconds / 60 % 60, seconds % 60),
-                    )
-                    V2StatisticLine(
-                        label = "Общий трафик",
-                        value = formatBytes(stats.downloadTotalBytes + stats.uploadTotalBytes),
-                    )
-                    V2StatisticLine(
-                        label = "Блокировка рекламы",
-                        value = "$cumulativeBlocked",
-                        accent = Aurora.Mint,
-                    )
-                    V2StatisticLine(
-                        label = "Сеть Android",
-                        value = if (networkHealthy) "проверена" else "требует проверки",
-                        accent = if (networkHealthy) Aurora.Mint else Aurora.Danger,
-                    )
-                }
-            }
-            if (showTimeline) {
-                Spacer(Modifier.height(16.dp))
-                Text("История сессий · ${history.size} сегодня", color = Aurora.Text, fontWeight = FontWeight.Bold)
-            }
-            if (showTimeline && history.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Aurora.Violet) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        history.take(7).forEach { record ->
-                            val total = record.downloadBytes + record.uploadBytes
-                            V2StatisticLine(
-                                label = record.profileName,
-                                value = "${formatBytes(total)} · ${record.durationSec / 60} мин",
-                            )
-                        }
-                    }
-                }
-            }
-            if (showTimeline && switchHistory.isNotEmpty()) {
-                Spacer(Modifier.height(16.dp))
-                Text("Смена серверов", color = Aurora.Text, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Aurora.Violet) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        switchHistory.take(6).forEach { event ->
-                            val date = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.getDefault()).format(java.util.Date(event.epochMillis))
-                            V2StatisticLine(label = event.outboundTag, value = date)
-                        }
-                    }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    V2StatisticLine("Сессия", "%02d:%02d:%02d".format(seconds / 3_600, seconds / 60 % 60, seconds % 60), modifier = Modifier.weight(1f))
+                    V2StatisticLine("Трафик", formatBytes(stats.downloadTotalBytes + stats.uploadTotalBytes), modifier = Modifier.weight(1f))
+                    V2StatisticLine("Реклама", "$cumulativeBlocked", accent = Aurora.Mint, modifier = Modifier.weight(1f))
                 }
             }
         }
@@ -1056,10 +935,10 @@ private fun V2Statistics(
 }
 
 @Composable
-private fun V2StatisticLine(label: String, value: String, accent: Color = Aurora.Muted) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-        Text(value, color = accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+private fun V2StatisticLine(label: String, value: String, accent: Color = Aurora.Muted, modifier: Modifier = Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, color = Aurora.Muted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(value, color = accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1095,6 +974,7 @@ private fun V2Settings(
     var notificationsOpen by rememberSaveable { mutableStateOf(false) }
     var aboutOpen by rememberSaveable { mutableStateOf(false) }
     var donateOpen by rememberSaveable { mutableStateOf(false) }
+    var moreOpen by rememberSaveable { mutableStateOf(false) }
     if (privacyOpen) {
         V2PrivacyPage(
             onBack = { privacyOpen = false },
@@ -1152,6 +1032,26 @@ private fun V2Settings(
         }
         return
     }
+    if (moreOpen) {
+        V2MoreSettingsPage(
+            theme = theme,
+            dynamicColor = dynamicColor,
+            protectUnknownWifi = protectUnknownWifi,
+            travelMode = travelMode,
+            notifications = notifications,
+            onTheme = onTheme,
+            onDynamicColor = onDynamicColor,
+            onProtectUnknownWifi = onProtectUnknownWifi,
+            onTravelMode = onTravelMode,
+            onNotifications = onNotifications,
+            onNotificationsOpen = { notificationsOpen = true },
+            onDonateOpen = { donateOpen = true },
+            onAboutOpen = { aboutOpen = true },
+            onPrivacyOpen = { privacyOpen = true },
+            onBack = { moreOpen = false },
+        )
+        return
+    }
     if (logConsentOpen) {
         AlertDialog(
             onDismissRequest = { logConsentOpen = false },
@@ -1173,9 +1073,8 @@ private fun V2Settings(
         Column(
             Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp)
-                .padding(bottom = 22.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .padding(bottom = 8.dp),
         ) {
         V2AuroraHeader(
             title = "Настройки",
@@ -1183,7 +1082,18 @@ private fun V2Settings(
             status = if (vpnConnected) "ЗАЩИТА" else "ГОТОВО",
             statusPositive = true,
         )
-        Text("Основные функции собраны в компактные стеклянные группы", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 14.dp))
+        Spacer(Modifier.height(8.dp))
+        V2SettingsGroup("Защита") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                V2MiniToggle("DNS и реклама", adBlock, onAdBlock, Modifier.weight(1f))
+                V2MiniToggle("Kill Switch", killSwitch, onKillSwitch, Modifier.weight(1f))
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 7.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                V2MiniToggle("Автоподключение", autoConnect, onAutoConnect, Modifier.weight(1f))
+                V2MiniToggle("Уведомления", notifications, onNotifications, Modifier.weight(1f))
+            }
+        }
+        Spacer(Modifier.height(8.dp))
         V2SettingsGroup("Оформление") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(ThemeMode.System, ThemeMode.Dark, ThemeMode.Light).forEach { mode ->
@@ -1202,46 +1112,71 @@ private fun V2Settings(
                             },
                             color = if (theme == mode) Aurora.Night else Aurora.Muted,
                             textAlign = TextAlign.Center,
-                            fontSize = 11.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(vertical = 10.dp),
+                            modifier = Modifier.padding(vertical = 8.dp),
                         )
                     }
                 }
             }
-            V2CompactToggle("Цвета Android", dynamicColor, onDynamicColor)
         }
-        Spacer(Modifier.height(10.dp))
-        V2SettingsGroup("Безопасность") {
+        Spacer(Modifier.height(8.dp))
+        V2SettingsGroup("Сервис") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                V2MiniToggle("DNS и реклама", adBlock, onAdBlock, Modifier.weight(1f))
-                V2MiniToggle("Kill Switch", killSwitch, onKillSwitch, Modifier.weight(1f))
-            }
-            Text("Фильтр DNS и блокировка трафика действуют во время VPN-сессии.", color = Aurora.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
-        }
-        Spacer(Modifier.height(10.dp))
-        V2SettingsGroup("Сеть") {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                V2MiniToggle("Автоподключение", autoConnect, onAutoConnect, Modifier.weight(1f))
-                V2MiniToggle("Неизвестный Wi‑Fi", protectUnknownWifi, onProtectUnknownWifi, Modifier.weight(1f))
-            }
-            V2CompactToggle("Режим поездки", travelMode, onTravelMode)
-        }
-        Spacer(Modifier.height(10.dp))
-        V2SettingsGroup("Сервис и обратная связь") {
-            V2CompactToggle("Уведомления", notifications, onNotifications)
-            V2NavRow("Центр уведомлений", if (policy.maintenance) "Технические работы активны" else "Обновления и объявления сервиса", onClick = { notificationsOpen = true })
-            V2NavRow("Проверить обновления", "Проверить подпись и новую версию сейчас", onClick = onCheckUpdate)
-            if (policy.features.diagnostics) V2NavRow("Отправить логи", "Добровольный диагностический отчёт", onClick = {
-                logConsentOpen = true
-            })
-            if (logStatus.isNotBlank()) Text(logStatus, color = Aurora.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-            V2NavRow("Пожертвование", "Открыть ЮMoney во внешнем браузере", onClick = { donateOpen = true })
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                V2MiniNav("О приложении", onClick = { aboutOpen = true }, modifier = Modifier.weight(1f))
-                V2MiniNav("Приватность", onClick = { privacyOpen = true }, modifier = Modifier.weight(1f))
+                V2MiniNav("Обновление", onClick = onCheckUpdate, modifier = Modifier.weight(1f))
+                V2MiniNav("Логи", onClick = { logConsentOpen = true }, modifier = Modifier.weight(1f))
+                V2MiniNav("Ещё", onClick = { moreOpen = true }, modifier = Modifier.weight(1f))
             }
         }
+        if (logStatus.isNotBlank()) Text(logStatus, color = Aurora.Muted, fontSize = 10.sp, modifier = Modifier.padding(top = 5.dp))
+        }
+    }
+}
+
+@Composable
+private fun V2MoreSettingsPage(
+    theme: ThemeMode,
+    dynamicColor: Boolean,
+    protectUnknownWifi: Boolean,
+    travelMode: Boolean,
+    notifications: Boolean,
+    onTheme: (ThemeMode) -> Unit,
+    onDynamicColor: (Boolean) -> Unit,
+    onProtectUnknownWifi: (Boolean) -> Unit,
+    onTravelMode: (Boolean) -> Unit,
+    onNotifications: (Boolean) -> Unit,
+    onNotificationsOpen: () -> Unit,
+    onDonateOpen: () -> Unit,
+    onAboutOpen: () -> Unit,
+    onPrivacyOpen: () -> Unit,
+    onBack: () -> Unit,
+) {
+    V2AuroraBackdrop(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp)
+                .padding(bottom = 22.dp),
+        ) {
+            TextButton(onClick = onBack) { Text("← Назад", color = Aurora.Mint) }
+            V2AuroraHeader("Дополнительные настройки", "Редкие параметры и сведения о приложении", "ГОТОВО", true)
+            Spacer(Modifier.height(12.dp))
+            V2SettingsGroup("Оформление и сеть") {
+                V2CompactToggle("Цвета Android", dynamicColor, onDynamicColor)
+                V2CompactToggle("Защита неизвестного Wi‑Fi", protectUnknownWifi, onProtectUnknownWifi)
+                V2CompactToggle("Режим поездки", travelMode, onTravelMode)
+                V2CompactToggle("Уведомления", notifications, onNotifications)
+            }
+            Spacer(Modifier.height(10.dp))
+            V2SettingsGroup("Сервис") {
+                V2NavRow("Центр уведомлений", "Обновления, объявления и состояние сервиса", onNotificationsOpen)
+                V2NavRow("Пожертвование", "Открыть ЮMoney во внешнем браузере", onDonateOpen)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    V2MiniNav("О приложении", onAboutOpen, Modifier.weight(1f))
+                    V2MiniNav("Приватность", onPrivacyOpen, Modifier.weight(1f))
+                }
+            }
+            Spacer(Modifier.height(16.dp))
         }
     }
 }
@@ -1650,17 +1585,17 @@ private fun V2BrandHeader(subtitle: String) {
     }
 }
 @Composable
-private fun TrafficChart(stats: VpnSessionStats) {
+private fun TrafficChart(stats: VpnSessionStats, compact: Boolean = false) {
     val samples = stats.samples.takeLast(60)
     val mint = Aurora.Mint
     val violet = Aurora.Violet
     val border = Aurora.Border
-    V2GlassPanel(modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp), accent = Aurora.Violet) {
-        Column(Modifier.padding(16.dp)) {
-            Text("Трафик", color = Aurora.Text, fontWeight = FontWeight.Bold)
-            Text("Загрузка · Отдача", color = Aurora.Muted, fontSize = 12.sp)
-            if (samples.size < 2) Text("График появится после получения данных", color = Aurora.Muted, modifier = Modifier.padding(vertical = 24.dp))
-            else Canvas(Modifier.fillMaxWidth().height(130.dp).padding(top = 16.dp)) {
+    V2GlassPanel(modifier = Modifier.fillMaxWidth().padding(bottom = if (compact) 8.dp else 14.dp), accent = Aurora.Violet) {
+        Column(Modifier.padding(if (compact) 10.dp else 16.dp)) {
+            Text("Трафик", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = if (compact) 12.sp else 14.sp)
+            Text("Загрузка · Отдача", color = Aurora.Muted, fontSize = if (compact) 10.sp else 12.sp)
+            if (samples.size < 2) Text("График появится после получения данных", color = Aurora.Muted, fontSize = if (compact) 10.sp else 12.sp, modifier = Modifier.padding(vertical = if (compact) 10.dp else 24.dp))
+            else Canvas(Modifier.fillMaxWidth().height(if (compact) 76.dp else 130.dp).padding(top = if (compact) 8.dp else 16.dp)) {
                 val peak = samples.maxOf { maxOf(it.downloadBytesPerSecond, it.uploadBytesPerSecond) }.coerceAtLeast(1).toFloat()
                 for (row in 0..3) drawLine(border.copy(alpha = .4f), Offset(0f, size.height * row / 3), Offset(size.width, size.height * row / 3))
                 samples.zipWithNext().forEachIndexed { i, (a, b) ->

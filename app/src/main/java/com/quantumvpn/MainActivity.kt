@@ -178,14 +178,19 @@ class MainActivity : FragmentActivity() {
                 }
             }
             var splashDone by remember { mutableStateOf(false) }
+            var startupUpdateSettled by remember { mutableStateOf(false) }
             var autoInstallStarted by remember { mutableStateOf(false) }
             var systemDownloadStarted by remember { mutableStateOf(false) }
-            // Только проверка на сплэше; качает системный DownloadManager → установщик Android.
+            // Проверка начинается до перехода в главный экран. Если новая версия
+            // найдена, сплэш остаётся видимым до загрузки и системного запроса
+            // установки, чтобы пользователь не видел главную во время обновления.
             LaunchedEffect(Unit) {
+                startupUpdateSettled = false
                 updateController.checkOnce(UpdateChannel.Stable, autoDownload = false)
             }
             LaunchedEffect(updateState) {
                 when (val s = updateState) {
+                    is UpdateState.UpToDate -> startupUpdateSettled = true
                     is UpdateState.Available -> {
                         if (!systemDownloadStarted) {
                             systemDownloadStarted = true
@@ -199,15 +204,12 @@ class MainActivity : FragmentActivity() {
                         }
                     }
                     is UpdateState.Failure -> {
-                        val candidate = s.candidate
-                        if (candidate != null && !systemDownloadStarted && !splashDone) {
-                            systemDownloadStarted = true
-                            startSystemApkDownload(candidate)
-                        } else if (candidate != null && !splashDone) {
-                            // Last resort: open APK URL in browser so Chrome can finish the download.
-                            runCatching { systemApkInstaller.openInBrowser(candidate) }
-                        }
+                        // Не открываем браузер и не заставляем пользователя искать
+                        // APK вручную. Ошибка остаётся в приложении, а главный экран
+                        // откроется только после завершения этой попытки обновления.
+                        startupUpdateSettled = true
                     }
+                    UpdateState.Idle -> if (systemDownloadStarted) startupUpdateSettled = true
                     else -> Unit
                 }
             }
@@ -289,9 +291,7 @@ class MainActivity : FragmentActivity() {
                 }
                 if (!splashDone) {
                     StartupSplashScreen(
-                        // A slow update endpoint must never hide the connect button.
-                        // The updater and its notification continue in the background.
-                        ready = state.initialized,
+                        ready = state.initialized && startupUpdateSettled,
                         updateState = updateState,
                         availableServers = state.homeSelectorGroups.sumOf { it.items.size },
                         onFinished = { splashDone = true },

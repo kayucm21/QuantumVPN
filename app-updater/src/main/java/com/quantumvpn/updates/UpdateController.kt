@@ -142,8 +142,26 @@ class UpdateController(
             mutableState.value = UpdateState.Failure("Системный APK не найден.", candidate)
             return
         }
-        readyFile = file
-        mutableState.value = UpdateState.Ready(candidate)
+        // DownloadManager owns the transfer, but the APK still has to pass the
+        // same byte-for-byte hash, package/version and signing checks as the
+        // in-app downloader before Android's package installer is opened.
+        replaceOperation {
+            try {
+                if (candidate.metadata.apkSize > 0L && file.length() != candidate.metadata.apkSize) {
+                    throw UpdateException("Размер системного APK не совпадает с публикацией.")
+                }
+                if (!sha256(file).equals(candidate.metadata.apkSha256, ignoreCase = true)) {
+                    throw UpdateException("SHA-256 системного APK не совпадает с публикацией.")
+                }
+                verifier.verify(file, candidate.metadata)
+                readyFile = file
+                mutableState.value = UpdateState.Ready(candidate)
+            } catch (error: UpdateException) {
+                mutableState.value = UpdateState.Failure(error.message ?: "Не удалось проверить системный APK.", candidate)
+            } catch (_: Throwable) {
+                mutableState.value = UpdateState.Failure("Не удалось проверить системный APK.", candidate)
+            }
+        }
     }
 
     fun failSystemDownload(message: String, candidate: UpdateCandidate?) {

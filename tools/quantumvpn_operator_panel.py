@@ -52,10 +52,10 @@ PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.6"
-VERSION = "5.10.6"
-VERSION_CODE = 131
-DEFAULT_NOTE = "QuantumVPN 5.10.6: главная, серверы, статистика и настройки стали компактными; полный список серверов открыт отдельной кнопкой."
+PANEL_BUILD = "5.10.7"
+VERSION = "5.10.7"
+VERSION_CODE = 132
+DEFAULT_NOTE = "QuantumVPN 5.10.7: нижняя навигация поднята выше системных кнопок, а стартовый экран ждёт завершения загрузки и проверки обновления."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()

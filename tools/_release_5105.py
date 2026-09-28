@@ -9,8 +9,8 @@ import paramiko
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "5.10.6"
-VERSION_CODE = 131
+VERSION = "5.10.7"
+VERSION_CODE = 132
 HOST = "150.241.96.191"
 REMOTE_ROOT = f"/var/www/quantumvpn/downloads/{VERSION}"
 
@@ -45,14 +45,14 @@ def package_artifacts() -> Path:
     }
     (destination / "release-metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (destination / "build-info.txt").write_text(
-        f"version={VERSION}\nversionCode={VERSION_CODE}\nfeatures=compact-primary-tabs,arm64-v8a,armeabi-v7a\n",
+        f"version={VERSION}\nversionCode={VERSION_CODE}\nfeatures=raised-system-nav-clearance,startup-update-gate,verified-system-download,arm64-v8a,armeabi-v7a\n",
         encoding="utf-8",
     )
     (destination / "RELEASE_NOTES.md").write_text(
         f"# QuantumVPN {VERSION}\n\n"
-        "- Главная, серверы, статистика и настройки помещаются на основной экран без обязательной прокрутки.\n"
-        "- Кнопка подключения, быстрый выбор сервера и основные переключатели всегда видимы.\n"
-        "- Длинные списки и дополнительные настройки вынесены в отдельные экраны.\n",
+        "- Нижняя навигация поднята над системными кнопками Android фиксированным безопасным отступом.\n"
+        "- Стартовый экран остаётся видимым при проверке, загрузке и проверке новой версии APK.\n"
+        "- Перед открытием системной установки автоматически проверяются SHA-256, пакет, версия и подпись APK.\n",
         encoding="utf-8",
     )
     return destination
@@ -102,10 +102,10 @@ def deploy(destination: Path) -> None:
 db = sqlite3.connect("/var/lib/quantumvpn-operator/operator.db")
 values = {{
     "app_version": "{VERSION}", "app_version_code": "{VERSION_CODE}", "min_version_code": "0",
-    "app_changelog": "QuantumVPN {VERSION}: основные вкладки стали компактными, без обязательной прокрутки.",
+    "app_changelog": "QuantumVPN {VERSION}: нижняя навигация поднята над системными кнопками, а загрузка обновления остаётся на стартовом экране до системной установки.",
     "update_notifications_enabled": "1", "release_schedule_enabled": "0", "release_publish_at": "0",
     "scheduled_app_version": "", "scheduled_app_version_code": "0", "scheduled_min_version_code": "0", "scheduled_app_changelog": "",
-    "announce": "Доступно обновление QuantumVPN {VERSION}. Основные вкладки стали компактными — откройте уведомление для установки.",
+    "announce": "Доступно обновление QuantumVPN {VERSION}. Исправлены отступ нижних кнопок и загрузка обновления при запуске — откройте уведомление для установки.",
     "announce_en": "QuantumVPN {VERSION} is available.", "announce_until": "0",
     "force_update_message": "Доступно обновление QuantumVPN {VERSION}.",
 }}
@@ -115,7 +115,7 @@ db.commit(); db.close()
 '''
         run_remote(client, f"echo {update.encode('utf-8').hex()} | xxd -r -p | python3")
         for abi in ("arm64-v8a", "armeabi-v7a"):
-            print(run_remote(client, f"curl -sk 'https://127.0.0.1:8443/api/client/update?abi={abi}&current_version_code=130'"), flush=True)
+            print(run_remote(client, f"curl -sk 'https://127.0.0.1:8443/api/client/update?abi={abi}&current_version_code=131'"), flush=True)
     finally:
         client.close()
 

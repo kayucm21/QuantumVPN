@@ -1575,10 +1575,10 @@ private fun V2BottomBar(tab: V2Tab, onTab: (V2Tab) -> Unit) = Surface(
     shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
     shadowElevation = 14.dp,
     // Some Android/OEM builds report a bogus navigation-bar inset (hundreds of
-    // dp) when edge-to-edge is enabled.  A fixed compact bottom margin keeps
-    // this bar next to the system buttons instead of lifting it into the
-    // middle of the screen.
-    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+    // dp) when edge-to-edge is enabled. A small fixed clearance keeps the bar
+    // above the three Android system buttons without letting it stretch into
+    // the middle of the screen.
+    modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp),
 ) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 7.dp, vertical = 7.dp),

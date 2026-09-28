@@ -52,10 +52,10 @@ PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.3"
-VERSION = "5.10.3"
-VERSION_CODE = 128
-DEFAULT_NOTE = "QuantumVPN 5.10.3: исправлен завышенный нижний отступ навигации на некоторых Android-устройствах."
+PANEL_BUILD = "5.10.4"
+VERSION = "5.10.4"
+VERSION_CODE = 129
+DEFAULT_NOTE = "QuantumVPN 5.10.4: исправлена растянутая нижняя навигация и возвращён главный экран с кнопкой подключения."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()

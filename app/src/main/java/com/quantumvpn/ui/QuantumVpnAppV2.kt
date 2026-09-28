@@ -1617,7 +1617,12 @@ private fun V2BottomBar(tab: V2Tab, onTab: (V2Tab) -> Unit) = Surface(
                 onClick = { onTab(item) },
                 color = if (selected) Aurora.Mint.copy(alpha = .14f) else Color.Transparent,
                 shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.weight(1f).heightIn(min = 56.dp).padding(horizontal = 2.dp),
+                // The previous minimum-only height let fillMaxSize() in the
+                // child Column consume the whole free screen height on some
+                // devices.  That turned the selected tab into a tall stripe,
+                // pushed the bar upward, and hid the page content.  A fixed
+                // tab height keeps the complete bottom bar compact.
+                modifier = Modifier.weight(1f).height(56.dp).padding(horizontal = 2.dp),
             ) {
                 Column(
                     Modifier.fillMaxSize().padding(vertical = 6.dp),

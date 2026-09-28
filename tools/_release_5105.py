@@ -9,8 +9,8 @@ import paramiko
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "5.10.5"
-VERSION_CODE = 130
+VERSION = "5.10.6"
+VERSION_CODE = 131
 HOST = "150.241.96.191"
 REMOTE_ROOT = f"/var/www/quantumvpn/downloads/{VERSION}"
 
@@ -115,7 +115,7 @@ db.commit(); db.close()
 '''
         run_remote(client, f"echo {update.encode('utf-8').hex()} | xxd -r -p | python3")
         for abi in ("arm64-v8a", "armeabi-v7a"):
-            print(run_remote(client, f"curl -sk 'https://127.0.0.1:8443/api/client/update?abi={abi}&current_version_code=129'"), flush=True)
+            print(run_remote(client, f"curl -sk 'https://127.0.0.1:8443/api/client/update?abi={abi}&current_version_code=130'"), flush=True)
     finally:
         client.close()
 

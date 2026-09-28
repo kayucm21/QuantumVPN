@@ -743,6 +743,7 @@ private fun V2HomeStat(icon: String, value: String, label: String, accent: Color
 
 @Composable
 private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, selected: String?, offlinePings: Map<String, Int>, onSelect: (String, String) -> Unit, profileId: String?, reliabilityScores: Map<String, Int>, updatedAt: Long?, busy: Boolean, onRefresh: () -> Unit) {
+    var allServersOpen by rememberSaveable { mutableStateOf(false) }
     val allServers = groups.flatMap { it.items }
     val livePings = allServers.count { it.pingMillis != null || offlinePings[it.tag] != null }
     val updatedLabel = updatedAt?.let {
@@ -761,6 +762,41 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
             .thenByDescending(::reliability),
     )
     val quickServers = rankedServers.take(4)
+    if (allServersOpen) {
+        AlertDialog(
+            onDismissRequest = { allServersOpen = false },
+            title = { Text("Все серверы · ${rankedServers.size}") },
+            text = {
+                Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState())) {
+                    rankedServers.forEach { server ->
+                        val ping = server.pingMillis ?: offlinePings[server.tag]
+                        val selectedServer = server.tag == selected
+                        Surface(
+                            onClick = {
+                                groups.firstOrNull { group -> group.items.any { it.tag == server.tag } }
+                                    ?.let { onSelect(it.tag, server.tag) }
+                                allServersOpen = false
+                            },
+                            color = if (selectedServer) Aurora.Mint.copy(alpha = .16f) else Aurora.Glass,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, if (selectedServer) Aurora.Mint else Aurora.Border),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp),
+                        ) {
+                            Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(serverFlag(server.tag), fontSize = 18.sp)
+                                Column(Modifier.weight(1f).padding(start = 8.dp, end = 6.dp)) {
+                                    Text(server.tag, color = Aurora.Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(server.type.uppercase(), color = Aurora.Muted, fontSize = 10.sp)
+                                }
+                                Text(ping?.let { "$it мс" } ?: "Таймаут", color = if (ping == null) Aurora.Danger else Aurora.Mint, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { allServersOpen = false }) { Text("Готово") } },
+        )
+    }
     V2AuroraBackdrop(Modifier.fillMaxSize()) {
         Column(
             Modifier
@@ -843,13 +879,15 @@ private fun V2Servers(groups: List<RuntimeSelectorGroup>, groupTag: String?, sel
                 }
             }
             if (allServers.size > quickServers.size) {
-                Text(
-                    "Показаны лучшие ${quickServers.size} из ${allServers.size} · список обновляется автоматически",
-                    color = Aurora.Muted,
-                    fontSize = 10.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth().padding(top = 1.dp),
-                )
+                TextButton(onClick = { allServersOpen = true }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(vertical = 0.dp)) {
+                    Text(
+                        "Все серверы (${allServers.size}) · список обновляется автоматически",
+                        color = Aurora.Mint,
+                        fontSize = 10.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         }
     }

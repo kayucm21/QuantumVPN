@@ -7,6 +7,7 @@ import datetime
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import re
@@ -31,8 +32,15 @@ from urllib.request import Request, urlopen
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 except ImportError:  # Optional at import time; backups fail closed if unavailable.
     AESGCM = None
+    Ed25519PrivateKey = None
+    Encoding = None
+    NoEncryption = None
+    PrivateFormat = None
+    PublicFormat = None
 
 
 class OperatorHTTPServer(ThreadingHTTPServer):
@@ -52,7 +60,7 @@ PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.7-control.1"
+PANEL_BUILD = "5.10.7-control.2"
 VERSION = "5.10.7"
 VERSION_CODE = 132
 DEFAULT_NOTE = "QuantumVPN 5.10.7: нижняя навигация поднята выше системных кнопок, а стартовый экран ждёт завершения загрузки и проверки обновления."
@@ -64,6 +72,29 @@ _LAST_EVENT_CLEANUP = 0
 _RATE = defaultdict(deque)
 _RATE_LOCK = threading.Lock()
 _ALERT_STATE = {"last": {}, "lock": threading.Lock()}
+
+ROUTING_PROFILES = {
+    "balanced": "Оптимальный — локальные сервисы напрямую, остальное через VPN",
+    "whitelist": "Белый список — напрямую только явно разрешённые адреса",
+    "proxy_all": "Через VPN — весь трафик, кроме технических исключений",
+}
+ROUTING_DNS_MODES = {
+    "vpn_only": "DNS работает только внутри VPN",
+    "system": "Системный DNS (без блокировки на стороне приложения)",
+}
+ROUTING_SETTING_KEYS = (
+    "routing_enabled",
+    "routing_profile",
+    "routing_adblock_enabled",
+    "routing_dns_mode",
+    "routing_dns_resolver",
+    "routing_direct_domains",
+    "routing_proxy_domains",
+    "routing_block_domains",
+    "routing_direct_cidrs",
+    "routing_proxy_cidrs",
+)
+MAX_ROUTING_ITEMS = 2_000
 
 
 def b64url(data: bytes) -> str:
@@ -296,6 +327,15 @@ def conn():
                     detail text not null default '',
                     dedupe_key text not null
                 );
+                create table if not exists routing_revisions (
+                    id integer primary key autoincrement,
+                    revision integer not null,
+                    created_at integer not null,
+                    actor text not null,
+                    state text not null,
+                    note text not null default '',
+                    payload text not null
+                );
                 create index if not exists idx_events_device on events(device);
                 create index if not exists idx_events_kind_ts on events(kind, ts);
                 create index if not exists idx_events_ts on events(ts);
@@ -305,6 +345,8 @@ def conn():
                 create index if not exists idx_server_health_ts on server_health(ts);
                 create index if not exists idx_incidents_open on incidents(closed_at, opened_at);
                 create index if not exists idx_incidents_key on incidents(dedupe_key, closed_at);
+                create index if not exists idx_routing_revisions_created on routing_revisions(created_at desc);
+                create index if not exists idx_routing_revisions_revision on routing_revisions(revision desc);
                 """
             )
             defaults = {
@@ -347,6 +389,24 @@ def conn():
                 "feature_diagnostics": "1",
                 "feature_timeline": "1",
                 "feature_ab_json": "{}",
+                # Routing is maintained independently from APK releases.  The
+                # app must still explicitly support this signed policy before
+                # it can apply it; the panel never rewrites a subscription.
+                "routing_enabled": "1",
+                "routing_profile": "balanced",
+                "routing_adblock_enabled": "1",
+                "routing_dns_mode": "vpn_only",
+                "routing_dns_resolver": "https://dns.adguard-dns.com/dns-query",
+                "routing_direct_domains": "",
+                "routing_proxy_domains": "youtube.com,googlevideo.com,telegram.org,t.me,github.com,discord.com,discord.gg",
+                "routing_block_domains": "",
+                "routing_direct_cidrs": "",
+                "routing_proxy_cidrs": "",
+                "routing_revision": "1",
+                "routing_staging_enabled": "0",
+                "routing_staging_revision": "0",
+                "routing_staging_rollout_percent": "10",
+                "routing_staging_payload": "{}",
                 "brand_name": "QuantumVPN",
                 "brand_tagline": "HORIZON GLASS · 2026",
                 "brand_accent": "#3DE7FF",
@@ -431,6 +491,221 @@ def set_settings(db, values: dict):
 
 def enabled(s, key, default=True):
     return s.get(key, "1" if default else "0") == "1"
+
+
+def normalize_routing_domains(raw: str) -> list[str]:
+    """Return a small, canonical domain list suitable for a client policy.
+
+    This intentionally accepts host/suffix names only.  URLs, wildcards,
+    regexes and geosite directives would make the policy interpreter
+    ambiguous and could turn an admin typo into a broad traffic rule.
+    """
+    items: list[str] = []
+    for value in re.split(r"[,;\r\n]+", raw or ""):
+        value = value.strip().lower().rstrip(".")
+        if not value:
+            continue
+        if value.startswith("*."):
+            value = value[2:]
+        if not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9][a-z0-9-]{0,61}[a-z0-9]", value):
+            raise ValueError(f"Некорректный домен в маршрутизации: {value[:80]}")
+        if value not in items:
+            items.append(value)
+        if len(items) > MAX_ROUTING_ITEMS:
+            raise ValueError("Слишком много доменов в одном списке маршрутизации.")
+    return items
+
+
+def normalize_routing_cidrs(raw: str) -> list[str]:
+    """Canonicalise CIDRs and reject malformed or overlarge operator input."""
+    items: list[str] = []
+    for value in re.split(r"[,;\r\n]+", raw or ""):
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            if "/" not in value:
+                address = ipaddress.ip_address(value)
+                value = f"{address}/{32 if address.version == 4 else 128}"
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"Некорректный IP/CIDR в маршрутизации: {value[:80]}") from exc
+        canonical = network.with_prefixlen
+        if canonical not in items:
+            items.append(canonical)
+        if len(items) > MAX_ROUTING_ITEMS:
+            raise ValueError("Слишком много CIDR в одном списке маршрутизации.")
+    return items
+
+
+def routing_payload(s: dict, revision: int | None = None) -> dict:
+    """Build the only routing schema that is allowed to leave the panel.
+
+    All list values are parsed here, not trusted as raw textarea content.  A
+    future APK can therefore consume the endpoint without having to interpret
+    arbitrary config syntax delivered by a web panel.
+    """
+    profile = s.get("routing_profile", "balanced")
+    if profile not in ROUTING_PROFILES:
+        profile = "balanced"
+    dns_mode = s.get("routing_dns_mode", "vpn_only")
+    if dns_mode not in ROUTING_DNS_MODES:
+        dns_mode = "vpn_only"
+    resolver = (s.get("routing_dns_resolver") or "").strip()
+    if resolver and not resolver.startswith("https://"):
+        resolver = ""
+    return {
+        "schema": 1,
+        "revision": int(revision if revision is not None else s.get("routing_revision", "1") or 1),
+        "enabled": enabled(s, "routing_enabled", True),
+        "profile": profile,
+        "dns": {
+            "mode": dns_mode,
+            "resolver": resolver[:512],
+        },
+        "adblock": {"enabled": enabled(s, "routing_adblock_enabled", True)},
+        "rules": {
+            "direct_domains": normalize_routing_domains(s.get("routing_direct_domains", "")),
+            "proxy_domains": normalize_routing_domains(s.get("routing_proxy_domains", "")),
+            "block_domains": normalize_routing_domains(s.get("routing_block_domains", "")),
+            "direct_cidrs": normalize_routing_cidrs(s.get("routing_direct_cidrs", "")),
+            "proxy_cidrs": normalize_routing_cidrs(s.get("routing_proxy_cidrs", "")),
+        },
+    }
+
+
+def routing_settings_from_payload(payload: dict) -> dict:
+    """Validate a stored staging/history snapshot before it becomes active."""
+    if not isinstance(payload, dict) or payload.get("schema") != 1:
+        raise ValueError("Некорректный снимок маршрутизации.")
+    rules = payload.get("rules") if isinstance(payload.get("rules"), dict) else {}
+    dns = payload.get("dns") if isinstance(payload.get("dns"), dict) else {}
+    profile = payload.get("profile") if payload.get("profile") in ROUTING_PROFILES else "balanced"
+    dns_mode = dns.get("mode") if dns.get("mode") in ROUTING_DNS_MODES else "vpn_only"
+    resolver = str(dns.get("resolver") or "").strip()
+    if resolver and not resolver.startswith("https://"):
+        raise ValueError("DNS resolver должен использовать HTTPS.")
+
+    def saved_domains(name: str) -> str:
+        raw = rules.get(name) or []
+        if not isinstance(raw, list):
+            raise ValueError("Некорректный доменный список маршрутизации.")
+        return ",".join(normalize_routing_domains(",".join(str(x) for x in raw)))
+
+    def saved_cidrs(name: str) -> str:
+        raw = rules.get(name) or []
+        if not isinstance(raw, list):
+            raise ValueError("Некорректный CIDR список маршрутизации.")
+        return ",".join(normalize_routing_cidrs(",".join(str(x) for x in raw)))
+
+    adblock = payload.get("adblock") if isinstance(payload.get("adblock"), dict) else {}
+    return {
+        "routing_enabled": "1" if payload.get("enabled", True) else "0",
+        "routing_profile": profile,
+        "routing_adblock_enabled": "1" if adblock.get("enabled", True) else "0",
+        "routing_dns_mode": dns_mode,
+        "routing_dns_resolver": resolver[:512],
+        "routing_direct_domains": saved_domains("direct_domains"),
+        "routing_proxy_domains": saved_domains("proxy_domains"),
+        "routing_block_domains": saved_domains("block_domains"),
+        "routing_direct_cidrs": saved_cidrs("direct_cidrs"),
+        "routing_proxy_cidrs": saved_cidrs("proxy_cidrs"),
+    }
+
+
+def routing_candidate_from_form(form: dict) -> dict:
+    """Validate form input by round-tripping through the public schema."""
+    candidate = {
+        "routing_enabled": "1" if "routing_enabled" in form else "0",
+        "routing_profile": form.get("routing_profile", ["balanced"])[0],
+        "routing_adblock_enabled": "1" if "routing_adblock_enabled" in form else "0",
+        "routing_dns_mode": form.get("routing_dns_mode", ["vpn_only"])[0],
+        "routing_dns_resolver": (form.get("routing_dns_resolver", [""])[0] or "").strip()[:512],
+        "routing_direct_domains": form.get("routing_direct_domains", [""])[0],
+        "routing_proxy_domains": form.get("routing_proxy_domains", [""])[0],
+        "routing_block_domains": form.get("routing_block_domains", [""])[0],
+        "routing_direct_cidrs": form.get("routing_direct_cidrs", [""])[0],
+        "routing_proxy_cidrs": form.get("routing_proxy_cidrs", [""])[0],
+    }
+    if candidate["routing_profile"] not in ROUTING_PROFILES:
+        raise ValueError("Неизвестный профиль маршрутизации.")
+    if candidate["routing_dns_mode"] not in ROUTING_DNS_MODES:
+        raise ValueError("Неизвестный режим DNS.")
+    if candidate["routing_dns_resolver"] and not candidate["routing_dns_resolver"].startswith("https://"):
+        raise ValueError("DNS resolver должен использовать HTTPS.")
+    payload = routing_payload(candidate, revision=1)
+    return routing_settings_from_payload(payload)
+
+
+def canonical_json(value: dict) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def routing_signing_key():
+    """Create a local Ed25519 key once; the private half never leaves ROOT."""
+    if Ed25519PrivateKey is None:
+        return None
+    path = os.path.join(ROOT, "routing-ed25519.key")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        with open(path, "rb") as stream:
+            raw = stream.read()
+    else:
+        key = Ed25519PrivateKey.generate()
+        raw = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+    if len(raw) != 32:
+        raise RuntimeError("routing-ed25519.key is invalid")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return Ed25519PrivateKey.from_private_bytes(raw)
+
+
+def signed_routing_envelope(payload: dict, channel: str) -> dict:
+    """Envelope for a future APK with a pinned public Ed25519 verification key."""
+    document = canonical_json(payload)
+    result = {
+        "schema": 1,
+        "channel": channel,
+        "payload": payload,
+        "sha256": hashlib.sha256(document).hexdigest(),
+        "issued_at": int(time.time()),
+        "signature": "",
+        "public_key": "",
+        "signature_algorithm": "ed25519",
+    }
+    key = routing_signing_key()
+    if key is None or Encoding is None or PublicFormat is None:
+        result["signature_algorithm"] = "unavailable"
+        return result
+    result["signature"] = b64url(key.sign(document))
+    result["public_key"] = b64url(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw))
+    return result
+
+
+def record_routing_revision(db, revision: int, actor: str, state: str, payload: dict, note: str = ""):
+    db.execute(
+        "insert into routing_revisions(revision,created_at,actor,state,note,payload) values (?,?,?,?,?,?)",
+        (int(revision), int(time.time()), actor[:64], state[:24], note[:240], canonical_json(payload).decode("utf-8")),
+    )
+
+
+def routing_policy_for_client(s: dict, bucket: int) -> tuple[dict, str]:
+    """Return staging policy only for its stable percentage bucket."""
+    if enabled(s, "routing_staging_enabled", False) and bucket < int(s.get("routing_staging_rollout_percent", "10") or 10):
+        try:
+            staged = json.loads(s.get("routing_staging_payload") or "{}")
+            staged_settings = routing_settings_from_payload(staged)
+            staged_revision = max(1, int(s.get("routing_staging_revision", "0") or 0))
+            return routing_payload(staged_settings, staged_revision), "staging"
+        except (ValueError, TypeError, json.JSONDecodeError):
+            # A corrupt or stale staging record must never displace production.
+            pass
+    return routing_payload(s), "production"
 
 
 def effective_maintenance(s, now=None):
@@ -1647,6 +1922,9 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         ).fetchall()]
         report = report_snapshot(monitor_db)
         balancer = load_balancer_snapshot(monitor_db, s)
+        routing_history = [dict(row) for row in monitor_db.execute(
+            "select id,revision,created_at,actor,state,note,payload from routing_revisions order by id desc limit 12"
+        ).fetchall()]
     finally:
         monitor_db.close()
     release_guard = release_guard_snapshot(s)
@@ -1709,6 +1987,41 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         )
     incident_html = "".join(incident_row(item) for item in incident_rows) or "<tr><td colspan=6>Инцидентов пока нет</td></tr>"
     webhook_events = html.escape(s.get("webhook_events", "incident,release,maintenance,diagnostic"))
+    routing_profile_options = "".join(
+        f"<option value='{name}' {'selected' if s.get('routing_profile', 'balanced') == name else ''}>{html.escape(label)}</option>"
+        for name, label in ROUTING_PROFILES.items()
+    )
+    routing_dns_options = "".join(
+        f"<option value='{name}' {'selected' if s.get('routing_dns_mode', 'vpn_only') == name else ''}>{html.escape(label)}</option>"
+        for name, label in ROUTING_DNS_MODES.items()
+    )
+    routing_staging_on = enabled(s, "routing_staging_enabled", False)
+    routing_staging_revision = int(s.get("routing_staging_revision", "0") or 0)
+    routing_staging_rollout = max(1, min(100, int(s.get("routing_staging_rollout_percent", "10") or 10)))
+    try:
+        active_routing = routing_payload(s)
+        routing_counts = active_routing["rules"]
+        routing_counts_label = (
+            f"{len(routing_counts['direct_domains'])} direct · "
+            f"{len(routing_counts['proxy_domains'])} proxy · "
+            f"{len(routing_counts['block_domains'])} block"
+        )
+    except ValueError:
+        routing_counts_label = "проверьте формат списков"
+    routing_history_html = "".join(
+        f"<tr><td>r{int(item['revision'])}</td>"
+        f"<td>{time.strftime('%d.%m %H:%M', time.localtime(item['created_at']))}</td>"
+        f"<td>{html.escape(item['actor'])}</td><td>{html.escape(item['state'])}</td>"
+        f"<td>{html.escape(item['note'] or '—')}</td><td>"
+        + (
+            "<form method=post action=/operator/routing style='margin:0'><input type=hidden name=action value=rollback>"
+            f"<input type=hidden name=revision value='{int(item['revision'])}'><button class=secondary>Откатить</button></form>"
+            if item["state"] == "production" else "—"
+        )
+        + "</td></tr>"
+        for item in routing_history
+    ) or "<tr><td colspan=6>История появится после первой публикации.</td></tr>"
+    routing_signature_label = "Ed25519 готова" if Ed25519PrivateKey is not None else "нужен пакет cryptography"
     # Compact dashboard projections for the reference admin layout.  The full
     # tables remain available on their dedicated tabs; this view only shows
     # the most useful operational slice.
@@ -1777,6 +2090,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <nav class=tabs>
         <a class="{'active' if section == 'dashboard' else ''}" href="/operator?tab=dashboard"><span class=nav-ico>▦</span> Командный центр</a>
         <a class="{'active' if section == 'latency' else ''}" href="/operator?tab=latency"><span class=nav-ico>▤</span> Ноды</a>
+        <a class="{'active' if section == 'routing' else ''}" href="/operator?tab=routing"><span class=nav-ico>⇄</span> Маршрутизация</a>
         <a class="{'active' if section in ('users','devices','fleet') else ''}" href="/operator?tab=users"><span class=nav-ico>♧</span> Пользователи</a>
         <a class="{'active' if section == 'service' else ''}" href="/operator?tab=service"><span class=nav-ico>▭</span> Подписки</a>
         <a class="{'active' if section in ('release','features','branding') else ''}" href="/operator?tab=release"><span class=nav-ico>◇</span> Релизы</a>
@@ -1947,6 +2261,54 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <div class=notice><b>Сейчас выбран:</b> {html.escape(balancer.get('selected') or 'нет доступной ноды')} · стратегия {html.escape(str(balancer.get('strategy')))}</div>
         <h2 style="margin-top:18px">Последние TCP‑замеры</h2>
         <table><thead><tr><th>Цель</th><th>Статус</th><th>Задержка</th><th>Время</th></tr></thead><tbody>{monitor_html}</tbody></table>
+      </section>
+    </section>
+
+    <section {show('routing')}>
+      <section class=hero style="height:auto;margin-bottom:12px">
+        <div class=hero-top><div><span class=accent>ROUTING CONTROL</span><h1 style="display:block;margin:6px 0 2px">Маршрутизация и DNS</h1><p style="display:block" class=muted>Правила обновляются отдельно от APK. Публикуются только проверенные домены и CIDR — без выполнения удалённого кода.</p></div><span class=system-pill>{html.escape(routing_counts_label)}</span></div>
+      </section>
+      <form class=grid method=post action=/operator/routing>
+        <section class=card>
+          <h2>Профиль и выпуск</h2>
+          <label><input type=checkbox name=routing_enabled {checked('routing_enabled')}> Включить управляемую маршрутизацию</label>
+          <label>Профиль<select name=routing_profile>{routing_profile_options}</select></label>
+          <label><input type=checkbox name=routing_adblock_enabled {checked('routing_adblock_enabled')}> Блокировка рекламных и трекерных доменов</label>
+          <label>Режим DNS<select name=routing_dns_mode>{routing_dns_options}</select></label>
+          <label>DNS-over-HTTPS resolver<input name=routing_dns_resolver value="{html.escape(s.get('routing_dns_resolver',''))}" placeholder="https://dns.example/dns-query"></label>
+          <p class=notice><b>VPN-only:</b> DNS и блок-листы применяются только внутри VPN-туннеля. Системные DNS-настройки Android панель не меняет.</p>
+          <div class=actions><button name=action value=publish>Опубликовать r{int(s.get('routing_revision','1') or 1) + 1}</button><button class=secondary name=action value=stage>Отправить в тестовый канал</button></div>
+        </section>
+        <section class=card>
+          <h2>Тестовый канал</h2>
+          <p class=muted>Сначала новые правила получают только устройства из стабильной выборки. До публикации APK правила не применяются автоматически.</p>
+          <label>Охват тестового канала, %<input type=number min=1 max=100 name=routing_staging_rollout_percent value="{routing_staging_rollout}"></label>
+          <div class=stats><div class=stat>Статус<b class={'ok' if routing_staging_on else 'muted'}>{'активен' if routing_staging_on else 'нет черновика'}</b></div><div class=stat>Ревизия<b>{'r' + str(routing_staging_revision) if routing_staging_on else '—'}</b></div><div class=stat>Подпись<b>{routing_signature_label}</b></div></div>
+          <div class=actions style="margin-top:14px"><button class=secondary name=action value=promote {'disabled' if not routing_staging_on else ''}>Опубликовать тестовый канал</button><button class=danger name=action value=discard_stage {'disabled' if not routing_staging_on else ''}>Удалить черновик</button></div>
+          <p class=muted style="margin-top:12px">API: <code>/api/client/routing</code> · ответ содержит SHA‑256 и Ed25519-подпись для будущего APK с закреплённым публичным ключом.</p>
+        </section>
+        <section class=card>
+          <h2>Прямое подключение</h2>
+          <p class=muted>Домены и сети, которые должны обходить VPN. Один адрес на строку или через запятую.</p>
+          <label>Домены<textarea rows=9 name=routing_direct_domains placeholder="bank.example\nservice.example">{html.escape(s.get('routing_direct_domains',''))}</textarea></label>
+          <label>CIDR / IP<textarea rows=5 name=routing_direct_cidrs placeholder="203.0.113.0/24">{html.escape(s.get('routing_direct_cidrs',''))}</textarea></label>
+        </section>
+        <section class=card>
+          <h2>Через VPN</h2>
+          <p class=muted>Сервисы, которые должны принудительно использовать защищённый маршрут.</p>
+          <label>Домены<textarea rows=9 name=routing_proxy_domains>{html.escape(s.get('routing_proxy_domains',''))}</textarea></label>
+          <label>CIDR / IP<textarea rows=5 name=routing_proxy_cidrs placeholder="198.51.100.0/24">{html.escape(s.get('routing_proxy_cidrs',''))}</textarea></label>
+        </section>
+        <section class=card>
+          <h2>Блок-лист</h2>
+          <p class=muted>Только домены рекламы и трекеров. Не используйте здесь домены банков, обновлений ОС или авторизации.</p>
+          <label>Домены<textarea rows=9 name=routing_block_domains placeholder="ads.example\ntracker.example">{html.escape(s.get('routing_block_domains',''))}</textarea></label>
+          <p class=notice>Адблок по DNS не гарантирует отключение всей рекламы в видеосервисах: часть рекламы приходит с тех же доменов, что и контент.</p>
+        </section>
+      </form>
+      <section class=card style="margin-top:12px">
+        <div class=section-head><div><h2>История маршрутизации</h2><p class=muted>Откат создаёт новую ревизию — прежние данные и аудит остаются сохранены.</p></div></div>
+        <table><thead><tr><th>Ревизия</th><th>Время</th><th>Оператор</th><th>Канал</th><th>Заметка</th><th></th></tr></thead><tbody>{routing_history_html}</tbody></table>
       </section>
     </section>
 
@@ -2555,6 +2917,12 @@ class App(BaseHTTPRequestHandler):
             status["load_balancer"] = load_balancer_snapshot(db, s)
             status["release_guard"] = release_guard_snapshot(s)
             status["backup"] = latest_backup_info()
+            status["routing"] = {
+                "revision": int(s.get("routing_revision", "1") or 1),
+                "profile": s.get("routing_profile", "balanced"),
+                "staging": enabled(s, "routing_staging_enabled", False),
+                "staging_rollout_percent": int(s.get("routing_staging_rollout_percent", "0") or 0),
+            }
             return self.reply(200, json.dumps(status))
 
         if path.startswith("/api/client/donations"):
@@ -2647,6 +3015,26 @@ class App(BaseHTTPRequestHandler):
                 "changelog": note,
             }
             return self.reply(200, json.dumps(result, ensure_ascii=False))
+
+        if path == "/api/client/routing":
+            # The app will pin the public key in its next routing-capable
+            # release.  Until then this endpoint is harmless configuration
+            # data: no currently released APK applies it automatically.
+            dev, _ip = self.client()
+            bucket = client_bucket(query.get("bucket", [None])[0])
+            if bucket is None:
+                bucket = int(hashlib.sha256(dev.encode("utf-8")).hexdigest()[:8], 16) % 100
+            try:
+                payload, channel = routing_policy_for_client(s, bucket)
+                envelope = signed_routing_envelope(payload, channel)
+                envelope["bucket"] = bucket
+                envelope["rollout_percent"] = max(1, min(100, int(s.get("routing_staging_rollout_percent", "10") or 10)))
+                return self.reply(200, json.dumps(envelope, ensure_ascii=False))
+            except (RuntimeError, ValueError) as exc:
+                # Avoid exposing storage paths, key material or raw user input
+                # through a client endpoint.
+                print(f"routing policy unavailable: {type(exc).__name__}", flush=True)
+                return self.reply(503, '{"error":"routing_policy_unavailable"}')
 
         if path == "/api/v1/subscription":
             if s.get("subscription_main_enabled") != "1":
@@ -3077,12 +3465,148 @@ class App(BaseHTTPRequestHandler):
             db.commit()
             return self.redirect_operator("admins", "Администратор сохранён")
 
+        if path == "/operator/routing":
+            length = min(int(self.headers.get("Content-Length", "0")), 256 * 1024)
+            form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            action = (form.get("action", ["publish"])[0] or "publish").strip()
+            try:
+                if action in ("publish", "stage"):
+                    candidate_values = routing_candidate_from_form(form)
+                    candidate_state = dict(s)
+                    candidate_state.update(candidate_values)
+                    current_revision = max(1, int(s.get("routing_revision", "1") or 1))
+                    if action == "stage":
+                        staged_revision = current_revision + 1
+                        staged_payload = routing_payload(candidate_state, staged_revision)
+                        rollout = max(1, min(100, int(form.get("routing_staging_rollout_percent", ["10"])[0])))
+                        values = {
+                            "routing_staging_enabled": "1",
+                            "routing_staging_revision": str(staged_revision),
+                            "routing_staging_rollout_percent": str(rollout),
+                            "routing_staging_payload": canonical_json(staged_payload).decode("utf-8"),
+                        }
+                        set_settings(db, values)
+                        audit(db, actor, ip, "routing:stage", {"revision": staged_revision, "rollout_percent": rollout})
+                        db.execute(
+                            "insert into events values (?,?,?,?,?)",
+                            (int(time.time()), "routing_staged", actor, ip, json.dumps({"revision": staged_revision, "rollout_percent": rollout}, ensure_ascii=False)),
+                        )
+                        db.commit()
+                        return self.redirect_operator("routing", f"Тестовый канал r{staged_revision}: {rollout}% устройств")
+
+                    # Preserve the first stable state too, so a just-published
+                    # policy can always be rolled back even after a migration.
+                    has_current = db.execute(
+                        "select 1 from routing_revisions where revision=? and state='production' limit 1",
+                        (current_revision,),
+                    ).fetchone()
+                    if not has_current:
+                        record_routing_revision(db, current_revision, "system", "production", routing_payload(s), "Базовая ревизия")
+                    next_revision = current_revision + 1
+                    next_payload = routing_payload(candidate_state, next_revision)
+                    values = dict(candidate_values)
+                    values.update({
+                        "routing_revision": str(next_revision),
+                        "routing_staging_enabled": "0",
+                        "routing_staging_revision": "0",
+                        "routing_staging_payload": "{}",
+                        "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
+                    })
+                    set_settings(db, values)
+                    record_routing_revision(db, next_revision, actor, "production", next_payload, "Опубликовано")
+                    audit(db, actor, ip, "routing:publish", {"revision": next_revision, "sha256": hashlib.sha256(canonical_json(next_payload)).hexdigest()})
+                    db.execute(
+                        "insert into events values (?,?,?,?,?)",
+                        (int(time.time()), "routing_published", actor, ip, json.dumps({"revision": next_revision}, ensure_ascii=False)),
+                    )
+                    db.commit()
+                    webhook_emit(settings(db), "routing.published", {"revision": next_revision, "actor": actor})
+                    return self.redirect_operator("routing", f"Маршрутизация r{next_revision} опубликована")
+
+                if action == "promote":
+                    if not enabled(s, "routing_staging_enabled", False):
+                        return self.redirect_operator("routing", "Нет тестового канала для публикации")
+                    staged = json.loads(s.get("routing_staging_payload") or "{}")
+                    staged_values = routing_settings_from_payload(staged)
+                    current_revision = max(1, int(s.get("routing_revision", "1") or 1))
+                    staged_revision = max(1, int(s.get("routing_staging_revision", "0") or 0))
+                    next_revision = max(current_revision + 1, staged_revision)
+                    has_current = db.execute(
+                        "select 1 from routing_revisions where revision=? and state='production' limit 1",
+                        (current_revision,),
+                    ).fetchone()
+                    if not has_current:
+                        record_routing_revision(db, current_revision, "system", "production", routing_payload(s), "Базовая ревизия")
+                    promoted_state = dict(s)
+                    promoted_state.update(staged_values)
+                    promoted_payload = routing_payload(promoted_state, next_revision)
+                    values = dict(staged_values)
+                    values.update({
+                        "routing_revision": str(next_revision),
+                        "routing_staging_enabled": "0",
+                        "routing_staging_revision": "0",
+                        "routing_staging_payload": "{}",
+                        "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
+                    })
+                    set_settings(db, values)
+                    record_routing_revision(db, next_revision, actor, "production", promoted_payload, "Опубликовано из тестового канала")
+                    audit(db, actor, ip, "routing:promote", {"revision": next_revision})
+                    db.execute("insert into events values (?,?,?,?,?)", (int(time.time()), "routing_promoted", actor, ip, json.dumps({"revision": next_revision}, ensure_ascii=False)))
+                    db.commit()
+                    webhook_emit(settings(db), "routing.promoted", {"revision": next_revision, "actor": actor})
+                    return self.redirect_operator("routing", f"Тестовая r{staged_revision} опубликована как r{next_revision}")
+
+                if action == "discard_stage":
+                    set_settings(db, {
+                        "routing_staging_enabled": "0",
+                        "routing_staging_revision": "0",
+                        "routing_staging_payload": "{}",
+                    })
+                    audit(db, actor, ip, "routing:discard_stage", {})
+                    db.commit()
+                    return self.redirect_operator("routing", "Тестовый канал удалён")
+
+                if action == "rollback":
+                    target_revision = max(1, int(form.get("revision", ["0"])[0] or 0))
+                    row = db.execute(
+                        "select payload from routing_revisions where revision=? and state='production' order by id desc limit 1",
+                        (target_revision,),
+                    ).fetchone()
+                    if not row:
+                        return self.redirect_operator("routing", "Ревизия для отката не найдена")
+                    rollback_values = routing_settings_from_payload(json.loads(row[0]))
+                    current_revision = max(1, int(s.get("routing_revision", "1") or 1))
+                    next_revision = current_revision + 1
+                    rollback_state = dict(s)
+                    rollback_state.update(rollback_values)
+                    rollback_payload = routing_payload(rollback_state, next_revision)
+                    values = dict(rollback_values)
+                    values.update({
+                        "routing_revision": str(next_revision),
+                        "routing_staging_enabled": "0",
+                        "routing_staging_revision": "0",
+                        "routing_staging_payload": "{}",
+                        "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
+                    })
+                    set_settings(db, values)
+                    record_routing_revision(db, next_revision, actor, "production", rollback_payload, f"Откат к r{target_revision}")
+                    audit(db, actor, ip, "routing:rollback", {"from": current_revision, "target": target_revision, "revision": next_revision})
+                    db.execute("insert into events values (?,?,?,?,?)", (int(time.time()), "routing_rollback", actor, ip, json.dumps({"from": current_revision, "target": target_revision, "revision": next_revision}, ensure_ascii=False)))
+                    db.commit()
+                    webhook_emit(settings(db), "routing.rollback", {"revision": next_revision, "target": target_revision, "actor": actor})
+                    return self.redirect_operator("routing", f"Создана r{next_revision}: откат к r{target_revision}")
+                return self.redirect_operator("routing", "Неизвестное действие маршрутизации")
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                audit(db, actor, ip, "routing:rejected", {"action": action, "error": str(exc)[:160]})
+                db.commit()
+                return self.redirect_operator("routing", f"Не сохранено: {str(exc)[:160]}")
+
         if path == "/operator/actions":
             length = int(self.headers.get("Content-Length", "0"))
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             action = form.get("action", [""])[0]
             return_tab = form.get("return_tab", ["dashboard"])[0]
-            if return_tab not in {"dashboard", "automation", "latency", "release", "service", "incidents", "security"}:
+            if return_tab not in {"dashboard", "automation", "latency", "routing", "release", "service", "incidents", "security"}:
                 return_tab = "dashboard"
             flash = "Готово"
             if action == "bump_revision":

@@ -183,6 +183,63 @@ class OperatorTests(unittest.TestCase):
         self.assertIn("Автопилот панели", page)
         self.assertIn("Готовность релизов", page)
 
+    def test_routing_policy_is_validated_versioned_and_signed(self):
+        token = base64.b64encode(b"test:test").decode()
+        body = (
+            b"action=publish&routing_enabled=on&routing_profile=whitelist"
+            b"&routing_adblock_enabled=on&routing_dns_mode=vpn_only"
+            b"&routing_dns_resolver=https%3A%2F%2Fdns.example%2Fdns-query"
+            b"&routing_direct_domains=bank.example%2Cservice.example"
+            b"&routing_proxy_domains=video.example&routing_block_domains=ads.example"
+            b"&routing_direct_cidrs=203.0.113.11&routing_proxy_cidrs=198.51.100.0%2F24"
+        )
+        with urlopen(Request(self.base + "/operator/routing", data=body, headers={"Authorization": "Basic " + token})) as response:
+            self.assertEqual(response.status, 200)
+        with urlopen(self.base + "/api/client/routing?bucket=99") as response:
+            envelope = json.load(response)
+        self.assertEqual(envelope["channel"], "production")
+        self.assertEqual(envelope["payload"]["profile"], "whitelist")
+        self.assertIn("bank.example", envelope["payload"]["rules"]["direct_domains"])
+        self.assertEqual(envelope["payload"]["rules"]["direct_cidrs"], ["203.0.113.11/32"])
+        self.assertEqual(len(envelope["sha256"]), 64)
+        if envelope["signature"]:
+            signature = base64.urlsafe_b64decode(envelope["signature"] + "==")
+            self.panel.routing_signing_key().public_key().verify(
+                signature,
+                self.panel.canonical_json(envelope["payload"]),
+            )
+        with urlopen(Request(self.base + "/operator?tab=routing", headers={"Authorization": "Basic " + token})) as response:
+            page = response.read().decode("utf-8")
+        self.assertIn("Маршрутизация и DNS", page)
+        self.assertIn("Тестовый канал", page)
+        with closing(self.panel.conn()) as db:
+            history = db.execute("select count(*) from routing_revisions where state='production'").fetchone()[0]
+        self.assertGreaterEqual(history, 2)
+
+    def test_routing_staging_is_bucketed_then_can_be_promoted(self):
+        token = base64.b64encode(b"test:test").decode()
+        stage = (
+            b"action=stage&routing_enabled=on&routing_profile=proxy_all"
+            b"&routing_adblock_enabled=on&routing_dns_mode=vpn_only"
+            b"&routing_dns_resolver=https%3A%2F%2Fdns.example%2Fdns-query"
+            b"&routing_proxy_domains=stage.example&routing_staging_rollout_percent=7"
+        )
+        with urlopen(Request(self.base + "/operator/routing", data=stage, headers={"Authorization": "Basic " + token})) as response:
+            self.assertEqual(response.status, 200)
+        with urlopen(self.base + "/api/client/routing?bucket=0") as response:
+            staged = json.load(response)
+        with urlopen(self.base + "/api/client/routing?bucket=99") as response:
+            stable = json.load(response)
+        self.assertEqual(staged["channel"], "staging")
+        self.assertEqual(staged["payload"]["profile"], "proxy_all")
+        self.assertEqual(stable["channel"], "production")
+        with urlopen(Request(self.base + "/operator/routing", data=b"action=promote", headers={"Authorization": "Basic " + token})) as response:
+            self.assertEqual(response.status, 200)
+        with urlopen(self.base + "/api/client/routing?bucket=99") as response:
+            promoted = json.load(response)
+        self.assertEqual(promoted["channel"], "production")
+        self.assertEqual(promoted["payload"]["profile"], "proxy_all")
+
 
 if __name__ == "__main__":
     unittest.main()

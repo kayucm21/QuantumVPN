@@ -66,6 +66,87 @@ data class RoutingEditResult(
 
 /** Edits route/dns fields in the profile itself. No second routing format is persisted. */
 object RoutingConfigEditor {
+    /**
+     * Builds a transient managed profile for a verified panel policy.  The
+     * original subscription/profile JSON is never overwritten: callers pass
+     * this result only to the runtime, so disabling panel routing immediately
+     * restores the user's own profile.
+     */
+    fun applyRemotePolicy(
+        raw: String,
+        policy: RemoteRoutingPolicy,
+        adBlockAllowed: Boolean,
+        installed: InstalledRuleSets,
+    ): RoutingEditResult {
+        if (!policy.enabled) {
+            return RoutingEditResult(
+                json = raw,
+                inspection = inspect(raw),
+                diff = "Панельная маршрутизация отключена в опубликованной ревизии.",
+            )
+        }
+        val rules = buildList {
+            if (policy.directDomains.isNotEmpty()) {
+                add(
+                    ManagedRoutingRule(
+                        matchType = RoutingMatchType.DomainSuffix,
+                        values = policy.directDomains,
+                        action = RoutingRuleAction.Direct,
+                    ),
+                )
+            }
+            if (policy.directCidrs.isNotEmpty()) {
+                add(
+                    ManagedRoutingRule(
+                        matchType = RoutingMatchType.IpCidr,
+                        values = policy.directCidrs,
+                        action = RoutingRuleAction.Direct,
+                    ),
+                )
+            }
+            if (policy.proxyDomains.isNotEmpty()) {
+                add(
+                    ManagedRoutingRule(
+                        matchType = RoutingMatchType.DomainSuffix,
+                        values = policy.proxyDomains,
+                        action = RoutingRuleAction.Proxy,
+                    ),
+                )
+            }
+            if (policy.proxyCidrs.isNotEmpty()) {
+                add(
+                    ManagedRoutingRule(
+                        matchType = RoutingMatchType.IpCidr,
+                        values = policy.proxyCidrs,
+                        action = RoutingRuleAction.Proxy,
+                    ),
+                )
+            }
+            val blocks = buildList {
+                addAll(policy.blockDomains)
+                if (adBlockAllowed && policy.adBlockEnabled) addAll(ADS_TRACKER_SUFFIXES)
+            }.distinct()
+            if (blocks.isNotEmpty()) {
+                add(
+                    ManagedRoutingRule(
+                        matchType = RoutingMatchType.DomainSuffix,
+                        values = blocks,
+                        action = RoutingRuleAction.Block,
+                    ),
+                )
+            }
+        }
+        val preset = when (policy.profile) {
+            // The balanced profile deliberately retains the audited local/RU
+            // direct set; operator lists are additional bounded exceptions.
+            RemoteRoutingProfile.Balanced -> RoutingPreset.RussiaDirect
+            RemoteRoutingProfile.Whitelist,
+            RemoteRoutingProfile.ProxyAll,
+            -> RoutingPreset.BypassLan
+        }
+        return apply(raw, preset, rules, installed)
+    }
+
     fun inspect(raw: String): RoutingInspection {
         val root = root(raw)
         val route = root["route"] as? JsonObject ?: JsonObject(emptyMap())

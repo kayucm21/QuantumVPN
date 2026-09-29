@@ -130,6 +130,8 @@ data class UiSettings(
     val skipAutoConnectWhenRoaming: Boolean = true,
     val autoConnectOnCellular: Boolean = false,
     val timeRoutingEnabled: Boolean = false,
+    /** Signed control-panel routing is optional and can be disabled locally. */
+    val panelRoutingEnabled: Boolean = true,
     val tipsCarouselDismissed: Boolean = false,
     /** Happ-like TLS fragment / record_fragment on proxy outbounds (all carriers). */
     val carrierBypassEnabled: Boolean = true,
@@ -279,6 +281,7 @@ class UiSettingsStore(
                 skipAutoConnectWhenRoaming = preferences[SKIP_ROAMING] ?: true,
                 autoConnectOnCellular = preferences[AUTO_CELLULAR] ?: false,
                 timeRoutingEnabled = preferences[TIME_ROUTING] ?: false,
+                panelRoutingEnabled = preferences[PANEL_ROUTING] ?: true,
                 tipsCarouselDismissed = preferences[TIPS_DISMISSED] ?: false,
                 carrierBypassEnabled = preferences[CARRIER_BYPASS] ?: true,
                 carrierBypassAlwaysAggressive = preferences[CARRIER_BYPASS_AGGRESSIVE] ?: true,
@@ -633,6 +636,10 @@ class UiSettingsStore(
         dataStore.edit { it[TIME_ROUTING] = enabled }
     }
 
+    suspend fun setPanelRoutingEnabled(enabled: Boolean) {
+        dataStore.edit { it[PANEL_ROUTING] = enabled }
+    }
+
     suspend fun setTipsCarouselDismissed(dismissed: Boolean) {
         dataStore.edit { it[TIPS_DISMISSED] = dismissed }
     }
@@ -843,6 +850,7 @@ val CUSTOM_DOT_URL = stringPreferencesKey("custom_dot_url")
         val SKIP_ROAMING = booleanPreferencesKey("skip_roaming")
         val AUTO_CELLULAR = booleanPreferencesKey("auto_cellular")
         val TIME_ROUTING = booleanPreferencesKey("time_routing")
+        val PANEL_ROUTING = booleanPreferencesKey("panel_routing")
         val TIPS_DISMISSED = booleanPreferencesKey("tips_dismissed")
         val CARRIER_BYPASS = booleanPreferencesKey("carrier_bypass")
         val CARRIER_BYPASS_AGGRESSIVE = booleanPreferencesKey("carrier_bypass_aggressive")

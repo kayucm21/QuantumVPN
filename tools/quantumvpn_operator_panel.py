@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import datetime
 import hashlib
 import hmac
@@ -60,10 +61,10 @@ PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.7-control.2"
-VERSION = "5.10.7"
-VERSION_CODE = 132
-DEFAULT_NOTE = "QuantumVPN 5.10.7: нижняя навигация поднята выше системных кнопок, а стартовый экран ждёт завершения загрузки и проверки обновления."
+PANEL_BUILD = "5.10.8-control.1"
+VERSION = "5.10.8"
+VERSION_CODE = 133
+DEFAULT_NOTE = "QuantumVPN 5.10.8: подписанная маршрутизация из Quantum Control, проверка Ed25519 и SHA-256, кеш последней проверенной ревизии и DNS-блокировка только внутри активного VPN."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 _DB_INIT_LOCK = threading.Lock()
@@ -95,6 +96,13 @@ ROUTING_SETTING_KEYS = (
     "routing_proxy_cidrs",
 )
 MAX_ROUTING_ITEMS = 2_000
+# Target inspection is intentionally small and bounded.  The operator panel is
+# not a network scanner: it only probes a short, explicitly entered list over
+# TCP/443 after filtering every resolved address to public internet space.
+MAX_ROUTING_SCAN_TARGETS = 24
+MAX_ROUTING_SCAN_ADDRESSES = 3
+ROUTING_SCAN_CONNECT_TIMEOUT_SECONDS = 1.2
+ROUTING_SCAN_WALL_TIMEOUT_SECONDS = 10.0
 
 
 def b64url(data: bytes) -> str:
@@ -407,6 +415,11 @@ def conn():
                 "routing_staging_revision": "0",
                 "routing_staging_rollout_percent": "10",
                 "routing_staging_payload": "{}",
+                # Saved operator-only output of the bounded target advisor.
+                # It is never included in /api/client/routing or consumed by
+                # APKs until a reviewed revision is explicitly published.
+                "routing_scan_targets": "youtube.com,discord.com,discord.gg",
+                "routing_last_scan": "[]",
                 "brand_name": "QuantumVPN",
                 "brand_tagline": "HORIZON GLASS · 2026",
                 "brand_accent": "#3DE7FF",
@@ -536,6 +549,172 @@ def normalize_routing_cidrs(raw: str) -> list[str]:
         if len(items) > MAX_ROUTING_ITEMS:
             raise ValueError("Слишком много CIDR в одном списке маршрутизации.")
     return items
+
+
+def _is_public_routing_address(value: str) -> bool:
+    """Return True only for globally routable unicast addresses.
+
+    The route advisor must never be usable as a probe for loopback, private,
+    link-local or otherwise reserved VDS addresses.  DNS results are filtered
+    again immediately before connecting, so a hostname cannot turn into an
+    internal target through DNS rebinding.
+    """
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return bool(
+        address.is_global
+        and not address.is_multicast
+        and not address.is_unspecified
+        and not address.is_loopback
+        and not address.is_link_local
+        and not address.is_reserved
+    )
+
+
+def normalize_routing_scan_targets(raw: str) -> list[tuple[str, str]]:
+    """Parse a short operator-supplied list of domains or public IP addresses.
+
+    URLs, ports and wildcard expressions are deliberately not accepted.  The
+    probe port is fixed to 443 and only domain names or public IPs can reach
+    the resolver, keeping the feature useful for routing while preventing it
+    from becoming an SSRF primitive.
+    """
+    targets: list[tuple[str, str]] = []
+    for value in re.split(r"[,;\r\n]+", raw or ""):
+        value = value.strip().lower().rstrip(".")
+        if not value:
+            continue
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            domain = normalize_routing_domains(value)[0] if value else ""
+            item = ("domain", domain)
+        else:
+            if not _is_public_routing_address(str(address)):
+                raise ValueError("Для проверки разрешены только публичные IP-адреса.")
+            item = ("ip", str(address))
+        if item not in targets:
+            targets.append(item)
+        if len(targets) > MAX_ROUTING_SCAN_TARGETS:
+            raise ValueError(f"Можно проверить не более {MAX_ROUTING_SCAN_TARGETS} целей за один запуск.")
+    if not targets:
+        raise ValueError("Добавьте хотя бы один домен или публичный IP для проверки.")
+    return targets
+
+
+def _routing_scan_addresses(kind: str, target: str) -> list[str]:
+    if kind == "ip":
+        return [target] if _is_public_routing_address(target) else []
+    try:
+        rows = socket.getaddrinfo(target, 443, type=socket.SOCK_STREAM)
+    except OSError:
+        return []
+    addresses: list[str] = []
+    for _, _, _, _, sockaddr in rows:
+        address = str(sockaddr[0])
+        if _is_public_routing_address(address) and address not in addresses:
+            addresses.append(address)
+        if len(addresses) >= MAX_ROUTING_SCAN_ADDRESSES:
+            break
+    return addresses
+
+
+def _routing_tcp_latency_ms(address: str) -> int | None:
+    """Measure a TCP handshake to a public address on port 443, not ICMP."""
+    if not _is_public_routing_address(address):
+        return None
+    sock = None
+    started = time.monotonic()
+    try:
+        sock = socket.create_connection((address, 443), timeout=ROUTING_SCAN_CONNECT_TIMEOUT_SECONDS)
+        return max(1, round((time.monotonic() - started) * 1000))
+    except OSError:
+        return None
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def _domain_matches_routing_rule(target: str, domains: list[str]) -> bool:
+    return any(target == domain or target.endswith("." + domain) for domain in domains)
+
+
+def routing_recommendation(payload: dict, kind: str, target: str) -> tuple[str, str]:
+    """Return an explainable recommendation from the signed policy shape.
+
+    This is a deterministic local route advisor, not a black-box or a remote
+    AI model.  It never changes an active policy itself: the operator still
+    reviews the suggestion and explicitly publishes a revision.
+    """
+    rules = payload.get("rules") if isinstance(payload.get("rules"), dict) else {}
+    if kind == "domain":
+        if _domain_matches_routing_rule(target, rules.get("block_domains") or []):
+            return "block", "Уже совпадает с блок-листом"
+        if _domain_matches_routing_rule(target, rules.get("direct_domains") or []):
+            return "direct", "Уже идёт напрямую"
+        if _domain_matches_routing_rule(target, rules.get("proxy_domains") or []):
+            return "proxy", "Уже направляется через VPN"
+    else:
+        address = ipaddress.ip_address(target)
+        for raw in rules.get("direct_cidrs") or []:
+            if address in ipaddress.ip_network(raw, strict=False):
+                return "direct", "Уже совпадает с прямой сетью"
+        for raw in rules.get("proxy_cidrs") or []:
+            if address in ipaddress.ip_network(raw, strict=False):
+                return "proxy", "Уже направляется через VPN"
+    profile = payload.get("profile")
+    if profile in ("whitelist", "proxy_all"):
+        return "proxy", "По умолчанию этот профиль использует VPN"
+    return "observe", "В оптимальном профиле решение остаётся за оператором"
+
+
+def _scan_routing_target(payload: dict, kind: str, target: str) -> dict:
+    addresses = _routing_scan_addresses(kind, target)
+    samples = []
+    for address in addresses:
+        latency_ms = _routing_tcp_latency_ms(address)
+        samples.append({"address": address, "latency_ms": latency_ms})
+    successful = [sample["latency_ms"] for sample in samples if sample["latency_ms"] is not None]
+    recommendation, reason = routing_recommendation(payload, kind, target)
+    return {
+        "target": target,
+        "kind": kind,
+        "addresses": samples,
+        "latency_ms": min(successful) if successful else None,
+        "status": "ok" if successful else ("timeout" if addresses else "unresolved"),
+        "recommendation": recommendation,
+        "reason": reason,
+        "checked_at": int(time.time()),
+    }
+
+
+def scan_routing_targets(raw: str, payload: dict) -> list[dict]:
+    """Safely inspect up to 24 public targets in parallel with a hard budget."""
+    targets = normalize_routing_scan_targets(raw)
+    results: list[dict] = []
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(targets)))
+    futures = [executor.submit(_scan_routing_target, payload, kind, target) for kind, target in targets]
+    try:
+        for future in concurrent.futures.as_completed(futures, timeout=ROUTING_SCAN_WALL_TIMEOUT_SECONDS):
+            try:
+                results.append(future.result())
+            except (OSError, ValueError):
+                # Individual lookup/probe failures become an explicit unknown
+                # result instead of aborting the entire reviewed scan.
+                continue
+    except concurrent.futures.TimeoutError:
+        pass
+    finally:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+    order = {target: index for index, (_, target) in enumerate(targets)}
+    return sorted(results, key=lambda item: order.get(item["target"], len(order)))
 
 
 def routing_payload(s: dict, revision: int | None = None) -> dict:
@@ -2022,6 +2201,47 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         for item in routing_history
     ) or "<tr><td colspan=6>История появится после первой публикации.</td></tr>"
     routing_signature_label = "Ed25519 готова" if Ed25519PrivateKey is not None else "нужен пакет cryptography"
+    routing_scan_targets = (s.get("routing_scan_targets") or "").strip()[:4096]
+    try:
+        saved_scan = json.loads(s.get("routing_last_scan") or "[]")
+        if not isinstance(saved_scan, list):
+            saved_scan = []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        saved_scan = []
+    scan_recommendation_labels = {
+        "direct": "напрямую",
+        "proxy": "через VPN",
+        "block": "блок-лист",
+        "observe": "проверить вручную",
+    }
+    scan_rows = []
+    for item in saved_scan[:MAX_ROUTING_SCAN_TARGETS]:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target") or "")[:253]
+        kind = str(item.get("kind") or "")
+        if kind not in ("domain", "ip") or not target:
+            continue
+        latency = item.get("latency_ms")
+        latency_label = f"{int(latency)} мс" if isinstance(latency, int) and latency >= 0 else "нет TCP-ответа"
+        addresses = item.get("addresses") if isinstance(item.get("addresses"), list) else []
+        address_labels = []
+        for sample in addresses[:MAX_ROUTING_SCAN_ADDRESSES]:
+            if not isinstance(sample, dict):
+                continue
+            address = str(sample.get("address") or "")[:64]
+            sample_latency = sample.get("latency_ms")
+            if address:
+                address_labels.append(address + (f" · {int(sample_latency)} мс" if isinstance(sample_latency, int) else " · timeout"))
+        scan_status = "ok" if item.get("status") == "ok" else "warn"
+        recommendation = scan_recommendation_labels.get(str(item.get("recommendation") or ""), "проверить вручную")
+        reason = str(item.get("reason") or "")[:180]
+        scan_rows.append(
+            f"<tr><td><b>{html.escape(target)}</b><br><span class=muted>{html.escape('домен' if kind == 'domain' else 'IP')}</span></td>"
+            f"<td class={scan_status}>{html.escape(latency_label)}</td><td>{html.escape(', '.join(address_labels) or 'адрес не получен')}</td>"
+            f"<td><b>{html.escape(recommendation)}</b><br><span class=muted>{html.escape(reason)}</span></td></tr>"
+        )
+    routing_scan_html = "".join(scan_rows) or "<tr><td colspan=4>Проверка ещё не запускалась.</td></tr>"
     # Compact dashboard projections for the reference admin layout.  The full
     # tables remain available on their dedicated tabs; this view only shows
     # the most useful operational slice.
@@ -2267,6 +2487,16 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     <section {show('routing')}>
       <section class=hero style="height:auto;margin-bottom:12px">
         <div class=hero-top><div><span class=accent>ROUTING CONTROL</span><h1 style="display:block;margin:6px 0 2px">Маршрутизация и DNS</h1><p style="display:block" class=muted>Правила обновляются отдельно от APK. Публикуются только проверенные домены и CIDR — без выполнения удалённого кода.</p></div><span class=system-pill>{html.escape(routing_counts_label)}</span></div>
+      </section>
+      <section class=card style="margin-bottom:12px">
+        <div class=section-head><div><h2>Анализатор целей</h2><p class=muted>Проверяет DNS и TCP/443 с VDS, показывает фактическую задержку и объясняет текущее правило. Не меняет DNS, подписки или опубликованную маршрутизацию автоматически.</p></div><span class=system-pill>до {MAX_ROUTING_SCAN_TARGETS} целей</span></div>
+        <form class=actions method=post action=/operator/routing style="margin-top:12px">
+          <input type=hidden name=action value=scan>
+          <label style="flex:1;min-width:280px">Домены, поддомены или публичные IP (по одному на строку)<textarea rows=3 name=routing_scan_targets placeholder="youtube.com\ndiscord.com\nmedia.discordapp.net">{html.escape(routing_scan_targets)}</textarea></label>
+          <button style="align-self:end">Сканировать цели</button>
+        </form>
+        <p class=notice><b>Как сохранить изменение:</b> перенесите проверенный домен в «Напрямую», «Через VPN» или «Блок-лист» ниже и затем создайте тестовую либо production‑ревизию. Так результат проверки не может незаметно изменить трафик пользователей.</p>
+        <table style="margin-top:12px"><thead><tr><th>Цель</th><th>TCP/443 с VDS</th><th>Адреса</th><th>Рекомендация</th></tr></thead><tbody>{routing_scan_html}</tbody></table>
       </section>
       <form class=grid method=post action=/operator/routing>
         <section class=card>
@@ -3470,6 +3700,32 @@ class App(BaseHTTPRequestHandler):
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             action = (form.get("action", ["publish"])[0] or "publish").strip()
             try:
+                if action == "scan":
+                    raw_targets = (form.get("routing_scan_targets", [""])[0] or "")[:4096]
+                    active_payload = routing_payload(s)
+                    findings = scan_routing_targets(raw_targets, active_payload)
+                    # Keep this operator-only evidence outside the signed
+                    # policy.  A scan cannot push a rule to clients; a human
+                    # must still add a target and publish a reviewed revision.
+                    set_settings(db, {"routing_scan_targets": raw_targets})
+                    # Store a plain list for the renderer and audit only the
+                    # number/statuses, not the complete target history.
+                    db.execute(
+                        "insert or replace into settings values (?,?)",
+                        ("routing_last_scan", json.dumps(findings, ensure_ascii=False, separators=(",", ":"))),
+                    )
+                    audit(db, actor, ip, "routing:scan", {
+                        "targets": len(findings),
+                        "ok": sum(1 for item in findings if item.get("status") == "ok"),
+                    })
+                    db.execute(
+                        "insert into events values (?,?,?,?,?)",
+                        (int(time.time()), "routing_scan", actor, ip, json.dumps({"targets": len(findings)}, ensure_ascii=False)),
+                    )
+                    db.commit()
+                    ready = sum(1 for item in findings if item.get("status") == "ok")
+                    return self.redirect_operator("routing", f"Проверено целей: {len(findings)}, TCP/443 доступно: {ready}")
+
                 if action in ("publish", "stage"):
                     candidate_values = routing_candidate_from_form(form)
                     candidate_state = dict(s)

@@ -5,7 +5,7 @@ set -euo pipefail
 
 source_file=/tmp/quantumvpn_operator_panel.py
 target_file=/opt/quantumvpn-operator/app.py
-backup_file=/opt/quantumvpn-operator/app.py.before-5.10.7-control.2
+backup_file=/opt/quantumvpn-operator/app.py.before-5.10.8-control.1
 
 python3 -m py_compile "$source_file"
 test -f "$target_file"

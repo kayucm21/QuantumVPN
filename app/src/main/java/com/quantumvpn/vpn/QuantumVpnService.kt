@@ -40,6 +40,8 @@ import com.quantumvpn.hardening.VpnHidingOptions
 import com.quantumvpn.hardening.VpnRuntimeHardening
 import kotlinx.serialization.json.JsonObject
 import com.quantumvpn.routing.RoutingConfigEditor
+import com.quantumvpn.routing.RemoteRoutingPolicy
+import com.quantumvpn.routing.RoutingPolicyRefreshResult
 import com.quantumvpn.networkbootstrap.CodedFailure
 import io.nekohasekai.libbox.CommandClient
 import io.nekohasekai.libbox.CommandClientHandler
@@ -369,6 +371,7 @@ class QuantumVpnService : VpnService() {
         systemPolicy.blockingMessage?.let(::error)
         container.libboxRuntime.initialize().getOrThrow()
         container.profileStore.initialize()
+        val uiSettings = container.uiSettingsStore.settings.first()
         var profile = container.profileStore.read(profileId)
         if (RoutingConfigEditor.usesManagedLocalRuleSets(profile.json)) {
             val installed = container.ruleSetAssetManager.ensureInstalled()
@@ -378,6 +381,39 @@ class QuantumVpnService : VpnService() {
                 profile = container.profileStore.read(profileId)
             }
         }
+        // A panel policy is a signed, bounded overlay. It is fetched only at
+        // connection start (and from explicit UI refresh), never treated as a
+        // remote profile/import. A failed fetch falls back to the last locally
+        // verified envelope, so a panel outage cannot stop an existing VPN.
+        val panelPolicy = if (uiSettings.panelRoutingEnabled) {
+            (container.remoteRoutingPolicyRepository.refresh() as? RoutingPolicyRefreshResult.Applied)
+                ?.verified
+                ?.policy
+        } else {
+            null
+        }
+        val activePanelPolicy = panelPolicy?.takeIf(RemoteRoutingPolicy::enabled)
+        val effectiveProfileJson = if (activePanelPolicy != null) {
+            val installed = container.ruleSetAssetManager.ensureInstalled()
+            RoutingConfigEditor.applyRemotePolicy(
+                raw = profile.json,
+                policy = activePanelPolicy,
+                adBlockAllowed = uiSettings.adBlockEnabled,
+                installed = installed,
+            ).json
+        } else {
+            profile.json
+        }
+        panelPolicy?.let { policy ->
+            controller.publishDiagnosticWarning(
+                if (policy.enabled) {
+                    "Маршрутизация панели r${policy.revision}: подписана Ed25519, DNS " +
+                        if (policy.dns.vpnOnly) "только в VPN." else "системный."
+                } else {
+                    "Маршрутизация панели r${policy.revision}: выключена оператором; используется профиль устройства."
+                },
+            )
+        }
         // Перед сборкой runtime: Maximum + AdGuard + Safe mode off (без UI из сервиса).
         runCatching {
             com.quantumvpn.hardening.AdBlockConnectPreflight.prepare(
@@ -386,9 +422,10 @@ class QuantumVpnService : VpnService() {
                 openPrivateDnsSettingsIfStrict = false,
             )
         }
-        val uiSettings = container.uiSettingsStore.settings.first()
         muteNotificationTrafficDetail = uiSettings.muteNotificationTrafficDetail
-        val configuredDnsMode = uiSettings.dnsMode
+        val configuredDnsMode = activePanelPolicy?.let { policy ->
+            if (policy.dns.vpnOnly) DnsMode.Secure else DnsMode.Android
+        } ?: uiSettings.dnsMode
         val safeMode = uiSettings.safeModeConnect
         val dnsMode = when {
             runtimeDnsMode != null -> runtimeDnsMode
@@ -425,8 +462,10 @@ class QuantumVpnService : VpnService() {
                 preset == BypassPreset.Aggressive,
         )
         val panelAllowsAdblock = com.quantumvpn.policy.ClientFeatureGate.features().adblock
-        // Всегда включаем блокировку при обычном connect (после preflight).
-        val adBlockEnabled = !safeMode && panelAllowsAdblock
+        // It runs inside the VPN runtime only. Neither this value nor a panel
+        // policy touches Android's global Private DNS setting.
+        val adBlockEnabled = !safeMode && panelAllowsAdblock && uiSettings.adBlockEnabled &&
+            (activePanelPolicy?.adBlockEnabled ?: true)
         val whitelist = uiSettings.adBlockWhitelist
             .split(',', ' ', '\n', ';')
             .map { it.trim().lowercase() }
@@ -446,7 +485,7 @@ class QuantumVpnService : VpnService() {
             categories = uiSettings.adBlockCategories,
         )
         if (dnsMode == DnsMode.FromJson) {
-            ConfigAnalyzer.dnsWarnings(profile.json).forEach(controller::publishDiagnosticWarning)
+            ConfigAnalyzer.dnsWarnings(effectiveProfileJson).forEach(controller::publishDiagnosticWarning)
         }
         if (safeMode) {
             controller.publishDiagnosticWarning(
@@ -558,7 +597,7 @@ class QuantumVpnService : VpnService() {
                 }
                 container.proxyBootstrapper.prepare(
                     profileId = profileId,
-                    rawJson = profile.json,
+                    rawJson = effectiveProfileJson,
                     underlying = checkNotNull(underlying.network),
                     noCacheLookup = noCacheLookup,
                 )
@@ -574,7 +613,7 @@ class QuantumVpnService : VpnService() {
         val runtimeJson = try {
             when (
                 val runtime = RuntimeConfigBuilder.build(
-                    profile.json,
+                    effectiveProfileJson,
                     enableTrafficStats = true,
                     options = RuntimeConfigOptions(
                         dnsMode = dnsMode,
@@ -588,7 +627,8 @@ class QuantumVpnService : VpnService() {
                         blockWebRtcMdns = !safeMode && uiSettings.blockWebRtcMdns,
                         healthCheckPackageName = packageName,
                         updaterPackageName = packageName.takeIf { updaterRouting },
-                        customDohUrl = uiSettings.customDohUrl.takeIf { it.isNotBlank() },
+                        customDohUrl = activePanelPolicy?.dns?.resolver?.takeIf { it.isNotBlank() }
+                            ?: uiSettings.customDohUrl.takeIf { it.isNotBlank() },
                         customDotUrl = uiSettings.customDotUrl.takeIf { it.isNotBlank() },
                         blockedPackageNames = if (scopeMode == AppScopeMode.Block) {
                             effectivePackages.filter { it != packageName } - gamePackages
@@ -681,9 +721,10 @@ class QuantumVpnService : VpnService() {
             generation = token,
             networkMonitor = networkMonitor,
             networkPolicyKey = underlying.policyKey(),
-            outboundDescriptions = ConfigAnalyzer.outboundDescriptions(profile.json),
-            selectorGroups = ConfigAnalyzer.outboundGroups(profile.json),
+            outboundDescriptions = ConfigAnalyzer.outboundDescriptions(effectiveProfileJson),
+            selectorGroups = ConfigAnalyzer.outboundGroups(effectiveProfileJson),
             updaterRouting = updaterRouting,
+            panelRoutingRevision = panelPolicy?.revision,
             controller = controller,
             onTrafficRate = ::updateTrafficNotification,
             onOlcrtcStop = {
@@ -725,7 +766,7 @@ class QuantumVpnService : VpnService() {
             check(token == controller.currentGeneration()) { "Запуск отменён." }
 
             controller.startConnectionDiagnosticStage(token, "olcrtc_engine", "Подготовка движка olcrtc")
-            startOlcrtcEngine(profileId, profile.json)
+            startOlcrtcEngine(profileId, effectiveProfileJson)
             controller.finishConnectionDiagnosticStage(token, "olcrtc_engine", DiagnosticStageStatus.Success)
 
             // Subscribe before any startup probe. The command server retains a bounded
@@ -784,6 +825,7 @@ class QuantumVpnService : VpnService() {
             startConnectionIdentityProbe(resources)
             startTrafficWatchdog(resources, token, profileId)
             startPeriodicServerPing(resources)
+            startPeriodicPanelRoutingRefresh(resources)
             scheduleDeferredHealthCheck(resources, dnsMode, token)
         } catch (error: Throwable) {
             discardSession(resources)
@@ -996,6 +1038,7 @@ class QuantumVpnService : VpnService() {
 
     private fun restartDiagnosticTrigger(reason: String): String = when (reason) {
         "Смена сети Android" -> "network_change"
+        "Обновление маршрутизации панели" -> "routing_policy_refresh"
         "Сброс DNS-состояния" -> "dns_cache_clear"
         "Изменение маршрутизации" -> "routing_change"
         "Подписка обновлена пользователем" -> "subscription_refresh"
@@ -1267,6 +1310,39 @@ class QuantumVpnService : VpnService() {
                 val group = controller.selectorGroups.value.primaryGroup()?.tag
                 if (!group.isNullOrBlank()) requestGroupPing(session.profileId, group, startId = 0)
                 delay(PERIODIC_GROUP_PING_INTERVAL_MILLIS)
+            }
+        })
+    }
+
+    /**
+     * Refresh only while the user has an active foreground VPN session.  This
+     * is deliberately not a WorkManager/background fetch: the signed policy
+     * is checked at connect, after Android network changes (via restart), on
+     * explicit UI action and at a sparse four-hour interval for a live tunnel.
+     */
+    private fun startPeriodicPanelRoutingRefresh(session: ActiveSession) {
+        session.replaceRoutingPolicyRefreshJob(serviceScope.launch {
+            delay(PERIODIC_ROUTING_POLICY_REFRESH_INTERVAL_MILLIS)
+            while (activeSession === session && session.generation == controller.currentGeneration()) {
+                val routingEnabled = container.uiSettingsStore.settings.first().panelRoutingEnabled
+                if (routingEnabled) {
+                    val refreshed = container.remoteRoutingPolicyRepository.refresh()
+                    val policy = (refreshed as? RoutingPolicyRefreshResult.Applied)?.verified?.policy
+                    if (policy != null && policy.revision != session.panelRoutingRevision) {
+                        controller.publishDiagnosticWarning(
+                            "Получена проверенная маршрутизация панели r${policy.revision}; VPN будет перезапущен.",
+                        )
+                        requestRestart(
+                            profileId = session.profileId,
+                            reason = "Обновление маршрутизации панели",
+                            startId = 0,
+                            noCacheLookup = false,
+                            updaterRouting = session.updaterRouting,
+                        )
+                        return@launch
+                    }
+                }
+                delay(PERIODIC_ROUTING_POLICY_REFRESH_INTERVAL_MILLIS)
             }
         })
     }
@@ -1627,6 +1703,7 @@ class QuantumVpnService : VpnService() {
         val outboundDescriptions: Map<String, OutboundDescription>,
         selectorGroups: List<SelectorGroup>,
         val updaterRouting: Boolean,
+        val panelRoutingRevision: Long?,
         private val controller: VpnController,
         private val onTrafficRate: (downloadBytesPerSecond: Long, uploadBytesPerSecond: Long) -> Unit,
         private val onOlcrtcStop: () -> Unit,
@@ -1646,6 +1723,7 @@ class QuantumVpnService : VpnService() {
         private var identityJob: Job? = null
         private var trafficWatchdogJob: Job? = null
         private var pingJob: Job? = null
+        private var routingPolicyRefreshJob: Job? = null
         private var statusClient: CommandClient? = null
         private var statusClientCounted = false
         private var logClient: CommandClient? = null
@@ -1760,6 +1838,14 @@ class QuantumVpnService : VpnService() {
         fun replacePingJob(candidate: Job) {
             val previous = synchronized(resourceLock) {
                 if (closing.get()) null else pingJob.also { pingJob = candidate }
+            }
+            previous?.cancel()
+            if (closing.get()) candidate.cancel()
+        }
+
+        fun replaceRoutingPolicyRefreshJob(candidate: Job) {
+            val previous = synchronized(resourceLock) {
+                if (closing.get()) null else routingPolicyRefreshJob.also { routingPolicyRefreshJob = candidate }
             }
             previous?.cancel()
             if (closing.get()) candidate.cancel()
@@ -1880,12 +1966,20 @@ class QuantumVpnService : VpnService() {
                 closeTun()
                 timedStopStage("close_observers", "Остановка callback и фоновых задач") {
                     val resources = synchronized(resourceLock) {
-                        listOfNotNull(statusObserver, diagnosticsObserver, identityJob, trafficWatchdogJob, pingJob).also {
+                        listOfNotNull(
+                            statusObserver,
+                            diagnosticsObserver,
+                            identityJob,
+                            trafficWatchdogJob,
+                            pingJob,
+                            routingPolicyRefreshJob,
+                        ).also {
                             statusObserver = null
                             diagnosticsObserver = null
                             identityJob = null
                             trafficWatchdogJob = null
                             pingJob = null
+                            routingPolicyRefreshJob = null
                         }
                     }
                     resources.forEach(Job::cancel)
@@ -2103,6 +2197,7 @@ class QuantumVpnService : VpnService() {
         private const val GROUP_PING_CONCURRENCY = 4
         private const val INITIAL_GROUP_PING_DELAY_MILLIS = 30_000L
         private const val PERIODIC_GROUP_PING_INTERVAL_MILLIS = 10 * 60_000L
+        private const val PERIODIC_ROUTING_POLICY_REFRESH_INTERVAL_MILLIS = 4 * 60 * 60_000L
         private const val ACTION_START = "com.quantumvpn.vpn.START"
         private const val ACTION_STOP = "com.quantumvpn.vpn.STOP"
         private const val ACTION_SELECT = "com.quantumvpn.vpn.SELECT"

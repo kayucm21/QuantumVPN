@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from contextlib import closing
 from urllib.request import Request, urlopen
 
@@ -239,6 +240,34 @@ class OperatorTests(unittest.TestCase):
             promoted = json.load(response)
         self.assertEqual(promoted["channel"], "production")
         self.assertEqual(promoted["payload"]["profile"], "proxy_all")
+
+    def test_routing_target_advisor_is_bounded_and_never_publishes(self):
+        token = base64.b64encode(b"test:test").decode()
+        with closing(self.panel.conn()) as db:
+            revision_before = self.panel.settings(db)["routing_revision"]
+        with mock.patch.object(self.panel, "_routing_scan_addresses", return_value=["1.1.1.1"]), \
+             mock.patch.object(self.panel, "_routing_tcp_latency_ms", return_value=17):
+            request = Request(
+                self.base + "/operator/routing",
+                data=b"action=scan&routing_scan_targets=example.com%0A1.1.1.1",
+                headers={"Authorization": "Basic " + token},
+            )
+            with urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+        with closing(self.panel.conn()) as db:
+            current = self.panel.settings(db)
+            scan = json.loads(current["routing_last_scan"])
+            self.assertEqual([item["target"] for item in scan], ["example.com", "1.1.1.1"])
+            self.assertEqual(current["routing_revision"], revision_before)
+        with urlopen(self.base + "/api/client/routing?bucket=99") as response:
+            envelope = json.load(response)
+        self.assertNotIn("routing_last_scan", envelope["payload"])
+        self.assertNotIn("example.com", json.dumps(envelope["payload"]))
+        with urlopen(Request(self.base + "/operator?tab=routing", headers={"Authorization": "Basic " + token})) as response:
+            page = response.read().decode("utf-8")
+        self.assertIn("Анализатор целей", page)
+        with self.assertRaises(ValueError):
+            self.panel.normalize_routing_scan_targets("127.0.0.1")
 
 
 if __name__ == "__main__":

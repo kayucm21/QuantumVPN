@@ -14,7 +14,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -29,6 +28,12 @@ data class RoutingUiState(
     val message: String? = null,
     val managedDiff: String? = null,
     val undoMessage: String? = null,
+    val panelRoutingEnabled: Boolean = true,
+    val adBlockEnabled: Boolean = true,
+    val panelPolicyRevision: Long? = null,
+    val panelPolicyChannel: String? = null,
+    val panelPolicyFromCache: Boolean = false,
+    val panelPolicyMessage: String? = null,
 ) {
     val happRoutingAvailable: Boolean
         get() = happCatalog.profiles.isNotEmpty()
@@ -47,6 +52,7 @@ class RoutingViewModel(
     private val ruleSetAssets: RuleSetAssetManager,
     private val vpnController: VpnController,
     private val happRoutingStore: HappRoutingProfileStore,
+    private val remotePolicyRepository: RemoteRoutingPolicyRepository,
 ) : ViewModel() {
     private var pendingRoutingUndoJson: String? = null
     private val mutableState = MutableStateFlow(RoutingUiState())
@@ -56,15 +62,62 @@ class RoutingViewModel(
         viewModelScope.launch {
             profileStore.initialize()
             runCatching { refreshRuleSetsInternal() }
+            refreshPanelPolicyInternal(showMessage = false)
             combine(profileStore.profiles, settingsStore.settings) { profiles, settings ->
-                profiles.firstOrNull { it.id == settings.activeProfileId }
+                RoutingSelection(
+                    profile = profiles.firstOrNull { it.id == settings.activeProfileId },
+                    panelRoutingEnabled = settings.panelRoutingEnabled,
+                    adBlockEnabled = settings.adBlockEnabled,
+                )
             }
-                .map { it?.id to it?.name }
                 .distinctUntilChanged()
-                .collect { (id, name) ->
-                    mutableState.update { it.copy(activeProfileId = id, activeProfileName = name) }
+                .collect { selection ->
+                    mutableState.update {
+                        it.copy(
+                            activeProfileId = selection.profile?.id,
+                            activeProfileName = selection.profile?.name,
+                            panelRoutingEnabled = selection.panelRoutingEnabled,
+                            adBlockEnabled = selection.adBlockEnabled,
+                        )
+                    }
                     refresh()
                 }
+        }
+    }
+
+    fun setPanelRoutingEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsStore.setPanelRoutingEnabled(enabled)
+            if (enabled) {
+                refreshPanelPolicyInternal(showMessage = true)
+                vpnController.restartIfConnected("Включение маршрутизации панели")
+            }
+            else {
+                vpnController.restartIfConnected("Панельная маршрутизация отключена")
+                mutableState.update { it.copy(message = "Маршрутизация панели выключена на этом устройстве.") }
+            }
+        }
+    }
+
+    fun setPanelAdBlockEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsStore.setAdBlockEnabled(enabled)
+            vpnController.restartIfConnected("Изменение блокировки рекламы")
+            mutableState.update {
+                it.copy(message = if (enabled) {
+                    "Блокировка рекламы включится только при активном VPN."
+                } else {
+                    "Блокировка рекламы отключена на этом устройстве."
+                })
+            }
+        }
+    }
+
+    fun refreshPanelPolicy() {
+        viewModelScope.launch {
+            mutableState.update { it.copy(loading = true, message = null) }
+            refreshPanelPolicyInternal(showMessage = true)
+            vpnController.restartIfConnected("Обновление маршрутов из панели")
         }
     }
 
@@ -151,6 +204,35 @@ class RoutingViewModel(
         val installed = withContext(Dispatchers.IO) { ruleSetAssets.ensureInstalled() }
         mutableState.update { it.copy(ruleSetVersion = installed.version) }
         return installed
+    }
+
+    private suspend fun refreshPanelPolicyInternal(showMessage: Boolean) {
+        when (val result = remotePolicyRepository.refresh()) {
+            is RoutingPolicyRefreshResult.Applied -> {
+                val policy = result.verified.policy
+                mutableState.update {
+                    it.copy(
+                        loading = false,
+                        panelPolicyRevision = policy.revision,
+                        panelPolicyChannel = result.verified.channel,
+                        panelPolicyFromCache = result.fromCache,
+                        panelPolicyMessage = null,
+                        message = if (showMessage) {
+                            "Правила панели r${policy.revision} проверены и будут применены при VPN-подключении."
+                        } else {
+                            it.message
+                        },
+                    )
+                }
+            }
+            is RoutingPolicyRefreshResult.Unavailable -> mutableState.update {
+                it.copy(
+                    loading = false,
+                    panelPolicyMessage = result.message,
+                    message = if (showMessage) result.message else it.message,
+                )
+            }
+        }
     }
 
     fun refresh() {
@@ -372,6 +454,7 @@ class RoutingViewModel(
         private val ruleSetAssets: RuleSetAssetManager,
         private val vpnController: VpnController,
         private val happRoutingStore: HappRoutingProfileStore,
+        private val remotePolicyRepository: RemoteRoutingPolicyRepository,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -382,7 +465,14 @@ class RoutingViewModel(
                 ruleSetAssets,
                 vpnController,
                 happRoutingStore,
+                remotePolicyRepository,
             ) as T
         }
     }
+
+    private data class RoutingSelection(
+        val profile: com.quantumvpn.profiles.ProfileMetadata? = null,
+        val panelRoutingEnabled: Boolean,
+        val adBlockEnabled: Boolean,
+    )
 }

@@ -148,6 +148,43 @@ class RoutingConfigEditorTest {
         assertTrue(sets.all { it.string("path")?.startsWith("/data/user/10/app") == true })
     }
 
+    @Test
+    fun `verified panel policy builds reject direct proxy and preserves the stored profile`() {
+        val original = profile()
+        val policy = RemoteRoutingPolicy(
+            revision = 9,
+            enabled = true,
+            profile = RemoteRoutingProfile.ProxyAll,
+            dns = RemoteRoutingDns(vpnOnly = true, resolver = "https://dns.adguard-dns.com/dns-query"),
+            adBlockEnabled = true,
+            directDomains = listOf("bank.example"),
+            proxyDomains = listOf("video.example"),
+            blockDomains = listOf("tracker.example"),
+            directCidrs = listOf("192.0.2.0/24"),
+            proxyCidrs = listOf("2001:db8::/32"),
+        )
+
+        val applied = RoutingConfigEditor.applyRemotePolicy(
+            raw = original,
+            policy = policy,
+            adBlockAllowed = true,
+            installed = installed,
+        )
+        val root = parsed(applied.json)
+        val rules = routeRules(applied.json).filter { it.string("action") != "hijack-dns" }
+        val dnsRules = ((root["dns"] as JsonObject)["rules"] as JsonArray).map { it as JsonObject }
+
+        assertFalse(original.contains("zapret-user-"))
+        assertTrue(applied.json.contains("zapret-user-"))
+        assertEquals("reject", rules.first().string("action"))
+        assertTrue(rules.any { it.string("outbound") == "direct" })
+        assertTrue(rules.any { it.string("outbound") == "zapret-proxy" })
+        assertEquals("zapret-proxy", route(applied.json).string("final"))
+        assertTrue(dnsRules.any { it.string("action") == "reject" })
+        assertFalse(applied.json.contains("package_name"))
+        assertFalse(applied.json.contains("\"sniff\""))
+    }
+
     private fun edit(preset: RoutingPreset): String =
         RoutingConfigEditor.apply(profile(), preset, emptyList(), installed).json
 

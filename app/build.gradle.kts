@@ -340,6 +340,10 @@ dependencies {
     implementation(project(":network-bootstrap"))
     implementation(project(":wireguard-import"))
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    // Ed25519 verification for the signed routing policy. This small pure-Java
+    // verifier supports the complete Android 8+ range; platform Ed25519 is not
+    // consistently available on API 26-30.
+    implementation("net.i2p.crypto:eddsa:0.3.0")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.fragment:fragment-ktx:1.9.0")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")

@@ -39,6 +39,7 @@ import com.quantumvpn.profiles.ProfilesViewModel
 import com.quantumvpn.routing.RuleSetAssetManager
 import com.quantumvpn.routing.HappRoutingProfileStore
 import com.quantumvpn.routing.RoutingViewModel
+import com.quantumvpn.routing.RemoteRoutingPolicyRepository
 import com.quantumvpn.ui.UiSettingsStore
 import com.quantumvpn.updates.UpdateController
 import com.quantumvpn.updates.AppUpdateVpnFallback
@@ -182,6 +183,7 @@ class AppContainer(
         eventJournal = eventJournalStore,
     )
     val ruleSetAssetManager = RuleSetAssetManager(appContext)
+    val remoteRoutingPolicyRepository = RemoteRoutingPolicyRepository(appContext)
     val proxyBootstrapper = ProxyBootstrapper(BootstrapResolver(), bootstrapCache)
     private val vpnNetworkProvider = VpnNetworkProvider(appContext)
     val vpnHealthPipeline = VpnHealthPipeline(vpnNetworkProvider)
@@ -247,5 +249,6 @@ class AppContainer(
             ruleSetAssetManager,
             vpnController,
             happRoutingProfileStore,
+            remoteRoutingPolicyRepository,
         )
 }

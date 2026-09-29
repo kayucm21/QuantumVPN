@@ -24,7 +24,7 @@ case "$operator_port" in
   ''|*[!0-9]*) echo 'QV_PORT is missing or invalid' >&2; exit 1 ;;
 esac
 for _ in $(seq 1 20); do
-  if curl -fsS "http://127.0.0.1:${operator_port}/api/client/routing" >/dev/null; then
+  if curl -fsS "http://127.0.0.1:${operator_port}/api/client/routing" >/dev/null 2>&1; then
     echo "Quantum Control routing centre deployed"
     exit 0
   fi

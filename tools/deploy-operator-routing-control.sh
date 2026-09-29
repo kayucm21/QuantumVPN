@@ -17,7 +17,12 @@ systemctl is-active --quiet quantumvpn-operator
 
 # The route policy is public configuration, so it is safe to use as a
 # post-deploy smoke test. It must never include administrator credentials.
-curl -fsSk https://127.0.0.1:8443/api/client/routing >/dev/null || \
-  curl -fsS http://127.0.0.1:8765/api/client/routing >/dev/null
+# The application port is intentionally read from the environment file: it is
+# not always the public nginx port and must not be hard-coded to an old value.
+operator_port="$(sed -n 's/^QV_PORT=//p' /etc/quantumvpn-operator.env | head -n 1)"
+case "$operator_port" in
+  ''|*[!0-9]*) echo 'QV_PORT is missing or invalid' >&2; exit 1 ;;
+esac
+curl -fsS "http://127.0.0.1:${operator_port}/api/client/routing" >/dev/null
 
 echo "Quantum Control routing centre deployed"

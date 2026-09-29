@@ -23,6 +23,13 @@ operator_port="$(sed -n 's/^QV_PORT=//p' /etc/quantumvpn-operator.env | head -n 
 case "$operator_port" in
   ''|*[!0-9]*) echo 'QV_PORT is missing or invalid' >&2; exit 1 ;;
 esac
-curl -fsS "http://127.0.0.1:${operator_port}/api/client/routing" >/dev/null
+for _ in $(seq 1 20); do
+  if curl -fsS "http://127.0.0.1:${operator_port}/api/client/routing" >/dev/null; then
+    echo "Quantum Control routing centre deployed"
+    exit 0
+  fi
+  sleep 0.5
+done
 
-echo "Quantum Control routing centre deployed"
+echo "Operator did not become ready after restart" >&2
+exit 1

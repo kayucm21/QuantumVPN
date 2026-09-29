@@ -60,8 +60,14 @@ DOWNLOAD_ROOT = os.environ.get("QV_DOWNLOAD_ROOT", "/var/www/quantumvpn/download
 PUBLIC_BASE = os.environ.get("QV_PUBLIC_BASE", "https://pecaocek.ignorelist.com:8443")
 # Prefer :8443 until :443 fallback nginx is confirmed live.
 DOWNLOAD_BASE = os.environ.get("QV_DOWNLOAD_BASE", "https://pecaocek.ignorelist.com:8443").rstrip("/")
+# The reserve URI lives in a root-only file on the host, not in the operator
+# database or in the rendered HTML.  It is appended only after RosPanel has
+# accepted the device-bound upstream subscription request.
+RESERVE_PROFILE_URI_FILE = os.environ.get(
+    "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
+)
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.8-control.1"
+PANEL_BUILD = "5.10.8-control.3"
 VERSION = "5.10.8"
 VERSION_CODE = 133
 DEFAULT_NOTE = "QuantumVPN 5.10.8: подписанная маршрутизация из Quantum Control, проверка Ed25519 и SHA-256, кеш последней проверенной ревизии и DNS-блокировка только внутри активного VPN."
@@ -367,6 +373,7 @@ def conn():
                 "announce": "",
                 "announce_en": "",
                 "subscription_main_enabled": "1",
+                "reserve_profile_enabled": "1",
                 "update_notifications_enabled": "1",
                 "rollout_percent": "100",
                 "staging_enabled": "0",
@@ -504,6 +511,67 @@ def set_settings(db, values: dict):
 
 def enabled(s, key, default=True):
     return s.get(key, "1" if default else "0") == "1"
+
+
+def reserve_profile_uri() -> str:
+    """Read the server-owned reserve profile without ever exposing its secret.
+
+    The operator receives a profile URI from a 0600 root-owned file.  Keeping it
+    outside SQLite prevents accidental inclusion in exports, support bundles and
+    the operator page.  The restrictive shape check also makes a damaged file a
+    fail-closed condition rather than a malformed subscription response.
+    """
+    try:
+        value = open(RESERVE_PROFILE_URI_FILE, "r", encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "trojan"
+        or not parsed.hostname
+        or not port
+        or port < 1
+        or port > 65535
+        or len(value) > 2048
+    ):
+        return ""
+    return value
+
+
+def managed_subscription(upstream_headers, s: dict) -> tuple[bytes, bool]:
+    """Fetch the authenticated upstream subscription and append verified reserve.
+
+    RosPanel remains the authority for subscriber access: device/HWID headers are
+    forwarded unchanged, so an unauthenticated request cannot obtain the reserve
+    profile.  A failed reserve file leaves the upstream list untouched.
+    """
+    forwarded = {"User-Agent": (upstream_headers.get("User-Agent") or "QuantumVPN-Android")[:256]}
+    for key in ("X-Hwid", "X-Device-Os", "X-Device-Model", "X-Ver-Os", "Accept"):
+        value = upstream_headers.get(key)
+        if value:
+            forwarded[key] = value[:256]
+    with urlopen(Request(UPSTREAM, headers=forwarded), timeout=20) as response:
+        raw = response.read(4 * 1024 * 1024)
+    text = raw.decode("utf-8", "replace").strip()
+    if "://" not in text:
+        compact = re.sub(r"\s+", "", text)
+        try:
+            text = base64.b64decode(compact + "=" * (-len(compact) % 4), validate=True).decode("utf-8", "replace").strip()
+        except Exception:
+            # Upstream changed format or returned an error page.  Return it as-is
+            # rather than manufacturing a partial subscription.
+            return raw, False
+
+    reserve = reserve_profile_uri() if enabled(s, "reserve_profile_enabled", True) else ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    appended = bool(reserve and reserve not in lines)
+    if appended:
+        lines.append(reserve)
+    return base64.b64encode(("\n".join(lines) + "\n").encode("utf-8")), appended
 
 
 def normalize_routing_domains(raw: str) -> list[str]:
@@ -2028,6 +2096,12 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         f"<label><input type=checkbox name=p_{html.escape(name)} {'checked' if en else ''}> {html.escape(name.upper())}</label>"
         for name, en in protocols
     ) or "<p class=muted>Протоколы появятся после синхронизации подписки.</p>"
+    reserve_profile_ready = bool(reserve_profile_uri())
+    reserve_profile_state = (
+        "<span class=ok>● готов: Trojan / TLS, порт 9443</span>"
+        if reserve_profile_ready else
+        "<span class=off>● не готов: резервный профиль не опубликован</span>"
+    )
     audit_html = "".join(
         f"<tr><td>{time.strftime('%d.%m %H:%M', time.localtime(a[0]))}</td><td>{html.escape(a[1])}</td>"
         f"<td>{html.escape(a[2])}</td><td>{html.escape(a[3])}</td><td><code>{html.escape(a[4][:500])}</code></td></tr>"
@@ -2394,6 +2468,9 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=subscription>
         <h2>Подписка</h2>
         <label><input type=checkbox name=subscription_main_enabled {checked('subscription_main_enabled')}> Встроенная подписка включена</label>
+        <label><input type=checkbox name=reserve_profile_enabled {checked('reserve_profile_enabled')}> Публиковать пятый профиль «Резерв TLS»</label>
+        <p class=muted>Резерв добавляется только после проверки устройства RosPanel; секрет профиля не показывается в панели и не попадает в экспорт.</p>
+        <p>{reserve_profile_state}</p>
         <p class=muted>Upstream: <code>{html.escape(UPSTREAM[:64])}…</code></p>
         <button>Сохранить</button>
       </form>
@@ -3062,6 +3139,7 @@ class App(BaseHTTPRequestHandler):
         }
 
     def sync_protocols(self, db):
+        names = []
         try:
             with urlopen(Request(UPSTREAM, headers={"User-Agent": "QuantumVPN-API"}), timeout=15) as r:
                 raw = r.read(4 * 1024 * 1024)
@@ -3074,10 +3152,17 @@ class App(BaseHTTPRequestHandler):
             names = sorted({line.split("://", 1)[0].lower() for line in text.splitlines() if "://" in line})
             for name in names:
                 db.execute("insert or ignore into protocols values (?,1)", (name,))
-            db.commit()
-            return names
         except Exception:
-            return []
+            # The upstream subscription is HWID-bound, so an operator-side
+            # generic fetch normally has no device identity and is correctly
+            # rejected by RosPanel.  Preserve known rows and still surface the
+            # locally verified reserve lane below.
+            pass
+        if reserve_profile_uri():
+            db.execute("insert or replace into protocols values (?,1)", ("trojan",))
+            names.append("trojan")
+        db.commit()
+        return sorted(set(names))
 
     def do_GET(self):
         parsed = urlsplit(self.path)
@@ -3269,11 +3354,30 @@ class App(BaseHTTPRequestHandler):
         if path == "/api/v1/subscription":
             if s.get("subscription_main_enabled") != "1":
                 return self.reply(503, "Subscription temporarily unavailable", "text/plain; charset=utf-8")
-            self.send_response(307)
-            self.send_header("Location", UPSTREAM)
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return
+            try:
+                body, appended = managed_subscription(self.headers, s)
+            except Exception:
+                # Do not leak the upstream address, HWID result or network error
+                # through a public endpoint.  The app can keep its last verified
+                # list and retry on its normal subscription schedule.
+                return self.reply(502, "Subscription temporarily unavailable", "text/plain; charset=utf-8")
+            db.execute(
+                "insert into events values (?,?,?,?,?)",
+                (
+                    int(time.time()),
+                    "subscription_served",
+                    "managed",
+                    "",
+                    "reserve_profile=appended" if appended else "reserve_profile=not_appended",
+                ),
+            )
+            db.commit()
+            return self.reply(
+                200,
+                body,
+                "text/plain; charset=utf-8",
+                {"Content-Disposition": 'attachment; filename="quantumvpn-subscription.txt"'},
+            )
 
         if path == "/operator/logout":
             self.reply(
@@ -4039,7 +4143,10 @@ class App(BaseHTTPRequestHandler):
             }
         elif section == "subscription":
             tab = "service"
-            values = {"subscription_main_enabled": "1" if "subscription_main_enabled" in form else "0"}
+            values = {
+                "subscription_main_enabled": "1" if "subscription_main_enabled" in form else "0",
+                "reserve_profile_enabled": "1" if "reserve_profile_enabled" in form else "0",
+            }
         elif section == "nodes":
             tab = "service"
             values = {

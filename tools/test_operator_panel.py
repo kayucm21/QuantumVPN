@@ -213,6 +213,11 @@ class OperatorTests(unittest.TestCase):
             page = response.read().decode("utf-8")
         self.assertIn("Маршрутизация и DNS", page)
         self.assertIn("Тестовый канал", page)
+        self.assertIn("Анализатор целей", page)
+        self.assertIn("Правила маршрута", page)
+        self.assertIn("DNS и публикация", page)
+        self.assertIn('id=routing-policy', page)
+        self.assertIn("Блокировка рекламы не гарантируется", page)
         with closing(self.panel.conn()) as db:
             history = db.execute("select count(*) from routing_revisions where state='production'").fetchone()[0]
         self.assertGreaterEqual(history, 2)
@@ -266,6 +271,8 @@ class OperatorTests(unittest.TestCase):
         with urlopen(Request(self.base + "/operator?tab=routing", headers={"Authorization": "Basic " + token})) as response:
             page = response.read().decode("utf-8")
         self.assertIn("Анализатор целей", page)
+        self.assertIn("Последняя проверка", page)
+        self.assertIn("routing-empty", page)
         with self.assertRaises(ValueError):
             self.panel.normalize_routing_scan_targets("127.0.0.1")
 

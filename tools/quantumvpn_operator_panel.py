@@ -67,12 +67,14 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.8-control.3"
-VERSION = "5.10.8"
-VERSION_CODE = 133
-DEFAULT_NOTE = "QuantumVPN 5.10.8: подписанная маршрутизация из Quantum Control, проверка Ed25519 и SHA-256, кеш последней проверенной ревизии и DNS-блокировка только внутри активного VPN."
+PANEL_BUILD = "5.10.9-control.1"
+VERSION = "5.10.9"
+VERSION_CODE = 134
+DEFAULT_NOTE = "QuantumVPN 5.10.9: карточный стол с защищённым кодом доступа, оптимизированный интерфейс и обновлённый Quantum Control."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
+CARD_GAME_TICKET_TTL = 6 * 3600
+CARD_GAME_WAIT_TTL = 20 * 60
 _DB_INIT_LOCK = threading.Lock()
 _DB_READY = False
 _LAST_EVENT_CLEANUP = 0
@@ -148,9 +150,11 @@ def session_secret() -> bytes:
     path = os.path.join(ROOT, "session.secret")
     os.makedirs(ROOT, exist_ok=True)
     if not os.path.isfile(path):
-        open(path, "wb").write(secrets.token_bytes(32))
+        with open(path, "wb") as file:
+            file.write(secrets.token_bytes(32))
         os.chmod(path, 0o600)
-    return open(path, "rb").read()
+    with open(path, "rb") as file:
+        return file.read()
 
 
 def backup_key() -> bytes:
@@ -220,6 +224,42 @@ def verify_session(token: str):
         return payload
     except Exception:
         return None
+
+
+def card_game_ticket(device: str, table_id: str) -> str:
+    """Create a short-lived, device-bound ticket for the card lobby.
+
+    The ticket grants access only to one table.  It cannot be used as an
+    operator session because the scope is verified by card_game_ticket_data.
+    """
+    return sign_session({
+        "scope": "card_game",
+        "device": device,
+        "table": table_id,
+        "exp": int(time.time()) + CARD_GAME_TICKET_TTL,
+        "n": secrets.token_hex(8),
+    })
+
+
+def card_game_ticket_data(token: str):
+    payload = verify_session(token)
+    if not payload or payload.get("scope") != "card_game":
+        return None
+    device = str(payload.get("device") or "")
+    table = str(payload.get("table") or "")
+    if not re.fullmatch(r"[a-f0-9]{16,64}", device) or not re.fullmatch(r"[a-f0-9]{12}", table):
+        return None
+    return payload
+
+
+def card_game_name(value: str) -> str:
+    """Normalize a display name without accepting control or markup input."""
+    name = " ".join((value or "").strip().split())
+    if not 2 <= len(name) <= 24:
+        raise ValueError("Имя должно содержать от 2 до 24 символов")
+    if any(ord(char) < 32 for char in name):
+        raise ValueError("Имя содержит недопустимые символы")
+    return name
 
 
 def totp_secret_b32() -> str:
@@ -350,6 +390,17 @@ def conn():
                     note text not null default '',
                     payload text not null
                 );
+                create table if not exists card_tables (
+                    id text primary key,
+                    created_at integer not null,
+                    updated_at integer not null,
+                    state text not null default 'waiting',
+                    host_device text not null,
+                    host_name text not null,
+                    guest_device text not null default '',
+                    guest_name text not null default '',
+                    last_action text not null default ''
+                );
                 create index if not exists idx_events_device on events(device);
                 create index if not exists idx_events_kind_ts on events(kind, ts);
                 create index if not exists idx_events_ts on events(ts);
@@ -361,6 +412,7 @@ def conn():
                 create index if not exists idx_incidents_key on incidents(dedupe_key, closed_at);
                 create index if not exists idx_routing_revisions_created on routing_revisions(created_at desc);
                 create index if not exists idx_routing_revisions_revision on routing_revisions(revision desc);
+                create index if not exists idx_card_tables_state_updated on card_tables(state, updated_at desc);
                 """
             )
             defaults = {
@@ -468,6 +520,12 @@ def conn():
                 "webhook_url": "",
                 "webhook_secret": "",
                 "webhook_events": "incident,release,maintenance,diagnostic",
+                # The code is hashed in SQLite and is never returned through a
+                # client API.  It intentionally is not the administrator's
+                # password: APKs must never handle panel credentials.
+                "card_game_enabled": "1",
+                "card_game_access_hash": "",
+                "card_game_wait_minutes": "20",
             }
             for key, value in defaults.items():
                 db.execute("insert or ignore into settings values (?,?)", (key, value))
@@ -1663,6 +1721,7 @@ def promote_scheduled_release(db, now=None):
         (now - 365 * 86400,),
     ).fetchall()
     for (device,) in devices:
+        wait_seconds = max(5, min(120, int(s.get("card_game_wait_minutes") or 20))) * 60
         db.execute(
             "insert into device_flags(device,force_banner,request_diagnostic,note,updated_at) values (?,?,?,?,?) "
             "on conflict(device) do update set force_banner=excluded.force_banner, updated_at=excluded.updated_at",
@@ -2077,7 +2136,7 @@ def render_login(error=""):
     </form></section></main>"""
 
 
-def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner"):
+def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None):
     checked = lambda key: "checked" if s.get(key) == "1" else ""
     events = "".join(
         f"<tr><td>{time.strftime('%d.%m %H:%M', time.localtime(x[0]))}</td><td>{html.escape(x[1])}</td>"
@@ -2156,6 +2215,14 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         f"<td>{html.escape((note or '')[:120])}</td></tr>"
         for ts, amount, device, ip, ver, note in (donation_rows or [])
     ) or "<tr><td colspan=6>Пожертвований пока нет</td></tr>"
+    card_table_html = "".join(
+        f"<tr><td><code>{html.escape(str(row[0]))}</code></td><td>{html.escape(str(row[5]))}</td>"
+        f"<td>{html.escape(str(row[7] or 'Ожидание'))}</td>"
+        f"<td><span class='badge {'ok' if row[3] == 'ready' else 'warn'}'>{'Готов' if row[3] == 'ready' else 'Ожидает'}</span></td>"
+        f"<td>{time.strftime('%d.%m %H:%M', time.localtime(row[2]))}</td></tr>"
+        for row in (card_rows or [])
+    ) or "<tr><td colspan=5>Открытых столов нет</td></tr>"
+    card_code_state = "настроен" if s.get("card_game_access_hash") else "не настроен"
     totp_setup = ""
     if not role_at_least(actor_role, "operator"):
         totp_setup = "<p class=muted>Настройки безопасности доступны только ролям operator и owner.</p>"
@@ -2396,6 +2463,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a class="{'active' if section == 'latency' else ''}" href="/operator?tab=latency"><span class=nav-ico>▤</span> Ноды</a>
         <a class="{'active' if section == 'routing' else ''}" href="/operator?tab=routing"><span class=nav-ico>⇄</span> Маршрутизация</a>
         <a class="{'active' if section in ('users','devices','fleet') else ''}" href="/operator?tab=users"><span class=nav-ico>♧</span> Пользователи</a>
+        <a class="{'active' if section == 'cards' else ''}" href="/operator?tab=cards"><span class=nav-ico>♠</span> Карточный стол</a>
         <a class="{'active' if section == 'service' else ''}" href="/operator?tab=service"><span class=nav-ico>▭</span> Подписки</a>
         <a class="{'active' if section in ('release','features','branding') else ''}" href="/operator?tab=release"><span class=nav-ico>◇</span> Релизы</a>
         <a class="{'active' if section in ('incidents','logs','reports') else ''}" href="/operator?tab=incidents"><span class=nav-ico>♧</span> События</a>
@@ -2685,6 +2753,23 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </form>
     </section>
 
+    <section class=grid {show('cards')}>
+      <form class=card method=post action=/operator/cards>
+        <h2>Карточный стол</h2>
+        <p class=muted>Мобильные игроки входят по отдельному коду. Пароль администратора не передаётся в APK и не хранится на телефоне.</p>
+        <label><input type=checkbox name=card_game_enabled {checked('card_game_enabled')}> Включить карточный стол</label>
+        <label>Новый код доступа<input type=password name=card_game_access_code minlength=8 maxlength=80 autocomplete=new-password placeholder="Минимум 8 символов"></label>
+        <label>Время ожидания второго игрока, минут<input type=number name=card_game_wait_minutes min=5 max=120 value="{html.escape(s.get('card_game_wait_minutes','20'))}"></label>
+        <p class={'ok' if s.get('card_game_access_hash') else 'warn'}>Код доступа: <b>{card_code_state}</b>. Оставьте поле пустым, чтобы не менять существующий код.</p>
+        <button>Сохранить доступ к столу</button>
+      </form>
+      <section class=card>
+        <h2>Открытые столы</h2>
+        <p class=muted>Стол на двух игроков. Когда второй игрок входит, состояние меняется на «Готов» без обновления APK.</p>
+        <table><thead><tr><th>Стол</th><th>Первый игрок</th><th>Второй игрок</th><th>Состояние</th><th>Обновлён</th></tr></thead><tbody>{card_table_html}</tbody></table>
+      </section>
+    </section>
+
     <section class=card {show('donations')}>
       <h2>Пожертвования</h2>
       <div class=stats>
@@ -2971,6 +3056,98 @@ class App(BaseHTTPRequestHandler):
         db.execute("create index if not exists idx_donations_ts on donations(ts)")
         db.execute("create index if not exists idx_donations_device on donations(device)")
 
+    def card_game_payload(self, db, device: str, table_id: str):
+        """Return only the caller's own lobby state, never other table data."""
+        row = db.execute(
+            "select id,created_at,updated_at,state,host_device,host_name,guest_device,guest_name,last_action "
+            "from card_tables where id=?",
+            (table_id,),
+        ).fetchone()
+        if not row:
+            return None
+        if device == row[4]:
+            seat, name, opponent = "host", row[5], row[7]
+        elif device == row[6]:
+            seat, name, opponent = "guest", row[7], row[5]
+        else:
+            return None
+        state = row[3]
+        return {
+            "table_id": row[0],
+            "state": state,
+            "seat": seat,
+            "name": name,
+            "opponent_name": opponent,
+            "created_at": int(row[1]),
+            "updated_at": int(row[2]),
+            "waiting": state == "waiting",
+            "ready": state == "ready",
+            "message": (
+                "Ожидаем второго игрока…" if state == "waiting"
+                else "Игрок подключился. Стол готов."
+            ),
+        }
+
+    def join_card_game(self, db, s, device: str, ip: str, access_code: str, display_name: str):
+        """Join or create a two-player card-game lobby through a hashed code."""
+        if not enabled(s, "card_game_enabled", True):
+            raise PermissionError("Карточный стол временно отключён оператором")
+        access_hash = s.get("card_game_access_hash") or ""
+        if not access_hash:
+            raise PermissionError("Оператор ещё не создал код доступа к столу")
+        if not password_ok(access_code, access_hash):
+            raise PermissionError("Неверный код доступа")
+        name = card_game_name(display_name)
+        now = int(time.time())
+        wait_seconds = max(5, min(120, int(s.get("card_game_wait_minutes") or 20))) * 60
+        # Waiting rooms are short lived. This avoids an abandoned device
+        # blocking the next player forever while retaining an audit event.
+        db.execute(
+            "update card_tables set state='expired',updated_at=?,last_action='Время ожидания истекло' "
+            "where state='waiting' and updated_at<?",
+            (now, now - wait_seconds),
+        )
+        row = db.execute(
+            "select id from card_tables where state in ('waiting','ready') and (host_device=? or guest_device=?) "
+            "order by updated_at desc limit 1",
+            (device, device),
+        ).fetchone()
+        if row:
+            table_id = row[0]
+            db.execute(
+                "update card_tables set updated_at=?,host_name=case when host_device=? then ? else host_name end,"
+                "guest_name=case when guest_device=? then ? else guest_name end where id=?",
+                (now, device, name, device, name, table_id),
+            )
+        else:
+            waiting = db.execute(
+                "select id from card_tables where state='waiting' and host_device!=? order by created_at asc limit 1",
+                (device,),
+            ).fetchone()
+            if waiting:
+                table_id = waiting[0]
+                db.execute(
+                    "update card_tables set state='ready',updated_at=?,guest_device=?,guest_name=?,"
+                    "last_action='Второй игрок подключился' where id=?",
+                    (now, device, name, table_id),
+                )
+                detail = json.dumps({"table": table_id, "state": "ready"}, ensure_ascii=False)
+            else:
+                table_id = secrets.token_hex(6)
+                db.execute(
+                    "insert into card_tables(id,created_at,updated_at,state,host_device,host_name,guest_device,guest_name,last_action) "
+                    "values (?,?,?,?,?,?,?,?,?)",
+                    (table_id, now, now, "waiting", device, name, "", "", "Стол создан"),
+                )
+                detail = json.dumps({"table": table_id, "state": "waiting"}, ensure_ascii=False)
+            db.execute("insert into events values (?,?,?,?,?)", (now, "card_table", device, ip, detail))
+        db.commit()
+        payload = self.card_game_payload(db, device, table_id)
+        if not payload:
+            raise RuntimeError("Не удалось создать игровой стол")
+        payload["ticket"] = card_game_ticket(device, table_id)
+        return payload
+
     def reply(self, code, body, content_type="application/json; charset=utf-8", headers=None):
         if isinstance(body, str):
             data = body.encode("utf-8")
@@ -3235,6 +3412,25 @@ class App(BaseHTTPRequestHandler):
 
         if path.startswith("/api/client/donations"):
             return self.reply(200, json.dumps(self.donations_payload(db)))
+
+        if path == "/api/client/cards/state":
+            ticket = (query.get("ticket", [""])[0] or "")[:2048]
+            ticket_data = card_game_ticket_data(ticket)
+            if not ticket_data:
+                return self.reply(401, '{"error":"invalid_game_ticket"}')
+            device, _ip = self.client()
+            if not hmac.compare_digest(str(ticket_data.get("device") or ""), device):
+                return self.reply(403, '{"error":"game_ticket_device_mismatch"}')
+            table_id = str(ticket_data.get("table") or "")
+            db.execute(
+                "update card_tables set updated_at=? where id=? and state='waiting' and (host_device=? or guest_device=?)",
+                (int(time.time()), table_id, device, device),
+            )
+            db.commit()
+            payload = self.card_game_payload(db, device, table_id)
+            if not payload:
+                return self.reply(404, '{"error":"game_table_not_found"}')
+            return self.reply(200, json.dumps(payload, ensure_ascii=False))
 
         if path.startswith("/api/client/policy"):
             dev, ip = self.client()
@@ -3547,6 +3743,10 @@ class App(BaseHTTPRequestHandler):
             rows = db.execute("select ts,kind,device,ip,detail from events order by ts desc limit 100").fetchall()
             protocols = db.execute("select name,enabled from protocols order by name").fetchall()
             audit_rows = db.execute("select ts,actor,ip,action,detail from audit order by ts desc limit 100").fetchall()
+            card_rows = db.execute(
+                "select id,created_at,updated_at,state,host_device,host_name,guest_device,guest_name,last_action "
+                "from card_tables where state in ('waiting','ready') order by updated_at desc limit 80"
+            ).fetchall()
             users = rospanel_users(q=q if tab == "users" else "")
             return self.reply(
                 200,
@@ -3565,6 +3765,7 @@ class App(BaseHTTPRequestHandler):
                     device=None,
                     admin_rows=admin_rows,
                     actor_role=adm.get("role", "viewer"),
+                    card_rows=card_rows,
                 ),
                 "text/html; charset=utf-8",
             )
@@ -3572,8 +3773,21 @@ class App(BaseHTTPRequestHandler):
         self.reply(404, "Not found", "text/plain")
 
     def download_file(self, path, head=False):
+        # A scheduled release is uploaded early so its integrity can be
+        # verified, but its predictable download path must not make it public
+        # before the configured publication time.
+        relative = path.removeprefix("/downloads/").lstrip("/")
+        scheduled_version = relative.split("/", 1)[0]
+        db = self.connection_db()
+        s = settings(db)
+        if (
+            enabled(s, "release_schedule_enabled", False)
+            and scheduled_version == (s.get("scheduled_app_version") or "").strip()
+            and int(s.get("release_publish_at", "0") or 0) > int(time.time())
+        ):
+            return self.reply(404, "Not found", "text/plain")
         root = os.path.realpath(DOWNLOAD_ROOT) + os.sep
-        target = os.path.realpath(os.path.join(DOWNLOAD_ROOT, path.removeprefix("/downloads/")))
+        target = os.path.realpath(os.path.join(DOWNLOAD_ROOT, relative))
         if not target.startswith(root) or not os.path.isfile(target):
             return self.reply(404, "Not found", "text/plain")
         size = os.path.getsize(target)
@@ -3715,6 +3929,30 @@ class App(BaseHTTPRequestHandler):
             except Exception:
                 return self.reply(400, '{"error":"invalid_donation"}')
 
+        if path == "/api/client/cards/join":
+            ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
+            if rate_limited(f"card-game:{ip}", max(3, min(20, int(s.get("rate_limit_per_min") or 120) // 6))):
+                return self.reply(429, '{"error":"rate_limited"}')
+            try:
+                size = min(int(self.headers.get("Content-Length", "0")), 4096)
+                payload = json.loads(self.rfile.read(size).decode("utf-8"))
+                device, client_ip = self.client()
+                result = self.join_card_game(
+                    db,
+                    s,
+                    device,
+                    client_ip,
+                    str(payload.get("access_code") or ""),
+                    str(payload.get("display_name") or ""),
+                )
+                return self.reply(200, json.dumps(result, ensure_ascii=False))
+            except PermissionError as exc:
+                return self.reply(403, json.dumps({"error": "access_denied", "message": str(exc)}, ensure_ascii=False))
+            except ValueError as exc:
+                return self.reply(400, json.dumps({"error": "invalid_request", "message": str(exc)}, ensure_ascii=False))
+            except Exception:
+                return self.reply(400, '{"error":"card_game_unavailable"}')
+
         if path.startswith("/operator/") and not self.same_origin_request():
             # Keep a redacted diagnostic in the service journal so reverse-proxy
             # origin mismatches can be fixed without logging credentials.
@@ -3791,6 +4029,37 @@ class App(BaseHTTPRequestHandler):
             audit(db, actor, ip, "admin_user_upsert", {"username": username, "role": role, "enabled": bool(is_enabled)})
             db.commit()
             return self.redirect_operator("admins", "Администратор сохранён")
+
+        if path == "/operator/cards":
+            if not self.require_role(adm, "owner"):
+                return
+            length = min(int(self.headers.get("Content-Length", "0")), 8192)
+            form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            raw_code = (form.get("card_game_access_code", [""])[0] or "").strip()
+            try:
+                wait_minutes = max(5, min(120, int(form.get("card_game_wait_minutes", ["20"])[0] or 20)))
+            except ValueError:
+                wait_minutes = 20
+            values = {
+                "card_game_enabled": "1" if "card_game_enabled" in form else "0",
+                "card_game_wait_minutes": str(wait_minutes),
+            }
+            if raw_code:
+                if len(raw_code) < 8 or len(raw_code) > 80:
+                    return self.redirect_operator("cards", "Код должен содержать от 8 до 80 символов")
+                values["card_game_access_hash"] = password_hash(raw_code)
+            set_settings(db, values)
+            audit(db, actor, ip, "card_game_config", {
+                "enabled": values["card_game_enabled"] == "1",
+                "wait_minutes": wait_minutes,
+                "code_rotated": bool(raw_code),
+            })
+            db.execute(
+                "insert into events values (?,?,?,?,?)",
+                (int(time.time()), "card_game_config", actor, ip, json.dumps({"enabled": values["card_game_enabled"] == "1"})),
+            )
+            db.commit()
+            return self.redirect_operator("cards", "Настройки карточного стола сохранены")
 
         if path == "/operator/routing":
             length = min(int(self.headers.get("Content-Length", "0")), 256 * 1024)

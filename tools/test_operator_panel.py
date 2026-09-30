@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest import mock
 from contextlib import closing
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -161,6 +162,54 @@ class OperatorTests(unittest.TestCase):
                 )
                 db.commit()
                 self.panel.release_info.cache_clear()
+
+    def test_card_table_uses_hashed_code_and_device_bound_ticket(self):
+        """A player can only read their own lobby with a short-lived ticket."""
+        with closing(self.panel.conn()) as db:
+            self.panel.set_settings(db, {
+                "card_game_enabled": "1",
+                "card_game_access_hash": self.panel.password_hash("table-code-2026"),
+                "card_game_wait_minutes": "20",
+            })
+            db.commit()
+
+        def join(device, name, code="table-code-2026"):
+            body = json.dumps({"access_code": code, "display_name": name}).encode()
+            request = Request(
+                self.base + "/api/client/cards/join",
+                data=body,
+                headers={"Content-Type": "application/json", "X-Device-Id": device},
+            )
+            with urlopen(request) as response:
+                return json.load(response)
+
+        host = join("device-host-0001", "Алина")
+        self.assertEqual(host["state"], "waiting")
+        self.assertTrue(host["ticket"])
+        guest = join("device-guest-002", "Борис")
+        self.assertEqual(guest["state"], "ready")
+        self.assertEqual(guest["opponent_name"], "Алина")
+
+        request = Request(
+            self.base + "/api/client/cards/state?ticket=" + host["ticket"],
+            headers={"X-Device-Id": "device-host-0001"},
+        )
+        with urlopen(request) as response:
+            restored = json.load(response)
+        self.assertEqual(restored["state"], "ready")
+        self.assertEqual(restored["opponent_name"], "Борис")
+
+        wrong_device = Request(
+            self.base + "/api/client/cards/state?ticket=" + host["ticket"],
+            headers={"X-Device-Id": "some-other-device"},
+        )
+        with self.assertRaises(HTTPError) as error:
+            urlopen(wrong_device)
+        self.assertEqual(error.exception.code, 403)
+
+        with self.assertRaises(HTTPError) as denied:
+            join("device-denied-3", "Вера", code="bad-code")
+        self.assertEqual(denied.exception.code, 403)
 
     def test_automation_policy_and_release_guard(self):
         token = base64.b64encode(b"test:test").decode()

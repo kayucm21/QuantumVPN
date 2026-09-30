@@ -20,6 +20,7 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -79,6 +80,8 @@ import com.quantumvpn.diagnostics.VoluntaryDiagnosticReporter
 import com.quantumvpn.donations.DonationEntry
 import com.quantumvpn.donations.DonationRepository
 import com.quantumvpn.donations.DonationSummary
+import com.quantumvpn.cards.CardTableRepository
+import com.quantumvpn.cards.CardTableSnapshot
 import com.quantumvpn.profiles.ProfilesUiState
 import com.quantumvpn.profiles.ProfilesViewModel
 import com.quantumvpn.vpn.RuntimeSelectorGroup
@@ -97,6 +100,7 @@ private enum class V2Tab(val title: String, val icon: ImageVector) {
     Servers("Серверы", Icons.AutoMirrored.Filled.List),
     Statistics("Статистика", Icons.Default.Menu),
     Settings("Настройки", Icons.Default.Settings),
+    Cards("Карты", Icons.Default.CheckCircle),
 }
 
 /** Liquid Glass Orbit — cyan/blue glassmorphism matching the design mockup. */
@@ -293,7 +297,14 @@ fun QuantumVpnAppV2(
     val context = LocalContext.current
     var offlinePings by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     val pingItems = remember(groups) { groups.flatMap { it.items }.distinctBy { it.tag } }
-    LaunchedEffect(pingItems) {
+    // Probing every server on a screen where its result is invisible wastes
+    // radio time and can make lower-end phones feel less responsive. Keep
+    // live pings on the home/server pages and stop the worker elsewhere.
+    LaunchedEffect(tab, pingItems) {
+        if (tab != V2Tab.Home && tab != V2Tab.Servers) {
+            offlinePings = emptyMap()
+            return@LaunchedEffect
+        }
         while (true) {
             offlinePings = UnderlyingServerPing.measure(context, pingItems)
             kotlinx.coroutines.delay(20_000)
@@ -376,6 +387,7 @@ fun QuantumVpnAppV2(
                         },
                         onServers = { tab = V2Tab.Servers },
                         onSettings = { tab = V2Tab.Settings },
+                        onCards = { tab = V2Tab.Cards },
                     )
                     V2Tab.Servers -> V2Servers(groups, mainGroup?.tag, mainGroup?.selected, offlinePings, onSelectServer, activeProfile?.id, reliabilityScores, activeProfile?.updatedAtEpochMillis, state.busy) { viewModel.refreshAllSubscriptionsQuietly() }
                     V2Tab.Statistics -> V2Statistics(
@@ -410,6 +422,7 @@ fun QuantumVpnAppV2(
                         onKillSwitch = viewModel::setBlockNonVpnTraffic,
                         onCheckUpdate = onCheckUpdate,
                     )
+                    V2Tab.Cards -> V2Cards(onBack = { tab = V2Tab.Home })
                 }
             }
             V2BottomBar(tab = tab, onTab = { tab = it })
@@ -605,7 +618,7 @@ private fun serverRegion(name: String): String {
 private fun V2Home(
     policy: ClientPolicy,
     connected: Boolean, busy: Boolean, hasProfile: Boolean, server: String, ping: Int?, adBlock: Boolean, privacyScore: Int, stats: VpnSessionStats,
-    onConnect: () -> Unit, onServers: () -> Unit, onSettings: () -> Unit,
+    onConnect: () -> Unit, onServers: () -> Unit, onSettings: () -> Unit, onCards: () -> Unit,
 ) {
     val stateText = when {
         connected -> "Защищено"
@@ -648,6 +661,16 @@ private fun V2Home(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+                Surface(
+                    onClick = onCards,
+                    shape = CircleShape,
+                    color = Color(0xFF152344).copy(alpha = .86f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFC395FF).copy(alpha = .42f)),
+                    modifier = Modifier.size(34.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) { Text("♠", color = Color(0xFFCDA4FF), fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+                }
+                Spacer(Modifier.width(7.dp))
                 Surface(
                     onClick = onSettings,
                     shape = CircleShape,
@@ -727,6 +750,125 @@ private fun V2Home(
             }
             if (!hasProfile) {
                 Text("Загружаем встроенный список серверов…", color = Color(0xFF5CF5D0), fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            }
+        }
+    }
+}
+
+/**
+ * A deliberately small two-person lobby. The panel stores a PBKDF2 hash of
+ * the access code; the APK never receives the panel administrator password.
+ */
+@Composable
+private fun V2Cards(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val repository = remember(context) { CardTableRepository(context) }
+    val scope = rememberCoroutineScope()
+    var accessCode by rememberSaveable { mutableStateOf("") }
+    var displayName by rememberSaveable { mutableStateOf("") }
+    var snapshot by remember { mutableStateOf<CardTableSnapshot?>(null) }
+    var joining by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    // Poll only while a player is visibly waiting. The request is cancelled
+    // automatically when the user leaves this screen or the lobby becomes ready.
+    LaunchedEffect(snapshot?.ticket, snapshot?.waiting) {
+        val ticket = snapshot?.ticket ?: return@LaunchedEffect
+        if (snapshot?.waiting != true) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(5_000)
+            repository.state(ticket).onSuccess { refreshed ->
+                snapshot = refreshed
+                error = null
+            }.onFailure { failure ->
+                error = failure.message ?: "Не удалось обновить состояние стола"
+            }
+        }
+    }
+
+    V2AuroraBackdrop(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            V2AuroraHeader(
+                title = "Карточный стол",
+                subtitle = "Приватная игра для двух приглашённых игроков",
+                status = if (snapshot?.ready == true) "Игрок найден" else "Лобби",
+                statusPositive = true,
+            )
+            if (snapshot == null) {
+                V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Color(0xFFC395FF)) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Вход за стол", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        Text(
+                            "Введите код доступа, созданный владельцем в Quantum Control. Это не пароль администратора панели.",
+                            color = Aurora.Muted,
+                            fontSize = 12.sp,
+                        )
+                        OutlinedTextField(
+                            value = displayName,
+                            onValueChange = { displayName = it.take(24) },
+                            singleLine = true,
+                            label = { Text("Ваше имя") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = accessCode,
+                            onValueChange = { accessCode = it.take(80) },
+                            singleLine = true,
+                            label = { Text("Код доступа") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Button(
+                            onClick = {
+                                error = null
+                                joining = true
+                                scope.launch {
+                                    repository.join(accessCode, displayName)
+                                        .onSuccess { result ->
+                                            snapshot = result
+                                            accessCode = ""
+                                        }
+                                        .onFailure { failure -> error = failure.message ?: "Не удалось войти за стол" }
+                                    joining = false
+                                }
+                            },
+                            enabled = !joining && displayName.trim().length >= 2 && accessCode.length >= 8,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8B5CF6), contentColor = Color.White),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            if (joining) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                            else Text("Войти и найти игрока")
+                        }
+                    }
+                }
+            } else {
+                val table = snapshot!!
+                V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = if (table.ready) Aurora.Mint else Color(0xFFC395FF)) {
+                    Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(if (table.ready) "♠  Стол готов" else "♠  Ожидаем игрока", color = if (table.ready) Aurora.Mint else Color(0xFFCDA4FF), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Text("Привет, ${table.name}!", color = Aurora.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Text(table.message, color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 13.sp)
+                        if (table.opponentName.isNotBlank()) {
+                            Surface(color = Aurora.Mint.copy(alpha = .12f), shape = RoundedCornerShape(14.dp)) {
+                                Text("Ваш соперник: ${table.opponentName}", color = Aurora.Mint, modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp), fontWeight = FontWeight.SemiBold)
+                            }
+                        } else {
+                            CircularProgressIndicator(color = Color(0xFFCDA4FF), strokeWidth = 3.dp, modifier = Modifier.size(34.dp))
+                            Text("Проверяем стол каждые 5 секунд", color = Aurora.Muted, fontSize = 11.sp)
+                        }
+                        Text("Стол #${table.tableId.uppercase()}", color = Aurora.Muted, fontSize = 11.sp)
+                    }
+                }
+            }
+            error?.let { message ->
+                V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Aurora.Danger) {
+                    Text(message, color = Aurora.Danger, fontSize = 12.sp, modifier = Modifier.padding(14.dp))
+                }
+            }
+            TextButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                Text("← На главную", color = Aurora.Mint)
             }
         }
     }
@@ -1584,7 +1726,9 @@ private fun V2BottomBar(tab: V2Tab, onTab: (V2Tab) -> Unit) = Surface(
         Modifier.fillMaxWidth().padding(horizontal = 7.dp, vertical = 7.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
     ) {
-        V2Tab.entries.forEach { item ->
+        // Cards is opened from the compact home shortcut. Keeping four fixed
+        // bottom actions preserves tap targets on small Android screens.
+        V2Tab.entries.filter { it != V2Tab.Cards }.forEach { item ->
             val selected = item == tab
             Surface(
                 onClick = { onTab(item) },

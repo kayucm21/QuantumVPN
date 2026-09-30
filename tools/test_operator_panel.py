@@ -211,6 +211,62 @@ class OperatorTests(unittest.TestCase):
             join("device-denied-3", "Вера", code="bad-code")
         self.assertEqual(denied.exception.code, 403)
 
+    def test_card_game_deal_is_server_authoritative_and_wallet_is_virtual(self):
+        with closing(self.panel.conn()) as db:
+            self.panel.set_settings(db, {
+                "card_game_enabled": "1",
+                "card_game_access_hash": self.panel.password_hash("durak-code-2026"),
+                "card_game_start_coins": "1200",
+            })
+            db.commit()
+
+        def request(device, path, payload):
+            body = json.dumps(payload).encode()
+            with urlopen(Request(
+                self.base + path,
+                data=body,
+                headers={"Content-Type": "application/json", "X-Device-Id": device},
+            )) as response:
+                return json.load(response)
+
+        host = request("durak-host-0001", "/api/client/cards/join", {
+            "access_code": "durak-code-2026", "display_name": "Игрок А",
+        })
+        guest = request("durak-guest-002", "/api/client/cards/join", {
+            "access_code": "durak-code-2026", "display_name": "Игрок Б",
+        })
+        self.assertEqual(host["q_coins"], 1200)
+        self.assertEqual(guest["q_coins"], 1200)
+
+        host_ready = request("durak-host-0001", "/api/client/cards/action", {
+            "ticket": host["ticket"], "action": "ready",
+        })
+        self.assertEqual(host_ready["game_phase"], "ready")
+        guest_ready = request("durak-guest-002", "/api/client/cards/action", {
+            "ticket": guest["ticket"], "action": "ready",
+        })
+        self.assertEqual(guest_ready["game_phase"], "playing")
+        self.assertEqual(len(guest_ready["hand"]), 6)
+
+        host_state_request = Request(
+            self.base + "/api/client/cards/state?ticket=" + host["ticket"],
+            headers={"X-Device-Id": "durak-host-0001"},
+        )
+        with urlopen(host_state_request) as response:
+            host_state = json.load(response)
+        attacked = request("durak-host-0001", "/api/client/cards/action", {
+            "ticket": host["ticket"], "action": "attack", "card": host_state["hand"][0],
+        })
+        self.assertEqual(len(attacked["table_cards"]), 1)
+        self.assertNotIn(host_state["hand"][0], attacked["hand"])
+
+        with closing(self.panel.conn()) as db:
+            wallet = db.execute(
+                "select q_coins from card_wallets where device=?",
+                (self.panel.device_id("durak-host-0001"),),
+            ).fetchone()
+        self.assertEqual(wallet[0], 1200)
+
     def test_automation_policy_and_release_guard(self):
         token = base64.b64encode(b"test:test").decode()
         body = (

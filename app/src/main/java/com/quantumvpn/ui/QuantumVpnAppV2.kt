@@ -1,8 +1,10 @@
 package com.quantumvpn.ui
 
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -62,18 +64,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.quantumvpn.diagnostics.DiagnosticState
 import com.quantumvpn.diagnostics.SessionTrafficRecord
 import com.quantumvpn.diagnostics.VoluntaryDiagnosticReporter
@@ -106,6 +115,9 @@ private enum class V2Tab(val title: String, val icon: ImageVector) {
 /** Liquid Glass Orbit — cyan/blue glassmorphism matching the design mockup. */
 private val LocalAuroraDark = staticCompositionLocalOf { true }
 private val LocalAuroraAccent = staticCompositionLocalOf { Color(0xFF3DE7FF) }
+private val LocalAuroraBackgroundStyle = staticCompositionLocalOf { AppBackgroundStyle.Aurora }
+private val LocalAuroraCustomBackground = staticCompositionLocalOf<String?> { null }
+private val LocalAuroraTouchBubbles = staticCompositionLocalOf { true }
 private object Aurora {
     val Night: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF040B16) else Color(0xFFF3F7FB)
     val VioletNight: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF071526) else Color(0xFFE8F1FA)
@@ -130,19 +142,50 @@ private fun V2AuroraBackdrop(
 ) {
     val mint = Aurora.Mint
     val dark = LocalAuroraDark.current
+    val backgroundStyle = LocalAuroraBackgroundStyle.current
+    val backgroundUri = LocalAuroraCustomBackground.current
+    val context = LocalContext.current
     val violetBloom = if (dark) Color(0xFF8B5CF6) else Color(0xFF6D4AFF)
     val tealBloom = if (dark) Color(0xFF2EE5C8) else Color(0xFF00A58B)
+    val customBitmap by produceState<android.graphics.Bitmap?>(
+        initialValue = null,
+        key1 = backgroundStyle,
+        key2 = backgroundUri,
+    ) {
+        value = if (backgroundStyle == AppBackgroundStyle.Custom && !backgroundUri.isNullOrBlank()) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    decodeCustomBackground(context, Uri.parse(backgroundUri))
+                }.getOrNull()
+            }
+        } else {
+            null
+        }
+    }
     Box(
         modifier = modifier.background(
             Brush.verticalGradient(
                 listOf(
-                    if (dark) Color(0xFF100A2A) else Color(0xFFF4F7FF),
+                    when (backgroundStyle) {
+                        AppBackgroundStyle.NightCity -> if (dark) Color(0xFF110B24) else Color(0xFFF1F0FA)
+                        AppBackgroundStyle.DeepSpace -> if (dark) Color(0xFF020815) else Color(0xFFF1F7FF)
+                        else -> if (dark) Color(0xFF100A2A) else Color(0xFFF4F7FF)
+                    },
                     Aurora.VioletNight,
                     Aurora.Night,
                 ),
             ),
         ),
     ) {
+        customBitmap?.let { bitmap ->
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                alpha = if (dark) .34f else .18f,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
         Canvas(Modifier.fillMaxSize()) {
             val span = maxOf(size.width, size.height)
             drawCircle(
@@ -160,9 +203,35 @@ private fun V2AuroraBackdrop(
                 radius = span * .33f,
                 center = Offset(size.width * .78f, size.height * .86f),
             )
+            if (backgroundStyle == AppBackgroundStyle.NightCity) {
+                val building = Color(0xFF15233D).copy(alpha = if (dark) .62f else .18f)
+                val glow = Color(0xFF9B7BFF).copy(alpha = if (dark) .32f else .18f)
+                (0..8).forEach { index ->
+                    val width = size.width * (.06f + (index % 3) * .025f)
+                    val height = size.height * (.12f + (index % 5) * .035f)
+                    val left = size.width * index / 9f
+                    drawRect(building, topLeft = Offset(left, size.height - height), size = androidx.compose.ui.geometry.Size(width, height))
+                    drawLine(glow, Offset(left + width * .15f, size.height - height + 9f), Offset(left + width * .85f, size.height - height + 9f), strokeWidth = 2f)
+                }
+            }
         }
         content()
     }
+}
+
+/** Decode a gallery background at display size so a camera photo cannot make the UI stutter or OOM. */
+private fun decodeCustomBackground(context: android.content.Context, uri: Uri): android.graphics.Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    val largest = maxOf(bounds.outWidth, bounds.outHeight)
+    var sample = 1
+    while (largest / sample > 1440) sample *= 2
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+    }
+    return context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
 }
 
 @Composable
@@ -344,7 +413,13 @@ fun QuantumVpnAppV2(
     } else {
         remoteAccent(policy.branding.accentHex)
     }
-    CompositionLocalProvider(LocalAuroraDark provides dark, LocalAuroraAccent provides adaptiveAccent) {
+    CompositionLocalProvider(
+        LocalAuroraDark provides dark,
+        LocalAuroraAccent provides adaptiveAccent,
+        LocalAuroraBackgroundStyle provides state.settings.appBackgroundStyle,
+        LocalAuroraCustomBackground provides state.settings.customBackgroundUri.takeIf { it.isNotBlank() },
+        LocalAuroraTouchBubbles provides state.settings.touchBubblesEnabled,
+    ) {
     // V2BottomBar owns the navigation-bar inset. Applying safeDrawingPadding here
     // as well reserved the bottom inset twice and lifted the controls above the
     // Android system buttons.
@@ -410,12 +485,18 @@ fun QuantumVpnAppV2(
                         notifications = !state.settings.quietMode,
                         protectUnknownWifi = state.settings.protectUnknownWifi,
                         travelMode = state.settings.travelModeEnabled,
+                        backgroundStyle = state.settings.appBackgroundStyle,
+                        customBackgroundUri = state.settings.customBackgroundUri,
+                        touchBubblesEnabled = state.settings.touchBubblesEnabled,
                         onTheme = viewModel::setTheme,
                         onDynamicColor = viewModel::setUseDynamicColor,
                         onAutoConnect = viewModel::setAutoConnectOnCellular,
                         onNotifications = { enabled -> viewModel.setQuietMode(!enabled) },
                         onProtectUnknownWifi = viewModel::setProtectUnknownWifi,
                         onTravelMode = viewModel::setTravelModeEnabled,
+                        onBackgroundStyle = viewModel::setAppBackgroundStyle,
+                        onCustomBackgroundUri = viewModel::setCustomBackgroundUri,
+                        onTouchBubbles = viewModel::setTouchBubblesEnabled,
                         adBlock = state.settings.adBlockEnabled,
                         killSwitch = state.settings.blockNonVpnTraffic,
                         onAdBlock = viewModel::setAdBlockEnabled,
@@ -770,13 +851,13 @@ private fun V2Cards(onBack: () -> Unit) {
     var joining by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    // Poll only while a player is visibly waiting. The request is cancelled
-    // automatically when the user leaves this screen or the lobby becomes ready.
-    LaunchedEffect(snapshot?.ticket, snapshot?.waiting) {
+    // The server is the source of truth for hands and turns. Polling stops as
+    // soon as a match finishes and is cancelled when the screen is left.
+    LaunchedEffect(snapshot?.ticket, snapshot?.gamePhase) {
         val ticket = snapshot?.ticket ?: return@LaunchedEffect
-        if (snapshot?.waiting != true) return@LaunchedEffect
+        if (snapshot?.gamePhase == "finished") return@LaunchedEffect
         while (true) {
-            kotlinx.coroutines.delay(5_000)
+            kotlinx.coroutines.delay(if (snapshot?.waiting == true) 5_000 else 2_500)
             repository.state(ticket).onSuccess { refreshed ->
                 snapshot = refreshed
                 error = null
@@ -792,15 +873,30 @@ private fun V2Cards(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             V2AuroraHeader(
-                title = "Карточный стол",
-                subtitle = "Приватная игра для двух приглашённых игроков",
+                title = "Игры",
+                subtitle = "Дурак с друзьями · только виртуальные Q-coins",
                 status = if (snapshot?.ready == true) "Игрок найден" else "Лобби",
                 statusPositive = true,
             )
+            snapshot?.let { table ->
+                V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Color(0xFFFFC857)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Q", color = Color(0xFFFFD36E), fontWeight = FontWeight.Black, fontSize = 22.sp)
+                        Column(Modifier.weight(1f).padding(start = 10.dp)) {
+                            Text("${table.qCoins} Q-coins", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text("Виртуальные игровые очки · без вывода и покупок", color = Aurora.Muted, fontSize = 10.sp)
+                        }
+                        Text("♠", color = Color(0xFFC395FF), fontSize = 26.sp)
+                    }
+                }
+            }
             if (snapshot == null) {
                 V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Color(0xFFC395FF)) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("Вход за стол", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        Text("Дурак с друзьями", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                         Text(
                             "Введите код доступа, созданный владельцем в Quantum Control. Это не пароль администратора панели.",
                             color = Aurora.Muted,
@@ -845,6 +941,16 @@ private fun V2Cards(onBack: () -> Unit) {
                 }
             } else {
                 val table = snapshot!!
+                fun play(action: String, card: String = "") {
+                    joining = true
+                    error = null
+                    scope.launch {
+                        repository.action(table.ticket, action, card)
+                            .onSuccess { snapshot = it }
+                            .onFailure { error = it.message ?: "Не удалось выполнить ход" }
+                        joining = false
+                    }
+                }
                 V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = if (table.ready) Aurora.Mint else Color(0xFFC395FF)) {
                     Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(if (table.ready) "♠  Стол готов" else "♠  Ожидаем игрока", color = if (table.ready) Aurora.Mint else Color(0xFFCDA4FF), fontSize = 24.sp, fontWeight = FontWeight.Bold)
@@ -853,6 +959,30 @@ private fun V2Cards(onBack: () -> Unit) {
                         if (table.opponentName.isNotBlank()) {
                             Surface(color = Aurora.Mint.copy(alpha = .12f), shape = RoundedCornerShape(14.dp)) {
                                 Text("Ваш соперник: ${table.opponentName}", color = Aurora.Mint, modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp), fontWeight = FontWeight.SemiBold)
+                            }
+                            when (table.gamePhase) {
+                                "ready" -> {
+                                    Text(
+                                        "Подтвердите готовность. Раздача начнётся, когда подтвердит второй игрок.",
+                                        color = Aurora.Muted,
+                                        textAlign = TextAlign.Center,
+                                        fontSize = 11.sp,
+                                    )
+                                    Button(
+                                        onClick = { play("ready") },
+                                        enabled = table.canReady && !joining,
+                                        colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
+                                    ) { Text(if (table.canReady) "Готов к раздаче" else "Ждём второго игрока") }
+                                }
+                                "playing" -> V2DurakTablePreview(table = table, busy = joining, onAction = ::play)
+                                "finished" -> {
+                                    Text(
+                                        if (table.winner == table.seat) "Вы выиграли: +25 Q-coins" else "Партия завершена. Победил ${table.opponentName}.",
+                                        color = if (table.winner == table.seat) Aurora.Mint else Aurora.Muted,
+                                        textAlign = TextAlign.Center,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                }
                             }
                         } else {
                             CircularProgressIndicator(color = Color(0xFFCDA4FF), strokeWidth = 3.dp, modifier = Modifier.size(34.dp))
@@ -872,6 +1002,100 @@ private fun V2Cards(onBack: () -> Unit) {
             }
         }
     }
+}
+
+/** Compact visual table backed by server-authoritative cards and turn checks. */
+@Composable
+private fun V2DurakTablePreview(table: CardTableSnapshot, busy: Boolean, onAction: (String, String) -> Unit) {
+    Surface(
+        color = Aurora.Night.copy(alpha = .36f),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .62f)),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Дурак с друзьями", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            Text(
+                if (table.canAttack) "Ваш ход: атакуйте" else if (table.canDefend) "Ваш ход: отбейте карту" else "Ход соперника",
+                color = if (table.canAttack || table.canDefend) Aurora.Mint else Aurora.Muted,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            Text("Козырь ${durakCardLabel(table.trump)} · колода ${table.deckCount}", color = Aurora.Muted, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp))
+            if (table.tableCards.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    table.tableCards.forEach { pair ->
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            V2DurakCard(pair.attack, enabled = false) {}
+                            if (pair.defense.isNotBlank()) {
+                                Spacer(Modifier.height(3.dp))
+                                V2DurakCard(pair.defense, enabled = false) {}
+                            }
+                        }
+                    }
+                }
+            }
+            Text("Соперник · ${table.opponentCards} карт", color = Aurora.Muted, fontSize = 10.sp, modifier = Modifier.padding(top = 11.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 7.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                table.hand.forEach { card ->
+                    V2DurakCard(
+                        card = card,
+                        enabled = !busy && (table.canAttack || table.canDefend),
+                    ) {
+                        onAction(if (table.canAttack) "attack" else "defend", card)
+                    }
+                }
+            }
+            if (table.canTake || table.canPass) {
+                Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (table.canTake) {
+                        Button(
+                            onClick = { onAction("take", "") },
+                            enabled = !busy,
+                            colors = ButtonDefaults.buttonColors(containerColor = Aurora.Violet, contentColor = Color.White),
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Беру") }
+                    }
+                    if (table.canPass) {
+                        Button(
+                            onClick = { onAction("pass", "") },
+                            enabled = !busy,
+                            colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Передать ход") }
+                    }
+                }
+            }
+            Text("Q-coins виртуальные: без оплаты, вывода и влияния на VPN.", color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 10.sp, modifier = Modifier.padding(top = 10.dp))
+        }
+    }
+}
+
+@Composable
+private fun V2DurakCard(card: String, enabled: Boolean, onClick: () -> Unit) {
+    val label = durakCardLabel(card)
+    val red = label.contains('♥') || label.contains('♦')
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        color = if (enabled) Color(0xFFF7FBFF) else Color(0xFFDCE8F3),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.size(width = 42.dp, height = 58.dp),
+    ) {
+        Text(label, color = if (red) Color(0xFFC33861) else Color(0xFF142638), fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.padding(6.dp))
+    }
+}
+
+private fun durakCardLabel(card: String): String {
+    if (card.length < 2) return "?"
+    val suit = when (card.last()) { 'S' -> '♠'; 'H' -> '♥'; 'D' -> '♦'; 'C' -> '♣'; else -> '?' }
+    return card.dropLast(1) + " " + suit
 }
 
 @Composable
@@ -1134,6 +1358,9 @@ private fun V2Settings(
     notifications: Boolean,
     protectUnknownWifi: Boolean,
     travelMode: Boolean,
+    backgroundStyle: AppBackgroundStyle,
+    customBackgroundUri: String,
+    touchBubblesEnabled: Boolean,
     adBlock: Boolean,
     killSwitch: Boolean,
     onTheme: (ThemeMode) -> Unit,
@@ -1142,6 +1369,9 @@ private fun V2Settings(
     onNotifications: (Boolean) -> Unit,
     onProtectUnknownWifi: (Boolean) -> Unit,
     onTravelMode: (Boolean) -> Unit,
+    onBackgroundStyle: (AppBackgroundStyle) -> Unit,
+    onCustomBackgroundUri: (String) -> Unit,
+    onTouchBubbles: (Boolean) -> Unit,
     onAdBlock: (Boolean) -> Unit,
     onKillSwitch: (Boolean) -> Unit,
     onCheckUpdate: () -> Unit,
@@ -1155,6 +1385,19 @@ private fun V2Settings(
     var aboutOpen by rememberSaveable { mutableStateOf(false) }
     var donateOpen by rememberSaveable { mutableStateOf(false) }
     var moreOpen by rememberSaveable { mutableStateOf(false) }
+    var appearanceOpen by rememberSaveable { mutableStateOf(false) }
+    if (appearanceOpen) {
+        V2AppearancePage(
+            style = backgroundStyle,
+            customBackgroundUri = customBackgroundUri,
+            touchBubblesEnabled = touchBubblesEnabled,
+            onStyle = onBackgroundStyle,
+            onCustomBackgroundUri = onCustomBackgroundUri,
+            onTouchBubbles = onTouchBubbles,
+            onBack = { appearanceOpen = false },
+        )
+        return
+    }
     if (privacyOpen) {
         V2PrivacyPage(
             onBack = { privacyOpen = false },
@@ -1299,6 +1542,11 @@ private fun V2Settings(
                     }
                 }
             }
+            V2MiniNav(
+                "Фон и эффекты",
+                onClick = { appearanceOpen = true },
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            )
         }
         Spacer(Modifier.height(8.dp))
         V2SettingsGroup("Сервис") {
@@ -1309,6 +1557,124 @@ private fun V2Settings(
             }
         }
         if (logStatus.isNotBlank()) Text(logStatus, color = Aurora.Muted, fontSize = 10.sp, modifier = Modifier.padding(top = 5.dp))
+        }
+    }
+}
+
+@Composable
+private fun V2AppearancePage(
+    style: AppBackgroundStyle,
+    customBackgroundUri: String,
+    touchBubblesEnabled: Boolean,
+    onStyle: (AppBackgroundStyle) -> Unit,
+    onCustomBackgroundUri: (String) -> Unit,
+    onTouchBubbles: (Boolean) -> Unit,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            onCustomBackgroundUri(uri.toString())
+            onStyle(AppBackgroundStyle.Custom)
+        }
+    }
+    V2AuroraBackdrop(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp).padding(bottom = 24.dp),
+        ) {
+            TextButton(onClick = onBack) { Text("← Назад", color = Aurora.Mint) }
+            V2AuroraHeader("Оформление", "Фоны сохраняются только на этом устройстве", "ЛОКАЛЬНО", true)
+            Spacer(Modifier.height(14.dp))
+            Text("Фон приложения", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            Text("Выберите готовый стиль или свою фотографию из галереи.", color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
+            V2BackgroundChoice(
+                title = "Северное сияние",
+                subtitle = "Мятный свет и горы",
+                style = AppBackgroundStyle.Aurora,
+                selected = style == AppBackgroundStyle.Aurora,
+                colors = listOf(Color(0xFF142B55), Color(0xFF22D9C0), Color(0xFF6C55E8)),
+                onClick = { onStyle(AppBackgroundStyle.Aurora) },
+            )
+            Spacer(Modifier.height(8.dp))
+            V2BackgroundChoice(
+                title = "Город ночью",
+                subtitle = "Фиолетовые огни и стекло",
+                style = AppBackgroundStyle.NightCity,
+                selected = style == AppBackgroundStyle.NightCity,
+                colors = listOf(Color(0xFF221137), Color(0xFF4A317C), Color(0xFF0BD7E8)),
+                onClick = { onStyle(AppBackgroundStyle.NightCity) },
+            )
+            Spacer(Modifier.height(8.dp))
+            V2BackgroundChoice(
+                title = "Глубокий космос",
+                subtitle = "Спокойный тёмный градиент",
+                style = AppBackgroundStyle.DeepSpace,
+                selected = style == AppBackgroundStyle.DeepSpace,
+                colors = listOf(Color(0xFF020818), Color(0xFF083A60), Color(0xFF18305C)),
+                onClick = { onStyle(AppBackgroundStyle.DeepSpace) },
+            )
+            Spacer(Modifier.height(8.dp))
+            V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Color(0xFF8B5CF6)) {
+                Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("▣", color = Color(0xFFC6A8FF), fontSize = 24.sp)
+                    Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                        Text("Мой фон", color = Aurora.Text, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (customBackgroundUri.isBlank()) "Выберите JPG, PNG или WebP" else "Фотография выбрана и хранится на телефоне",
+                            color = Aurora.Muted,
+                            fontSize = 11.sp,
+                        )
+                    }
+                    TextButton(onClick = { picker.launch(arrayOf("image/*")) }) {
+                        Text(if (customBackgroundUri.isBlank()) "Выбрать" else "Изменить", color = Aurora.Mint)
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            V2SettingsGroup("Эффекты") {
+                V2CompactToggle("Пузырьки при касании", touchBubblesEnabled, onTouchBubbles)
+                Text("Лёгкая системная ripple-анимация кнопок. Не влияет на VPN и не расходует сеть.", color = Aurora.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun V2BackgroundChoice(
+    title: String,
+    subtitle: String,
+    style: AppBackgroundStyle,
+    selected: Boolean,
+    colors: List<Color>,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        color = Color.Transparent,
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Aurora.Mint else Aurora.Border),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().background(Brush.horizontalGradient(colors.map { it.copy(alpha = .6f) })).padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Surface(color = Aurora.Night.copy(alpha = .48f), shape = CircleShape, modifier = Modifier.size(40.dp)) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(if (selected) "✓" else "◌", color = if (selected) Aurora.Mint else Aurora.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text(title, color = Aurora.Text, fontWeight = FontWeight.Bold)
+                Text(subtitle, color = Aurora.Text.copy(alpha = .78f), fontSize = 11.sp)
+            }
+            if (selected) Text("Выбран", color = Aurora.Mint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }

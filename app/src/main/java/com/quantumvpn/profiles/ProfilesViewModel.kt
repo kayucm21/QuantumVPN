@@ -915,6 +915,18 @@ class ProfilesViewModel(
         settingsStore.setUseDynamicColor(enabled)
     }
 
+    fun setAppBackgroundStyle(style: com.quantumvpn.ui.AppBackgroundStyle) = operation(markBusy = false) {
+        settingsStore.setAppBackgroundStyle(style)
+    }
+
+    fun setCustomBackgroundUri(uri: String) = operation(markBusy = false) {
+        settingsStore.setCustomBackgroundUri(uri)
+    }
+
+    fun setTouchBubblesEnabled(enabled: Boolean) = operation(markBusy = false) {
+        settingsStore.setTouchBubblesEnabled(enabled)
+    }
+
     fun setHideExitIp(enabled: Boolean) = operation(markBusy = false) {
         settingsStore.setHideExitIp(enabled)
     }

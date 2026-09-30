@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import re
+import random
 import secrets
 import shutil
 import sqlite3
@@ -67,14 +68,17 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.9-control.1"
-VERSION = "5.10.9"
-VERSION_CODE = 134
-DEFAULT_NOTE = "QuantumVPN 5.10.9: карточный стол с защищённым кодом доступа, оптимизированный интерфейс и обновлённый Quantum Control."
+PANEL_BUILD = "5.10.10-control.1"
+VERSION = "5.10.10"
+VERSION_CODE = 135
+DEFAULT_NOTE = "QuantumVPN 5.10.10: серверная игра «Дурак с друзьями», виртуальные Q-coins, локальные фоны и обновлённый Quantum Control."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 CARD_GAME_TICKET_TTL = 6 * 3600
 CARD_GAME_WAIT_TTL = 20 * 60
+DURAK_SUITS = "SHDC"
+DURAK_RANKS = ("6", "7", "8", "9", "10", "J", "Q", "K", "A")
+_DURAK_RANK_VALUE = {rank: index for index, rank in enumerate(DURAK_RANKS)}
 _DB_INIT_LOCK = threading.Lock()
 _DB_READY = False
 _LAST_EVENT_CLEANUP = 0
@@ -262,6 +266,57 @@ def card_game_name(value: str) -> str:
     return name
 
 
+def durak_new_game() -> dict:
+    """Create one compact, server-authoritative two-player Durak deal."""
+    deck = [rank + suit for suit in DURAK_SUITS for rank in DURAK_RANKS]
+    random.SystemRandom().shuffle(deck)
+    hands = {"host": [], "guest": []}
+    for _ in range(6):
+        hands["host"].append(deck.pop(0))
+        hands["guest"].append(deck.pop(0))
+    return {
+        "phase": "ready",
+        "ready": {"host": False, "guest": False},
+        "deck": deck,
+        "trump": deck[-1] if deck else "",
+        "hands": hands,
+        "attacker": "host",
+        "table": [],
+        "winner": "",
+    }
+
+
+def durak_rank(card: str) -> str:
+    return card[:-1] if len(card) >= 2 else ""
+
+
+def durak_beats(defense: str, attack: str, trump: str) -> bool:
+    if len(defense) < 2 or len(attack) < 2 or len(trump) < 2:
+        return False
+    defense_suit, attack_suit, trump_suit = defense[-1], attack[-1], trump[-1]
+    if defense_suit == attack_suit:
+        return _DURAK_RANK_VALUE.get(durak_rank(defense), -1) > _DURAK_RANK_VALUE.get(durak_rank(attack), -1)
+    return defense_suit == trump_suit and attack_suit != trump_suit
+
+
+def durak_draw(game: dict, seat: str) -> None:
+    hand = game["hands"][seat]
+    while len(hand) < 6 and game["deck"]:
+        hand.append(game["deck"].pop(0))
+
+
+def durak_finish_if_needed(game: dict) -> str:
+    if game["deck"]:
+        return ""
+    empty = [seat for seat in ("host", "guest") if not game["hands"].get(seat)]
+    if not empty:
+        return ""
+    winner = "guest" if empty[0] == "host" else "host"
+    game["phase"] = "finished"
+    game["winner"] = winner
+    return winner
+
+
 def totp_secret_b32() -> str:
     return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
 
@@ -399,7 +454,15 @@ def conn():
                     host_name text not null,
                     guest_device text not null default '',
                     guest_name text not null default '',
-                    last_action text not null default ''
+                    last_action text not null default '',
+                    game_json text not null default ''
+                );
+                create table if not exists card_wallets (
+                    device text primary key,
+                    display_name text not null default '',
+                    q_coins integer not null default 1200,
+                    created_at integer not null default 0,
+                    updated_at integer not null default 0
                 );
                 create index if not exists idx_events_device on events(device);
                 create index if not exists idx_events_kind_ts on events(kind, ts);
@@ -413,6 +476,7 @@ def conn():
                 create index if not exists idx_routing_revisions_created on routing_revisions(created_at desc);
                 create index if not exists idx_routing_revisions_revision on routing_revisions(revision desc);
                 create index if not exists idx_card_tables_state_updated on card_tables(state, updated_at desc);
+                create index if not exists idx_card_wallets_updated on card_wallets(updated_at desc);
                 """
             )
             defaults = {
@@ -526,9 +590,18 @@ def conn():
                 "card_game_enabled": "1",
                 "card_game_access_hash": "",
                 "card_game_wait_minutes": "20",
+                "card_game_start_coins": "1200",
             }
             for key, value in defaults.items():
                 db.execute("insert or ignore into settings values (?,?)", (key, value))
+            card_columns = {row[1] for row in db.execute("pragma table_info(card_tables)")}
+            if "game_json" not in card_columns:
+                db.execute("alter table card_tables add column game_json text not null default ''")
+            # The wallet contains virtual Q-coins only. No purchase, withdrawal
+            # or exchange data is stored anywhere in the operator database.
+            db.execute(
+                "create table if not exists card_wallets (device text primary key, display_name text not null default '', q_coins integer not null default 1200, created_at integer not null default 0, updated_at integer not null default 0)"
+            )
             # Оповещения о новой версии всегда включены — нельзя выключить.
             db.execute(
                 "insert or replace into settings(key,value) values ('update_notifications_enabled','1')"
@@ -2136,7 +2209,7 @@ def render_login(error=""):
     </form></section></main>"""
 
 
-def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None):
+def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None):
     checked = lambda key: "checked" if s.get(key) == "1" else ""
     events = "".join(
         f"<tr><td>{time.strftime('%d.%m %H:%M', time.localtime(x[0]))}</td><td>{html.escape(x[1])}</td>"
@@ -2222,6 +2295,12 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         f"<td>{time.strftime('%d.%m %H:%M', time.localtime(row[2]))}</td></tr>"
         for row in (card_rows or [])
     ) or "<tr><td colspan=5>Открытых столов нет</td></tr>"
+    card_wallet_html = "".join(
+        f"<tr><td><code>{html.escape(str(row[0])[:20])}</code></td><td>{html.escape(str(row[1] or 'Игрок'))}</td>"
+        f"<td class=ok><b>{max(0, int(row[2] or 0)):,}</b> Q-coins</td>"
+        f"<td>{time.strftime('%d.%m %H:%M', time.localtime(int(row[3] or 0))) if row[3] else '—'}</td></tr>"
+        for row in (card_wallet_rows or [])
+    ) or "<tr><td colspan=4>Игроки ещё не входили за стол</td></tr>"
     card_code_state = "настроен" if s.get("card_game_access_hash") else "не настроен"
     totp_setup = ""
     if not role_at_least(actor_role, "operator"):
@@ -2463,7 +2542,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a class="{'active' if section == 'latency' else ''}" href="/operator?tab=latency"><span class=nav-ico>▤</span> Ноды</a>
         <a class="{'active' if section == 'routing' else ''}" href="/operator?tab=routing"><span class=nav-ico>⇄</span> Маршрутизация</a>
         <a class="{'active' if section in ('users','devices','fleet') else ''}" href="/operator?tab=users"><span class=nav-ico>♧</span> Пользователи</a>
-        <a class="{'active' if section == 'cards' else ''}" href="/operator?tab=cards"><span class=nav-ico>♠</span> Карточный стол</a>
+        <a class="{'active' if section == 'cards' else ''}" href="/operator?tab=cards"><span class=nav-ico>♠</span> Игры и награды</a>
         <a class="{'active' if section == 'service' else ''}" href="/operator?tab=service"><span class=nav-ico>▭</span> Подписки</a>
         <a class="{'active' if section in ('release','features','branding') else ''}" href="/operator?tab=release"><span class=nav-ico>◇</span> Релизы</a>
         <a class="{'active' if section in ('incidents','logs','reports') else ''}" href="/operator?tab=incidents"><span class=nav-ico>♧</span> События</a>
@@ -2755,7 +2834,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
 
     <section class=grid {show('cards')}>
       <form class=card method=post action=/operator/cards>
-        <h2>Карточный стол</h2>
+        <h2>Игры и награды</h2>
         <p class=muted>Мобильные игроки входят по отдельному коду. Пароль администратора не передаётся в APK и не хранится на телефоне.</p>
         <label><input type=checkbox name=card_game_enabled {checked('card_game_enabled')}> Включить карточный стол</label>
         <label>Новый код доступа<input type=password name=card_game_access_code minlength=8 maxlength=80 autocomplete=new-password placeholder="Минимум 8 символов"></label>
@@ -2767,6 +2846,20 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <h2>Открытые столы</h2>
         <p class=muted>Стол на двух игроков. Когда второй игрок входит, состояние меняется на «Готов» без обновления APK.</p>
         <table><thead><tr><th>Стол</th><th>Первый игрок</th><th>Второй игрок</th><th>Состояние</th><th>Обновлён</th></tr></thead><tbody>{card_table_html}</tbody></table>
+      </section>
+    </section>
+    <section class=grid {show('cards')}>
+      <form class=card method=post action=/operator/cards/wallet>
+        <h2>Виртуальные Q-coins</h2>
+        <p class=muted>Очки работают только в игре. Это не деньги: их нельзя купить, вывести, обменять или использовать вне приложения.</p>
+        <label>Устройство игрока<input name=device minlength=4 maxlength=128 required placeholder="ID из таблицы справа"></label>
+        <label>Выдать очков<input type=number name=amount min=1 max=100000 value=100 required></label>
+        <button>Выдать Q-coins</button>
+      </form>
+      <section class=card>
+        <h2>Игроки и баланс</h2>
+        <p class=muted>Баланс обновляется после входа в игру. Секреты, логины и реальные платёжные данные здесь не хранятся.</p>
+        <table><thead><tr><th>Устройство</th><th>Игрок</th><th>Баланс</th><th>Активность</th></tr></thead><tbody>{card_wallet_html}</tbody></table>
       </section>
     </section>
 
@@ -3057,9 +3150,9 @@ class App(BaseHTTPRequestHandler):
         db.execute("create index if not exists idx_donations_device on donations(device)")
 
     def card_game_payload(self, db, device: str, table_id: str):
-        """Return only the caller's own lobby state, never other table data."""
+        """Return only the caller's own state; the opponent hand never leaves the server."""
         row = db.execute(
-            "select id,created_at,updated_at,state,host_device,host_name,guest_device,guest_name,last_action "
+            "select id,created_at,updated_at,state,host_device,host_name,guest_device,guest_name,last_action,game_json "
             "from card_tables where id=?",
             (table_id,),
         ).fetchone()
@@ -3072,6 +3165,23 @@ class App(BaseHTTPRequestHandler):
         else:
             return None
         state = row[3]
+        wallet = db.execute(
+            "select q_coins from card_wallets where device=?",
+            (device,),
+        ).fetchone()
+        try:
+            game = json.loads(row[9] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            game = {}
+        phase = str(game.get("phase") or ("ready" if state == "ready" else "waiting"))
+        table_cards = game.get("table") if isinstance(game.get("table"), list) else []
+        hand = game.get("hands", {}).get(seat, []) if isinstance(game.get("hands"), dict) else []
+        if not isinstance(hand, list):
+            hand = []
+        attacker = str(game.get("attacker") or "host")
+        defender = "guest" if attacker == "host" else "host"
+        all_defended = bool(table_cards) and all(isinstance(item, dict) and item.get("defense") for item in table_cards)
+        ready_flags = game.get("ready") if isinstance(game.get("ready"), dict) else {}
         return {
             "table_id": row[0],
             "state": state,
@@ -3081,10 +3191,29 @@ class App(BaseHTTPRequestHandler):
             "created_at": int(row[1]),
             "updated_at": int(row[2]),
             "waiting": state == "waiting",
-            "ready": state == "ready",
+            "ready": state in ("ready", "playing", "finished"),
+            "q_coins": max(0, int(wallet[0] or 0)) if wallet else 0,
+            "game_phase": phase,
+            "hand": [str(card) for card in hand if re.fullmatch(r"(?:10|[6-9JQKA])[SHDC]", str(card))],
+            "opponent_cards": len(game.get("hands", {}).get("guest" if seat == "host" else "host", [])) if isinstance(game.get("hands"), dict) else 0,
+            "table_cards": [
+                {"attack": str(item.get("attack") or ""), "defense": str(item.get("defense") or "")}
+                for item in table_cards if isinstance(item, dict)
+            ],
+            "trump": str(game.get("trump") or ""),
+            "deck_count": len(game.get("deck", [])) if isinstance(game.get("deck"), list) else 0,
+            "attacker": attacker,
+            "winner": str(game.get("winner") or ""),
+            "can_ready": phase == "ready" and not bool(ready_flags.get(seat)),
+            "can_attack": phase == "playing" and seat == attacker,
+            "can_defend": phase == "playing" and seat == defender and any(not item.get("defense") for item in table_cards if isinstance(item, dict)),
+            "can_take": phase == "playing" and seat == defender and bool(table_cards),
+            "can_pass": phase == "playing" and seat == attacker and all_defended,
             "message": (
                 "Ожидаем второго игрока…" if state == "waiting"
-                else "Игрок подключился. Стол готов."
+                else "Игрок подключился. Подтвердите готовность к раздаче." if phase == "ready"
+                else "Раздача началась." if phase == "playing"
+                else "Партия завершена."
             ),
         }
 
@@ -3099,6 +3228,12 @@ class App(BaseHTTPRequestHandler):
             raise PermissionError("Неверный код доступа")
         name = card_game_name(display_name)
         now = int(time.time())
+        starting_coins = max(0, min(100_000, int(s.get("card_game_start_coins") or 1200)))
+        db.execute(
+            "insert into card_wallets(device,display_name,q_coins,created_at,updated_at) values (?,?,?,?,?) "
+            "on conflict(device) do update set display_name=excluded.display_name, updated_at=excluded.updated_at",
+            (device, name, starting_coins, now, now),
+        )
         wait_seconds = max(5, min(120, int(s.get("card_game_wait_minutes") or 20))) * 60
         # Waiting rooms are short lived. This avoids an abandoned device
         # blocking the next player forever while retaining an audit event.
@@ -3108,7 +3243,7 @@ class App(BaseHTTPRequestHandler):
             (now, now - wait_seconds),
         )
         row = db.execute(
-            "select id from card_tables where state in ('waiting','ready') and (host_device=? or guest_device=?) "
+            "select id from card_tables where state in ('waiting','ready','playing') and (host_device=? or guest_device=?) "
             "order by updated_at desc limit 1",
             (device, device),
         ).fetchone()
@@ -3126,18 +3261,19 @@ class App(BaseHTTPRequestHandler):
             ).fetchone()
             if waiting:
                 table_id = waiting[0]
+                game = durak_new_game()
                 db.execute(
                     "update card_tables set state='ready',updated_at=?,guest_device=?,guest_name=?,"
-                    "last_action='Второй игрок подключился' where id=?",
-                    (now, device, name, table_id),
+                    "last_action='Второй игрок подключился',game_json=? where id=?",
+                    (now, device, name, json.dumps(game, separators=(",", ":")), table_id),
                 )
                 detail = json.dumps({"table": table_id, "state": "ready"}, ensure_ascii=False)
             else:
                 table_id = secrets.token_hex(6)
                 db.execute(
-                    "insert into card_tables(id,created_at,updated_at,state,host_device,host_name,guest_device,guest_name,last_action) "
-                    "values (?,?,?,?,?,?,?,?,?)",
-                    (table_id, now, now, "waiting", device, name, "", "", "Стол создан"),
+                    "insert into card_tables(id,created_at,updated_at,state,host_device,host_name,guest_device,guest_name,last_action,game_json) "
+                    "values (?,?,?,?,?,?,?,?,?,?)",
+                    (table_id, now, now, "waiting", device, name, "", "", "Стол создан", ""),
                 )
                 detail = json.dumps({"table": table_id, "state": "waiting"}, ensure_ascii=False)
             db.execute("insert into events values (?,?,?,?,?)", (now, "card_table", device, ip, detail))
@@ -3145,6 +3281,112 @@ class App(BaseHTTPRequestHandler):
         payload = self.card_game_payload(db, device, table_id)
         if not payload:
             raise RuntimeError("Не удалось создать игровой стол")
+        payload["ticket"] = card_game_ticket(device, table_id)
+        return payload
+
+    def card_game_action(self, db, device: str, table_id: str, action: str, card: str = ""):
+        """Apply one legal Durak action under a short SQLite write transaction."""
+        if action not in ("ready", "attack", "defend", "take", "pass"):
+            raise ValueError("Неизвестное действие игры")
+        now = int(time.time())
+        db.execute("begin immediate")
+        try:
+            row = db.execute(
+                "select state,host_device,guest_device,game_json from card_tables where id=?",
+                (table_id,),
+            ).fetchone()
+            if not row or device not in (row[1], row[2]):
+                raise PermissionError("Стол недоступен")
+            seat = "host" if device == row[1] else "guest"
+            try:
+                game = json.loads(row[3] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                game = {}
+            if not game or not isinstance(game.get("hands"), dict):
+                raise ValueError("Раздача ещё не готова")
+            phase = str(game.get("phase") or "ready")
+            last_action = ""
+            if action == "ready":
+                if phase != "ready":
+                    raise ValueError("Готовность уже подтверждена")
+                ready = game.setdefault("ready", {"host": False, "guest": False})
+                ready[seat] = True
+                if ready.get("host") and ready.get("guest"):
+                    game["phase"] = "playing"
+                    state = "playing"
+                    last_action = "Раздача началась"
+                else:
+                    state = "ready"
+                    last_action = f"{seat} готов к раздаче"
+            elif phase != "playing":
+                raise ValueError("Сначала оба игрока должны подтвердить готовность")
+            else:
+                attacker = str(game.get("attacker") or "host")
+                defender = "guest" if attacker == "host" else "host"
+                table = game.setdefault("table", [])
+                hand = game["hands"].setdefault(seat, [])
+                if action in ("attack", "defend"):
+                    if not re.fullmatch(r"(?:10|[6-9JQKA])[SHDC]", card) or card not in hand:
+                        raise ValueError("Эта карта недоступна")
+                if action == "attack":
+                    if seat != attacker:
+                        raise ValueError("Сейчас ход атакующего")
+                    ranks = {durak_rank(str(item.get("attack") or "")) for item in table if isinstance(item, dict)}
+                    ranks.update(durak_rank(str(item.get("defense") or "")) for item in table if isinstance(item, dict) and item.get("defense"))
+                    if ranks and durak_rank(card) not in ranks:
+                        raise ValueError("Добавить можно только карту совпадающего достоинства")
+                    if len(table) >= min(6, len(game["hands"].get(defender, []))):
+                        raise ValueError("Больше атакующих карт добавить нельзя")
+                    hand.remove(card)
+                    table.append({"attack": card, "defense": ""})
+                    state, last_action = "playing", "Атака"
+                elif action == "defend":
+                    if seat != defender:
+                        raise ValueError("Сейчас ход защищающегося")
+                    target = next((item for item in table if isinstance(item, dict) and not item.get("defense")), None)
+                    if not target or not durak_beats(card, str(target.get("attack") or ""), str(game.get("trump") or "")):
+                        raise ValueError("Эта карта не бьёт атаку")
+                    hand.remove(card)
+                    target["defense"] = card
+                    state, last_action = "Карта отбита"
+                elif action == "take":
+                    if seat != defender or not table:
+                        raise ValueError("Взять карты может только защищающийся")
+                    for item in table:
+                        if isinstance(item, dict):
+                            hand.extend([value for value in (item.get("attack"), item.get("defense")) if value])
+                    game["table"] = []
+                    durak_draw(game, attacker)
+                    durak_draw(game, defender)
+                    state, last_action = "Защищающийся взял карты"
+                elif action == "pass":
+                    if seat != attacker or not table or not all(isinstance(item, dict) and item.get("defense") for item in table):
+                        raise ValueError("Передать ход можно только после полной защиты")
+                    game["table"] = []
+                    durak_draw(game, attacker)
+                    durak_draw(game, defender)
+                    game["attacker"] = defender
+                    state, last_action = "Ход передан"
+                winner = durak_finish_if_needed(game)
+                if winner:
+                    state = "finished"
+                    winner_device = row[1] if winner == "host" else row[2]
+                    db.execute(
+                        "update card_wallets set q_coins=q_coins+25, updated_at=? where device=?",
+                        (now, winner_device),
+                    )
+                    last_action = "Партия завершена: +25 Q-coins победителю"
+            db.execute(
+                "update card_tables set state=?,updated_at=?,last_action=?,game_json=? where id=?",
+                (state, now, last_action, json.dumps(game, separators=(",", ":")), table_id),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        payload = self.card_game_payload(db, device, table_id)
+        if not payload:
+            raise RuntimeError("Не удалось обновить игровой стол")
         payload["ticket"] = card_game_ticket(device, table_id)
         return payload
 
@@ -3745,7 +3987,10 @@ class App(BaseHTTPRequestHandler):
             audit_rows = db.execute("select ts,actor,ip,action,detail from audit order by ts desc limit 100").fetchall()
             card_rows = db.execute(
                 "select id,created_at,updated_at,state,host_device,host_name,guest_device,guest_name,last_action "
-                "from card_tables where state in ('waiting','ready') order by updated_at desc limit 80"
+                "from card_tables where state in ('waiting','ready','playing') order by updated_at desc limit 80"
+            ).fetchall()
+            card_wallet_rows = db.execute(
+                "select device,display_name,q_coins,updated_at from card_wallets order by updated_at desc limit 80"
             ).fetchall()
             users = rospanel_users(q=q if tab == "users" else "")
             return self.reply(
@@ -3766,6 +4011,7 @@ class App(BaseHTTPRequestHandler):
                     admin_rows=admin_rows,
                     actor_role=adm.get("role", "viewer"),
                     card_rows=card_rows,
+                    card_wallet_rows=card_wallet_rows,
                 ),
                 "text/html; charset=utf-8",
             )
@@ -3953,6 +4199,34 @@ class App(BaseHTTPRequestHandler):
             except Exception:
                 return self.reply(400, '{"error":"card_game_unavailable"}')
 
+        if path == "/api/client/cards/action":
+            ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
+            if rate_limited(f"card-game-action:{ip}", max(12, min(60, int(s.get("rate_limit_per_min") or 120)))):
+                return self.reply(429, '{"error":"rate_limited"}')
+            try:
+                size = min(int(self.headers.get("Content-Length", "0")), 4096)
+                payload = json.loads(self.rfile.read(size).decode("utf-8"))
+                ticket_data = card_game_ticket_data(str(payload.get("ticket") or "")[:2048])
+                if not ticket_data:
+                    return self.reply(401, '{"error":"invalid_game_ticket"}')
+                device, _client_ip = self.client()
+                if not hmac.compare_digest(str(ticket_data.get("device") or ""), device):
+                    return self.reply(403, '{"error":"game_ticket_device_mismatch"}')
+                result = self.card_game_action(
+                    db,
+                    device,
+                    str(ticket_data.get("table") or ""),
+                    str(payload.get("action") or ""),
+                    str(payload.get("card") or ""),
+                )
+                return self.reply(200, json.dumps(result, ensure_ascii=False))
+            except PermissionError as exc:
+                return self.reply(403, json.dumps({"error": "access_denied", "message": str(exc)}, ensure_ascii=False))
+            except ValueError as exc:
+                return self.reply(400, json.dumps({"error": "invalid_action", "message": str(exc)}, ensure_ascii=False))
+            except Exception:
+                return self.reply(400, '{"error":"card_game_unavailable"}')
+
         if path.startswith("/operator/") and not self.same_origin_request():
             # Keep a redacted diagnostic in the service journal so reverse-proxy
             # origin mismatches can be fixed without logging credentials.
@@ -4060,6 +4334,34 @@ class App(BaseHTTPRequestHandler):
             )
             db.commit()
             return self.redirect_operator("cards", "Настройки карточного стола сохранены")
+
+        if path == "/operator/cards/wallet":
+            if not self.require_role(adm, "owner"):
+                return
+            length = min(int(self.headers.get("Content-Length", "0")), 4096)
+            form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            device = (form.get("device", [""])[0] or "").strip()
+            try:
+                amount = int(form.get("amount", ["0"])[0] or 0)
+            except ValueError:
+                amount = 0
+            if not re.fullmatch(r"[A-Za-z0-9_-]{4,128}", device) or not 1 <= amount <= 100_000:
+                return self.redirect_operator("cards", "Проверьте ID устройства и число Q-coins")
+            now = int(time.time())
+            row = db.execute("select q_coins from card_wallets where device=?", (device,)).fetchone()
+            if not row:
+                return self.redirect_operator("cards", "Игрок с таким ID ещё не входил за стол")
+            db.execute(
+                "update card_wallets set q_coins=q_coins+?, updated_at=? where device=?",
+                (amount, now, device),
+            )
+            audit(db, actor, ip, "card_wallet_credit", {"device": device, "q_coins": amount})
+            db.execute(
+                "insert into events values (?,?,?,?,?)",
+                (now, "card_wallet", device, ip, json.dumps({"q_coins": amount}, ensure_ascii=False)),
+            )
+            db.commit()
+            return self.redirect_operator("cards", "Виртуальные Q-coins начислены")
 
         if path == "/operator/routing":
             length = min(int(self.headers.get("Content-Length", "0")), 256 * 1024)

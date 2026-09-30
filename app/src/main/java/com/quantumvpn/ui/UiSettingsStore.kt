@@ -55,6 +55,14 @@ enum class HomeLayoutMode {
     Expert,
 }
 
+/** Visual background is deliberately local-only: a selected photo is never uploaded to the panel. */
+enum class AppBackgroundStyle {
+    Aurora,
+    NightCity,
+    DeepSpace,
+    Custom,
+}
+
 /** Server selection bias: Standard (balanced), Gaming (low latency), Movie (throughput). */
 enum class ServerMode {
     Standard,
@@ -161,6 +169,9 @@ data class UiSettings(
     val qoeMonitorEnabled: Boolean = true,
     val stealthUntilEpochMillis: Long = 0L,
     val stealthMode: Boolean = true,
+    val appBackgroundStyle: AppBackgroundStyle = AppBackgroundStyle.Aurora,
+    val customBackgroundUri: String = "",
+    val touchBubblesEnabled: Boolean = true,
 )
 
 private val Context.uiSettingsDataStore: DataStore<Preferences> by preferencesDataStore(
@@ -331,6 +342,11 @@ class UiSettingsStore(
                 qoeMonitorEnabled = preferences[QOE_MONITOR] ?: true,
                 stealthUntilEpochMillis = preferences[STEALTH_UNTIL]?.toLongOrNull() ?: 0L,
                 stealthMode = preferences[STEALTH_MODE] ?: true,
+                appBackgroundStyle = preferences[APP_BACKGROUND_STYLE]
+                    ?.let { stored -> AppBackgroundStyle.entries.firstOrNull { it.name == stored } }
+                    ?: AppBackgroundStyle.Aurora,
+                customBackgroundUri = preferences[CUSTOM_BACKGROUND_URI].orEmpty(),
+                touchBubblesEnabled = preferences[TOUCH_BUBBLES_ENABLED] ?: true,
             )
         }
 
@@ -778,6 +794,20 @@ class UiSettingsStore(
         }
     }
 
+    suspend fun setAppBackgroundStyle(style: AppBackgroundStyle) {
+        dataStore.edit { it[APP_BACKGROUND_STYLE] = style.name }
+    }
+
+    suspend fun setCustomBackgroundUri(uri: String) {
+        dataStore.edit {
+            if (uri.isBlank()) it.remove(CUSTOM_BACKGROUND_URI) else it[CUSTOM_BACKGROUND_URI] = uri
+        }
+    }
+
+    suspend fun setTouchBubblesEnabled(enabled: Boolean) {
+        dataStore.edit { it[TOUCH_BUBBLES_ENABLED] = enabled }
+    }
+
     private companion object {
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val ACTIVE_PROFILE_ID = stringPreferencesKey("active_profile_id")
@@ -876,6 +906,9 @@ val CUSTOM_DOT_URL = stringPreferencesKey("custom_dot_url")
         val QOE_MONITOR = booleanPreferencesKey("qoe_monitor")
         val STEALTH_UNTIL = stringPreferencesKey("stealth_until")
         val STEALTH_MODE = booleanPreferencesKey("stealth_mode")
+        val APP_BACKGROUND_STYLE = stringPreferencesKey("app_background_style")
+        val CUSTOM_BACKGROUND_URI = stringPreferencesKey("custom_background_uri")
+        val TOUCH_BUBBLES_ENABLED = booleanPreferencesKey("touch_bubbles_enabled")
     }
 }
 

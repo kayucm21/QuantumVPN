@@ -2195,6 +2195,39 @@ def css():
     """
 
 
+def control_reference_css():
+    return """
+    /* Quantum Control reference layout · 2026-10-01 */
+    body{background:#030d1c;background-image:radial-gradient(ellipse at 65% 0,#0c244044,transparent 60%);font-size:14px}
+    main{max-width:none;padding:0 20px 24px 0}.panel-shell{grid-template-columns:248px minmax(0,1fr);gap:24px}
+    .sidebar{position:sticky;top:0;height:100vh;min-height:0;border-radius:0;border:0;border-right:1px solid #152c46;background:linear-gradient(170deg,#071427,#03101f);padding:22px 12px;box-shadow:none}
+    .sidebar-brand{font-size:20px;text-transform:none;letter-spacing:0;padding:0 8px 24px;position:relative}.sidebar-brand:before{content:'Q';font-size:38px;color:#23d8ff;float:left;margin:0 13px 0 0;line-height:1.3}.sidebar-brand span{margin-left:52px;font-size:10px;letter-spacing:.13em}
+    nav.tabs a{padding:15px 12px;margin-bottom:5px;border-radius:8px;color:#aac8e9}nav.tabs a.active{background:linear-gradient(95deg,#073646,#14264f);box-shadow:inset 4px 0 #22e4ed,0 0 20px #10bde311;color:#effaff}
+    nav.tabs a[href$='cards']{border:1px solid #263558;color:#b59cff;margin-top:16px;background:linear-gradient(120deg,#0e223c,#0c1730)}
+    .sidebar:after{content:'Больше свободы в безопасном мире';display:block;margin:30px 16px;color:#69bded;font-size:16px;max-width:155px}
+    .panel-content{min-width:0;padding-top:0}.hero{border:0;border-bottom:1px solid #15314c;background:transparent;box-shadow:none;border-radius:0;height:70px;padding:12px 0;margin-bottom:20px}.hero-top:before{display:none}.control-search{display:flex;width:min(50%,560px);margin:0;gap:6px}.control-search input{margin:0;height:38px}.control-search button{padding:6px 12px}.system-pill:after{display:none}
+    .card,.dashboard .card{background:linear-gradient(130deg,#06162b,#071426 70%,#091b30);border:1px solid #1c3d5d;border-radius:10px;box-shadow:inset 0 1px #a0e5ff08;padding:18px}
+    button,.button,a.button{background:linear-gradient(130deg,#76f5ff,#16cde9);border:1px solid #61e7fa;color:#042034;border-radius:6px;font-weight:650;box-shadow:0 0 14px #21d5ee22}button.secondary,a.secondary{background:#091c32;color:#bfeeff;border-color:#285678;box-shadow:none}
+    .reference-heading{display:flex;justify-content:space-between;align-items:center;margin:0 0 16px}.reference-heading h1{font-size:26px;margin:0 0 4px}.reference-heading p{margin:0;color:#8eadd0}.reference-heading small{color:#90b3d8}
+    .sidebar{overflow-y:auto;box-sizing:border-box}.sidebar-brand{font-size:17px;white-space:nowrap}.sidebar-brand:before{font-size:34px;margin-right:8px}.sidebar-brand span{margin-left:42px;font-size:9px}.sidebar nav.tabs{gap:3px}.sidebar nav.tabs a{padding:11px 10px;margin-bottom:0}.panel-content a:not(.button){color:#62caff;text-decoration:none}.panel-content a:hover{text-decoration:underline}h1,h2,nav.tabs a{letter-spacing:normal!important}
+    .reference-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}.reference-kpi{display:flex;gap:14px;align-items:center;min-height:96px}.reference-kpi i{font-style:normal;font-size:26px;display:grid;place-items:center;width:52px;height:54px;border-radius:12px;background:#093244;color:#23e0ee}.reference-kpi:nth-child(4) i{background:#321a35;color:#ff7196}.reference-kpi span{font-size:12px;color:#a8c3e4}.reference-kpi b{display:block;font-size:26px;margin:3px 0;color:#e9f5ff}.reference-kpi small{color:#7e9fc3}
+    .reference-top{display:grid;grid-template-columns:1.35fr 1fr;gap:14px;margin-bottom:14px}.reference-bottom{display:grid;grid-template-columns:1.4fr .9fr .9fr;gap:14px}.reference-bottom>*,.reference-top>*{min-width:0}.reference-stack{display:grid;gap:14px;align-content:start}.reference-table{overflow:auto;max-width:100%}.reference-table table{font-size:12px;margin:0;width:100%}.reference-table th{white-space:nowrap;font-weight:500}.reference-table td{padding:12px 8px}
+    .reference-map{position:relative;min-height:255px;background:radial-gradient(ellipse at center,#0a32415c,transparent 70%)}.reference-map svg{width:100%;height:245px}.reference-map-note{color:#7398b9;font-size:11px;text-align:center}.reference-node-strip{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.reference-node-strip span{padding:6px 9px;background:#081e30;border:1px solid #1a3d53;border-radius:6px;font-size:11px}.reference-node-strip b{color:#39e7c2;margin-left:8px}
+    .reference-game{padding:20px;border-radius:10px;background:radial-gradient(ellipse at 80% 0,#6a32ba77,transparent),linear-gradient(110deg,#172965,#1c1649);border:1px solid #51427c;margin-bottom:14px}.reference-game strong{font-size:28px;display:block;color:#e5dcff}.reference-game p{color:#b9b1ef;font-size:12px}.reference-game a{display:inline-block;margin-top:5px}.reference-audit{font-size:12px;display:flex;gap:10px;border-bottom:1px solid #132e47;padding:10px 0}.reference-audit time{color:#7398b9;white-space:nowrap}.reference-audit span{overflow-wrap:anywhere}.event-row{min-height:42px;grid-template-columns:8px 42px 82px minmax(0,1fr);font-size:12px}.event-row i{display:none}
+    .reference-node-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.reference-node b{font-size:15px;overflow-wrap:anywhere}.reference-node .latency{font-size:25px;color:#41ead0;margin:18px 0 5px}.reference-node small{color:#83a6c5}.badge{display:inline-block;padding:4px 8px;border-radius:15px;background:#10283e}.badge.ok{background:#06392f;color:#35eab7}.badge.off{background:#381a31;color:#ff7491}
+    @media(min-width:1100px){.panel-content>.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:1200px){.panel-shell{grid-template-columns:210px minmax(0,1fr);gap:16px}.reference-bottom{grid-template-columns:1fr 1fr}.reference-bottom>.card:first-child{grid-column:1/-1}.reference-kpi{padding:12px!important;gap:8px}.reference-kpi i{display:none}.reference-top{grid-template-columns:1fr}}
+    @media(max-width:800px){main{padding:10px}.panel-shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;padding:8px}.sidebar:after{display:none}.hero{height:auto}.hero-top{flex-wrap:wrap;gap:10px}.control-search{width:100%}.reference-kpis{grid-template-columns:1fr 1fr}.reference-bottom{grid-template-columns:1fr}.reference-heading h1{font-size:22px}}
+    """
+
+
+def reference_world_map():
+    # A decorative world silhouette, not invented node locations or measurements.
+    return '''<div class=reference-map><svg viewBox="0 0 800 350" aria-label="Карта мира" role=img>
+    <defs><pattern id=world-dots width=7 height=7 patternUnits=userSpaceOnUse><circle cx=2 cy=2 r=1.4 fill="#267395"/></pattern></defs>
+    <g fill="url(#world-dots)" stroke="#1b4864" stroke-width="1"><path d="M50 75L95 45 153 42 189 65 232 59 254 89 211 109 194 143 160 165 137 145 117 119 81 109Z"/><path d="M176 169L210 171 244 206 260 237 234 268 216 315 196 287 185 250 162 207Z"/><path d="M242 32L289 25 306 43 283 72 263 77Z"/><path d="M347 92L379 66 407 75 428 58 455 76 433 110 393 123 369 112Z"/><path d="M356 135L400 122 440 146 452 186 424 222 410 264 385 251 370 212 342 168Z"/><path d="M443 67L493 43 550 53 579 43 635 63 709 75 747 104 704 132 659 129 644 164 602 159 581 193 549 156 514 171 484 134 444 116Z"/><path d="M610 193L650 202 680 221 658 230 628 219Z"/><path d="M657 256L700 237 738 252 755 286 715 303 679 291 650 277Z"/><path d="M774 302L785 281 791 291 783 318Z"/></g></svg></div>'''
+
+
 def render_login(error=""):
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <title>Quantum Control · вход</title><style>{css()}</style>
@@ -2472,71 +2505,31 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         for item in saved_scan[:MAX_ROUTING_SCAN_TARGETS]
         if isinstance(item, dict) and str(item.get('target') or '')
     ) or "<div class='routing-empty'>Добавьте домены и нажмите «Сканировать цели». Проверка выполняется TCP/443 с VDS.</div>"
-    # Compact dashboard projections for the reference admin layout.  The full
-    # tables remain available on their dedicated tabs; this view only shows
-    # the most useful operational slice.
-    dashboard_users = "".join(
-        f"<tr><td><b>#{html.escape(str(uid or '—'))}</b></td>"
-        f"<td>{html.escape(str(name))}</td><td>{html.escape(str(status_u or 'Стандарт'))}</td>"
-        f"<td><span class='badge {'ok' if en else 'off'}'>{'Активна' if en else 'Заблокирована'}</span></td>"
-        f"<td>{'—' if not expires else time.strftime('%d.%m.%Y', time.localtime(expires))}</td>"
-        f"<td>{((up or 0)+(down or 0))/1024/1024:.0f} MB</td><td class=muted>⋮</td></tr>"
-        for name, en, status_u, up, down, expires, seen, uid in users[:5]
-    ) or "<tr><td colspan=7>Пользователи RosPanel пока не загружены</td></tr>"
-    dashboard_nodes = "".join(
-        f"<tr><td><b>{html.escape(str(target).replace('latency:', 'node-'))}</b></td>"
-        f"<td>{html.escape(str(target).split(':', 1)[-1] if ':' in str(target) else 'VDS')}</td>"
-        f"<td><span class='badge {'ok' if row['ok'] else 'warn'}'>{'Онлайн' if row['ok'] else 'Предупреждение'}</span></td>"
-        f"<td>{min(99, max(1, int(row['latency_ms'] or 0) // 2))}%</td><td>{int(row['latency_ms'] or 0)} мс</td></tr>"
-        for target, row in sorted(latest_monitor.items())[:6]
-    )
-    if not dashboard_nodes:
-        dashboard_nodes = "".join(
-            f"<tr><td><b>{html.escape(str(name))}</b></td><td>RosPanel</td><td><span class='badge ok'>Онлайн</span></td><td>—</td><td>—</td></tr>"
-            for name in (status.get('outbounds') or [])[:6]
-        ) or "<tr><td colspan=5>Автоматические замеры ещё выполняются</td></tr>"
-    dashboard_incidents = "".join(
-        f"<tr><td>#{item['id']}</td><td>{html.escape(item['title'][:42])}</td>"
-        f"<td><span class='badge {'off' if item['severity']=='critical' else 'warn'}'>{'Открыт' if not item['closed_at'] else 'Закрыт'}</span></td>"
-        f"<td>{time.strftime('%d.%m %H:%M', time.localtime(item['opened_at']))}</td></tr>"
-        for item in incident_rows[:5]
-    ) or "<tr><td colspan=4>Открытых обращений нет</td></tr>"
-    dashboard_releases = "".join(
-        f"<tr><td><b>{html.escape(ver)}</b></td><td>{html.escape(channel)}</td>"
-        f"<td><span class='badge {badge}'>{html.escape(state)}</span></td><td>{html.escape(date)}</td><td>{html.escape(scope)}</td><td>⋮</td></tr>"
-        for ver, channel, state, badge, date, scope in (
-            (s.get('app_version', VERSION), 'Стабильный', 'В релизе', 'ok', time.strftime('%d.%m.%Y'), f"{s.get('rollout_percent','100')}%"),
-            (s.get('staging_version') or '—', 'Бета', 'Тестирование' if s.get('staging_version') else 'Недоступна', 'warn' if s.get('staging_version') else 'off', '—', '—'),
-            (s.get('scheduled_app_version') or '—', 'Запланированный', 'Доступна', 'ok' if s.get('scheduled_app_version') else 'off', 'по расписанию', '—'),
-        )
-    )
-    node_total = len(latest_monitor) or len(status.get('outbounds') or []) or 0
-    node_online = sum(1 for row in latest_monitor.values() if row.get('ok')) if latest_monitor else node_total
-    policy_hour = sum(1 for x in rows if x[1] == 'policy' and x[0] > time.time() - 3600)
     event_timeline = "".join(
         f"<div class='event-row'><span class='event-dot {'warn' if kind in ('error','incident') else 'ok'}'></span>"
         f"<time>{time.strftime('%H:%M', time.localtime(ts))}</time><b>{html.escape(device or 'Система')[:22]}</b>"
         f"<span>{html.escape(detail or kind)[:90]}</span><i>•••</i></div>"
         for ts, kind, device, ip, detail in rows[:7]
     ) or "<div class=empty-state>Событий пока нет</div>"
-    deploy_targets = [str(target).replace('latency:', '') for target in sorted(latest_monitor)[:5]]
-    if not deploy_targets:
-        deploy_targets = [str(item) for item in (status.get('outbounds') or [])[:5]]
-    deploy_version = s.get('scheduled_app_version') or s.get('app_version') or VERSION
-    deploy_progress = min(100, max(0, round((node_online / max(1, node_total)) * 100))) if node_total else 0
-    deployment_rows = "".join(
-        f"<div class='deploy-row'><span class='deploy-state {'done' if i < max(0, len(deploy_targets)-1) else 'active'}'>{'✓' if i < max(0, len(deploy_targets)-1) else '↻'}</span>"
-        f"<b>{html.escape(target or f'node-{i+1}')}</b><span>{'Обновлен' if i < max(0, len(deploy_targets)-1) else 'Ожидает'}</span><time>{time.strftime('%H:%M')}</time></div>"
-        for i, target in enumerate(deploy_targets)
-    ) or "<div class=empty-state>Ноды появятся после первого замера</div>"
-    terminal_lines = "".join(
-        f"<div><time>{time.strftime('%H:%M:%S', time.localtime(ts))}</time> <span class='term-level {'warn' if kind in ('error','incident') else 'info'}'>[{('WARN' if kind in ('error','incident') else 'INFO')}]</span> <b>{html.escape(device or 'system')[:18]}</b> {html.escape((detail or kind)[:150])}</div>"
-        for ts, kind, device, ip, detail in rows[:10]
-    ) or "<div><time>--:--:--</time> <span class='term-level info'>[INFO]</span> system Ожидание событий…</div>"
+    reference_targets = "".join(
+        f"<span>{html.escape(str(target).removeprefix('latency:'))}<b class={'ok' if row.get('ok') else 'off'}>{str(row.get('latency_ms')) + ' мс' if row.get('ok') and row.get('latency_ms') is not None else 'нет ответа'}</b></span>"
+        for target, row in list(latest_monitor.items())[:6]
+    ) or '<span>Ожидание первых измерений</span>'
+    reference_users = "".join(
+        f"<tr><td>{html.escape(str(name))}</td><td><span class='badge {'ok' if en else 'off'}'>{'Активен' if en else 'Отключён'}</span></td><td>{((up or 0)+(down or 0))/1024**3:.2f} ГБ</td><td>{time.strftime('%d.%m %H:%M', time.localtime(seen)) if seen else '—'}</td></tr>"
+        for name, en, status_u, up, down, expires, seen, uid in users[:6]
+    ) or '<tr><td colspan=4>Пользователи пока не загружены</td></tr>'
+    reference_audit = ''.join(
+        f"<div class=reference-audit><time>{time.strftime('%H:%M', time.localtime(a[0]))}</time><span>{html.escape(str(a[1]))} · {html.escape(str(a[3]))}</span></div>"
+        for a in audit_rows[:4]
+    ) or '<p class=muted>Записей пока нет</p>'
+    page_titles = {'dashboard': ('КОМАНДНЫЙ ЦЕНТР', 'Обзор состояния VPN-инфраструктуры'), 'latency': ('Ноды', 'Доступность и задержка подключений'), 'users': ('Пользователи', 'Подписчики и активность'), 'service': ('Подписки', 'Доступ, протоколы и обслуживание сервиса'), 'release': ('Релизы', 'Сборки приложения и расписание публикации'), 'incidents': ('События', 'Состояние сервисов и инциденты'), 'audit': ('Аудит', 'Журнал действий администраторов'), 'cards': ('Игры и награды', 'Карточные столы и виртуальные Q-coins')}
+    page_title, page_description = page_titles.get(section, ('Quantum Control', 'Управление сервисом'))
+    current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-    <title>Quantum Control</title><style>{css()}</style><main><div class=panel-shell>
+    <title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}</style><main><div class=panel-shell>
       <aside class=sidebar>
-      <div class=sidebar-brand>◈ QUANTUM CONTROL<span>Панель управления VPN</span></div>
+      <div class=sidebar-brand>Quantum Control<span>VPN OPERATOR PANEL</span></div>
       <nav class=tabs>
         <a class="{'active' if section == 'dashboard' else ''}" href="/operator?tab=dashboard"><span class=nav-ico>▦</span> Командный центр</a>
         <a class="{'active' if section == 'latency' else ''}" href="/operator?tab=latency"><span class=nav-ico>▤</span> Ноды</a>
@@ -2556,30 +2549,30 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </aside>
       <section class=panel-content>
     <section class=hero>
-      <div class=hero-top><div class=accent>QUANTUM CONTROL · ROSPANEL · build {html.escape(PANEL_BUILD)}</div><span id=system-pill class=system-pill>● Система в норме</span><span class=top-date>{time.strftime('%d %b %Y, %H:%M')}<br><small>UTC+3</small></span></div>
+      <div class=hero-top><form class=control-search method=get action=/operator><input type=hidden name=tab value=users><input name=q aria-label="Поиск пользователей" placeholder="Поиск по пользователям…" value="{html.escape(q)}"><button>Найти</button></form><span id=system-pill class=system-pill>{'● Есть открытые инциденты' if report['open_incidents'] else '● Открытых инцидентов нет'}</span><span class=top-date>{time.strftime('%d.%m.%Y %H:%M', time.gmtime(time.time()+10800))}<br><small>МСК · {html.escape(actor_role)}</small></span></div>
     </section>
     {flash_html}
+    <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>Quantum Control</small></header>
 
     <section class="dashboard" {show('dashboard')}>
-      <div class=topology-layout>
-        <section class="card topology-map">
-          <div class=section-head><div><h2>Топология серверов</h2><div class=topology-meta><span class=ok>●</span> {node_total or 12} нод <span>·</span> 3 региона <span>·</span> Задержка (ср): <b>{latency_best or 48} мс</b></div></div><a class="button secondary" href="/operator?tab=latency">⛶ На весь экран</a></div>
-          <svg viewBox="0 0 760 235" role="img" aria-label="Карта серверов">
-            <g fill="#0d2535" opacity=".9"><circle cx="72" cy="82" r="2"/><circle cx="90" cy="70" r="2"/><circle cx="112" cy="88" r="2"/><circle cx="132" cy="68" r="2"/><circle cx="154" cy="84" r="2"/><circle cx="177" cy="100" r="2"/><circle cx="205" cy="83" r="2"/><circle cx="230" cy="72" r="2"/><circle cx="258" cy="91" r="2"/><circle cx="285" cy="78" r="2"/><circle cx="310" cy="96" r="2"/><circle cx="337" cy="75" r="2"/><circle cx="365" cy="88" r="2"/><circle cx="394" cy="71" r="2"/><circle cx="424" cy="92" r="2"/><circle cx="454" cy="78" r="2"/><circle cx="486" cy="99" r="2"/><circle cx="520" cy="82" r="2"/><circle cx="552" cy="95" r="2"/><circle cx="586" cy="75" r="2"/><circle cx="620" cy="93" r="2"/><circle cx="650" cy="76" r="2"/><circle cx="686" cy="91" r="2"/></g>
-            <g fill="none" stroke="#1e526b" stroke-width="1"><path d="M86 116 C230 28 360 44 430 112 S600 120 688 93"/><path d="M88 119 C238 180 342 163 430 112 S600 58 688 94"/></g>
-            <g fill="#081b28" stroke="#26d9ff" stroke-width="2"><circle cx="92" cy="116" r="7"/><circle cx="185" cy="82" r="6"/><circle cx="282" cy="124" r="6"/><circle cx="430" cy="112" r="15"/><circle cx="548" cy="84" r="7"/><circle cx="688" cy="94" r="15"/></g>
-            <g fill="#26d9ff"><circle cx="92" cy="116" r="3"/><circle cx="185" cy="82" r="3"/><circle cx="282" cy="124" r="3"/><circle cx="430" cy="112" r="7"/><circle cx="548" cy="84" r="3"/></g><circle cx="688" cy="94" r="8" fill="#ffb44b"/>
-            <g font-family="Segoe UI" font-size="11" fill="#5ce5ff"><text x="28" y="75">Северная</text><text x="28" y="89">Америка</text><text x="28" y="105">4 ноды · 32 мс</text><text x="395" y="152" fill="#bd98ff">Европа</text><text x="395" y="168" fill="#bd98ff">5 нод · 48 мс</text><text x="714" y="82" fill="#ffbf5b">Азия</text><text x="714" y="98" fill="#ffbf5b">3 ноды · 96 мс</text></g>
-          </svg><div class=legend><span>Онлайн</span><span class=load>Нагрузка &gt; 70%</span><span class=maint>Технические работы</span><span class=down>Офлайн</span></div>
-        </section>
-        <section class="card events-card"><div class=section-head><h2>Последние события</h2><a href="/operator?tab=incidents">Все события →</a></div><div class=event-list>{event_timeline}</div></section>
+      <div class=reference-kpis>
+        <div class="card reference-kpi"><i>▤</i><div><span>Доступность проверок</span><b>{sum(1 for r in latest_monitor.values() if r.get('ok'))} / {len(latest_monitor)}</b><small>Последние измерения</small></div></div>
+        <div class="card reference-kpi"><i>♙</i><div><span>Активные подписки</span><b>{summary.get('active', '—') if summary.get('ok') else '—'}</b><small>Онлайн за 15 мин: {summary.get('online_15m', '—') if summary.get('ok') else '—'}</small></div></div>
+        <div class="card reference-kpi"><i>⇅</i><div><span>Трафик за сегодня</span><b>{summary.get('traffic_today_gb', '—') if summary.get('ok') else '—'} ГБ</b><small>По данным RosPanel</small></div></div>
+        <div class="card reference-kpi"><i>△</i><div><span>Открытые события</span><b>{report['open_incidents']}</b><small>Требуют внимания</small></div></div>
       </div>
-      <div class="dashboard-middle">
-        <section class="card deploy-card"><div class=section-head><h2>Развертывание <span class=deploy-version>v{html.escape(str(deploy_version))}</span></h2><a href="/operator?tab=release">Детали →</a></div><p class=deploy-kicker>Обновление нод в регионе Европа</p><div class=progress><span style="width:{deploy_progress}%"></span></div><div class=deploy-caption><span>{node_online} из {node_total or len(deploy_targets) or 0} нод обновлены · Осталось около 2 мин</span><b>{deploy_progress}%</b></div>{deployment_rows}</section>
-        <section class="card system-card"><div class=section-head><h2>Статус системы</h2><a href="/operator?tab=reports">Детали →</a></div><div class=mini-grid><div class=mini-stat><small>Ноды</small><b>{node_online} / {node_total or '—'}</b><em>Онлайн</em></div><div class=mini-stat><small>Пользователи</small><b>{summary.get('active','—')}</b><em>+12%</em></div><div class=mini-stat><small>Подписки</small><b>{summary.get('active','—')}</b><em>+6%</em></div><div class=mini-stat><small>Трафик</small><b>{summary.get('traffic_today_gb','—')} GB</b><em>+18%</em></div></div><div class=section-head><span class=muted>Трафик (последние 24 часа)</span><span class=muted>● Входящий　<span style="color:var(--violet)">●</span> Исходящий</span></div><div class=chart><svg viewBox="0 0 600 100" preserveAspectRatio="none"><polyline points="0,82 35,70 68,73 100,53 135,61 170,43 205,47 240,30 274,45 309,35 344,44 380,29 415,36 450,24 485,32 520,18 560,28 600,14" fill="none" stroke="#20d8ff" stroke-width="2"/><polyline points="0,91 35,82 68,86 100,72 135,78 170,61 205,69 240,55 274,70 309,57 344,65 380,51 415,63 450,54 485,65 520,48 560,57 600,41" fill="none" stroke="#9c6dff" stroke-width="2"/></svg></div></section>
-        <section class="card actions-card"><h2>Действия</h2><div class=actions-stack><form method=post action=/operator/actions><button class="ops-action ops-check" name=action value=sync_protocols><strong>⌕　Проверить</strong><small>Проверка состояния сервисов</small></button></form><form method=post action=/operator/actions><button class="ops-action ops-restart" name=action value=restart_operator><strong>■　Перезапустить</strong><small>Перезапустить Operator</small></button></form><a class="ops-action ops-release" href="/operator?tab=release"><strong>⟳　Откатить</strong><small>Выбрать предыдущий релиз</small></a><form method=post action=/operator/actions><button class="ops-action ops-save" name=action value=bump_revision><strong>▣　Сохранить</strong><small>Сохранить конфигурацию</small></button></form></div></section>
+      <div class=reference-top>
+        <section class=card><div class=section-head><h2>Карта сети и доступность</h2><a href="/operator?tab=latency">Все ноды →</a></div>{reference_world_map()}<div class=reference-map-note>География нод ещё не задана. Измерения доступности — ниже.</div><div class=reference-node-strip>{reference_targets}</div></section>
+        <section class=card><div class=section-head><h2>Последние события</h2><a href="/operator?tab=incidents">Все события →</a></div><div class=event-list>{event_timeline}</div></section>
       </div>
-      <section class="card logs-card"><div class=terminal-toolbar><h2 style="margin:0">●　Журналы (в реальном времени)</h2><div class=actions><span class=pill>Ⅱ</span><span class=muted>Автопрокрутка</span><span class=pill>↻</span><a class="button secondary" href="/operator?tab=logs">Открыть</a></div></div><pre class=terminal-log>{terminal_lines}</pre></section>
+      <div class=reference-bottom>
+        <section class=card><div class=section-head><h2>Пользователи</h2><a href="/operator?tab=users">Все пользователи →</a></div><div class=reference-table><table><thead><tr><th>Пользователь</th><th>Статус</th><th>Трафик</th><th>Активность</th></tr></thead><tbody>{reference_users}</tbody></table></div></section>
+        <section class=card><div class=section-head><h2>Игровая активность</h2></div><div class=reference-game><strong>{sum(int(r[2] or 0) for r in (card_wallet_rows or [])):,} Q-coins</strong><p>Баланс {len(card_wallet_rows or [])} игроков в текущей выборке</p><p>Виртуальные очки · без вывода</p><a class=button href="/operator?tab=cards">Игры и награды →</a></div><div class=stat>Открытые столы<b>{len(card_rows or [])}</b></div><p class=muted>Управляйте доступом к игре и начисляйте награды игрокам.</p></section>
+        <div class=reference-stack>
+          <section class=card><div class=section-head><h2>Релизы</h2><a href="/operator?tab=release">Все →</a></div><p><span class="badge ok">Стабильный</span> <b>{html.escape(s.get('app_version', VERSION))}</b></p><p class=muted>Охват: {html.escape(s.get('rollout_percent','100'))}%</p><p><span class=pill>По расписанию</span> {html.escape(s.get('scheduled_app_version') or '—')}</p><a href="/operator?tab=release">Управлять публикацией →</a></section>
+          <section class=card><div class=section-head><h2>Последние записи аудита</h2><a href="/operator?tab=audit">Все →</a></div>{reference_audit}</section>
+        </div>
+      </div>
     </section>
 
     <section class=card {show('fleet')}>
@@ -2608,6 +2601,12 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </div>
     </section>
 
+    <section {show('service')}><div class=reference-kpis>
+      <div class="card reference-kpi"><div><span>Активные подписки</span><b>{summary.get('active', '—')}</b></div></div>
+      <div class="card reference-kpi"><div><span>Отключённые</span><b>{summary.get('disabled', '—')}</b></div></div>
+      <div class="card reference-kpi"><div><span>Истёкшие</span><b>{summary.get('expired', '—')}</b></div></div>
+      <div class="card reference-kpi"><div><span>Протоколы</span><b>{len(protocols)}</b></div></div>
+    </div><div class="card reference-table"><div class=section-head><h2>Подписки пользователей</h2><a class=button href="{html.escape(rp_base)}" target=_blank rel=noopener>Управлять в RosPanel ↗</a></div><table><thead><tr><th>Имя</th><th>Доступ</th><th>Состояние</th><th>Трафик</th><th>Действует до</th><th>Активность</th><th>Управление</th></tr></thead><tbody>{subscribers}</tbody></table></div></section>
     <section class=grid {show('service')}>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=service>
         <h2>Сервис и объявления</h2>
@@ -2686,6 +2685,10 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </section>
     </section>
 
+    <section {show('latency')}>
+      <div class=card><div class=section-head><h2>Сеть и мониторинг</h2><a class="button secondary" href="{html.escape(rp_base)}" target=_blank rel=noopener>Настроить ноды ↗</a></div>{reference_world_map()}<p class=reference-map-note>Карта — обзор мира. Географические координаты нод пока не заданы.</p></div>
+      <div class=reference-node-grid>{''.join(f"<article class='card reference-node'><b>{html.escape(str(target).removeprefix('latency:'))}</b><p><span class='badge {'ok' if item.get('ok') else 'off'}'>{'Доступен' if item.get('ok') else 'Нет ответа'}</span></p><div class=latency>{str(item.get('latency_ms')) + ' мс' if item.get('ok') and item.get('latency_ms') is not None else '—'}</div><small>Последняя проверка: {time.strftime('%H:%M:%S', time.localtime(item['ts']))}</small></article>" for target, item in latest_monitor.items()) or '<div class=card>Проверки ещё не выполнялись</div>'}</div>
+    </section>
     <section class=grid {show('latency')}>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=latency>
         <h2>Низкая задержка и стабильность</h2>
@@ -2794,6 +2797,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </section>
     </section>
 
+    <section {show('release')}><div class=card><div class=section-head><h2>Текущий релиз · {html.escape(s.get('app_version', VERSION))}</h2><span class="badge ok">Стабильный</span></div><div class=reference-kpis><div class=stat>ARM64<b>{'Готов' if 'arm64-v8a' not in current_missing_abis else 'Нет файла'}</b></div><div class=stat>ARMv7<b>{'Готов' if 'armeabi-v7a' not in current_missing_abis else 'Нет файла'}</b></div><div class=stat>Охват<b>{html.escape(s.get('rollout_percent','100'))}%</b></div><div class=stat>Следующая версия<b>{html.escape(s.get('scheduled_app_version') or '—')}</b></div></div><p class=muted>Расписание и загрузка сборок доступны ниже.</p></div></section>
     <section class=grid {show('release')}>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=release>
         <h2>Production выпуск</h2>
@@ -2895,7 +2899,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     </section>
 
     <section class=card {show('users')}>
-      <h2>Юзеры RosPanel (только чтение)</h2>
+      <h2>Пользователи и подписки</h2>
       <form method=get action=/operator class=actions>
         <input type=hidden name=tab value=users>
         <input name=q value="{html.escape(q)}" placeholder="имя / id / note">
@@ -2903,7 +2907,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a class="button secondary" href="{html.escape(rp_base)}" target=_blank rel=noopener>Открыть RosPanel</a>
       </form>
       <p class=muted>Активны {summary.get('active')} · отключены {summary.get('disabled')} · истекли {summary.get('expired')} · онлайн 15м {summary.get('online_15m')}</p>
-      <table><thead><tr><th>Имя</th><th>Статус</th><th>State</th><th>Трафик</th><th>Expire</th><th>Seen</th><th></th></tr></thead>
+      <table><thead><tr><th>Имя</th><th>Статус</th><th>Состояние</th><th>Трафик</th><th>Действует до</th><th>Активность</th><th></th></tr></thead>
       <tbody>{subscribers}</tbody></table>
     </section>
 

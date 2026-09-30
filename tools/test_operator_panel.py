@@ -381,6 +381,15 @@ class OperatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.panel.normalize_routing_scan_targets("127.0.0.1")
 
+    def test_node_map_registry_only_accepts_complete_coordinates(self):
+        raw = "Paris node|31.76.68.243:443|48.8534|2.3488|Paris, France"
+        nodes = self.panel.parse_node_map_config(raw)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["target"], "31.76.68.243:443")
+        self.assertTrue(self.panel.node_map_config_is_valid(raw))
+        self.assertFalse(self.panel.node_map_config_is_valid("missing|fields"))
+        self.assertFalse(self.panel.node_map_config_is_valid("bad|host:443|91|2|location"))
+
 
 if __name__ == "__main__":
     unittest.main()

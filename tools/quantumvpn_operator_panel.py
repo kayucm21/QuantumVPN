@@ -68,7 +68,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.10-control.1"
+PANEL_BUILD = "5.10.10-control.2"
 VERSION = "5.10.10"
 VERSION_CODE = 135
 DEFAULT_NOTE = "QuantumVPN 5.10.10: серверная игра «Дурак с друзьями», виртуальные Q-coins, локальные фоны и обновлённый Quantum Control."
@@ -566,6 +566,10 @@ def conn():
                 "latency_probe_interval": "30",
                 "latency_max_ms": "120",
                 "latency_probe_targets": "1.1.1.1:443,8.8.8.8:443",
+                # One line per node: title|host:port|latitude|longitude|location.
+                # The initial VDS location comes from a public GeoIP lookup on
+                # 2026-10-01 and can be changed in the Nodes page.
+                "node_map_config": "Основной VDS|31.76.68.243:443|48.8534|2.3488|Париж, Франция",
                 "latency_state": "unknown",
                 "latency_last_probe": "0",
                 "latency_best_ms": "0",
@@ -1651,12 +1655,46 @@ def parse_latency_targets(raw: str):
     return targets[:8]
 
 
+def parse_node_map_config(raw: str) -> list[dict]:
+    """Parse bounded, operator-maintained node locations for the network map."""
+    items = []
+    for line in (raw or "").splitlines():
+        fields = [field.strip() for field in line.split("|")]
+        if len(fields) != 5:
+            continue
+        label, target, latitude, longitude, location = fields
+        try:
+            latitude_value = float(latitude)
+            longitude_value = float(longitude)
+        except (TypeError, ValueError):
+            continue
+        if not (label and target and -90 <= latitude_value <= 90 and -180 <= longitude_value <= 180):
+            continue
+        if len(label) > 64 or len(target) > 253 or len(location) > 96:
+            continue
+        items.append({
+            "label": label,
+            "target": target,
+            "latitude": latitude_value,
+            "longitude": longitude_value,
+            "location": location,
+        })
+    return items[:24]
+
+
+def node_map_config_is_valid(raw: str) -> bool:
+    lines = [line for line in (raw or "").splitlines() if line.strip()]
+    return len(lines) <= 24 and (not lines or len(parse_node_map_config(raw)) == len(lines))
+
+
 def probe_tcp_latency(host: str, port: int):
     started = time.monotonic()
     sock = None
     try:
         sock = socket.create_connection((host, port), timeout=3)
-        return {"ok": True, "latency_ms": round((time.monotonic() - started) * 1000), "status": f"tcp:{port}"}
+        # A successful local connection can round below one millisecond.  Keep
+        # that distinct from the 0 value used by failed probes in old records.
+        return {"ok": True, "latency_ms": max(1, round((time.monotonic() - started) * 1000)), "status": f"tcp:{port}"}
     except Exception as exc:
         return {"ok": False, "latency_ms": 0, "error": str(exc)}
     finally:
@@ -2214,18 +2252,29 @@ def control_reference_css():
     .reference-top{display:grid;grid-template-columns:1.35fr 1fr;gap:14px;margin-bottom:14px}.reference-bottom{display:grid;grid-template-columns:1.4fr .9fr .9fr;gap:14px}.reference-bottom>*,.reference-top>*{min-width:0}.reference-stack{display:grid;gap:14px;align-content:start}.reference-table{overflow:auto;max-width:100%}.reference-table table{font-size:12px;margin:0;width:100%}.reference-table th{white-space:nowrap;font-weight:500}.reference-table td{padding:12px 8px}
     .reference-map{position:relative;min-height:255px;background:radial-gradient(ellipse at center,#0a32415c,transparent 70%)}.reference-map svg{width:100%;height:245px}.reference-map-note{color:#7398b9;font-size:11px;text-align:center}.reference-node-strip{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.reference-node-strip span{padding:6px 9px;background:#081e30;border:1px solid #1a3d53;border-radius:6px;font-size:11px}.reference-node-strip b{color:#39e7c2;margin-left:8px}
     .reference-game{padding:20px;border-radius:10px;background:radial-gradient(ellipse at 80% 0,#6a32ba77,transparent),linear-gradient(110deg,#172965,#1c1649);border:1px solid #51427c;margin-bottom:14px}.reference-game strong{font-size:28px;display:block;color:#e5dcff}.reference-game p{color:#b9b1ef;font-size:12px}.reference-game a{display:inline-block;margin-top:5px}.reference-audit{font-size:12px;display:flex;gap:10px;border-bottom:1px solid #132e47;padding:10px 0}.reference-audit time{color:#7398b9;white-space:nowrap}.reference-audit span{overflow-wrap:anywhere}.event-row{min-height:42px;grid-template-columns:8px 42px 82px minmax(0,1fr);font-size:12px}.event-row i{display:none}
-    .reference-node-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.reference-node b{font-size:15px;overflow-wrap:anywhere}.reference-node .latency{font-size:25px;color:#41ead0;margin:18px 0 5px}.reference-node small{color:#83a6c5}.badge{display:inline-block;padding:4px 8px;border-radius:15px;background:#10283e}.badge.ok{background:#06392f;color:#35eab7}.badge.off{background:#381a31;color:#ff7491}
+    .reference-node-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.reference-node b{font-size:15px;overflow-wrap:anywhere}.reference-node .latency{font-size:25px;color:#41ead0;margin:18px 0 5px}.reference-node small{color:#83a6c5}.badge{display:inline-block;padding:4px 8px;border-radius:15px;background:#10283e}.badge.ok{background:#06392f;color:#35eab7}.badge.off{background:#381a31;color:#ff7491}.node-map-details{margin-top:14px;border-top:1px solid #17384f;padding-top:12px}.node-map-details summary{cursor:pointer;color:#91dff7;font-weight:650}.node-map-details textarea{min-height:105px;font-family:Consolas,monospace;font-size:12px}
     @media(min-width:1100px){.panel-content>.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:1200px){.panel-shell{grid-template-columns:210px minmax(0,1fr);gap:16px}.reference-bottom{grid-template-columns:1fr 1fr}.reference-bottom>.card:first-child{grid-column:1/-1}.reference-kpi{padding:12px!important;gap:8px}.reference-kpi i{display:none}.reference-top{grid-template-columns:1fr}}
     @media(max-width:800px){main{padding:10px}.panel-shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;padding:8px}.sidebar:after{display:none}.hero{height:auto}.hero-top{flex-wrap:wrap;gap:10px}.control-search{width:100%}.reference-kpis{grid-template-columns:1fr 1fr}.reference-bottom{grid-template-columns:1fr}.reference-heading h1{font-size:22px}}
     """
 
 
-def reference_world_map():
-    # A decorative world silhouette, not invented node locations or measurements.
-    return '''<div class=reference-map><svg viewBox="0 0 800 350" aria-label="Карта мира" role=img>
+def reference_world_map(nodes: list[dict]):
+    """Render a world base plus pins supplied by the authenticated node registry."""
+    markers = []
+    for node in nodes:
+        x = 22 + ((float(node["longitude"]) + 180) / 360) * 756
+        y = 18 + ((90 - float(node["latitude"])) / 180) * 314
+        color = "#35e7ad" if node.get("state") == "ok" else "#ffb44b" if node.get("state") == "unknown" else "#ff647d"
+        label_x = min(700, max(8, x + 11))
+        label_y = max(18, min(334, y - 10))
+        title = f"{node['label']} · {node['location']} · {node['measurement']}"
+        markers.append(
+            f"<g><title>{html.escape(title)}</title><circle cx='{x:.1f}' cy='{y:.1f}' r='12' fill='{color}' opacity='.16'/><circle cx='{x:.1f}' cy='{y:.1f}' r='6' fill='{color}' stroke='#d8f8ff' stroke-width='1.5'/><text x='{label_x:.1f}' y='{label_y:.1f}' fill='{color}' font-size='12'>{html.escape(node['label'])}</text></g>"
+        )
+    return '''<div class=reference-map><svg viewBox="0 0 800 350" aria-label="Карта реальных нод" role=img>
     <defs><pattern id=world-dots width=7 height=7 patternUnits=userSpaceOnUse><circle cx=2 cy=2 r=1.4 fill="#267395"/></pattern></defs>
-    <g fill="url(#world-dots)" stroke="#1b4864" stroke-width="1"><path d="M50 75L95 45 153 42 189 65 232 59 254 89 211 109 194 143 160 165 137 145 117 119 81 109Z"/><path d="M176 169L210 171 244 206 260 237 234 268 216 315 196 287 185 250 162 207Z"/><path d="M242 32L289 25 306 43 283 72 263 77Z"/><path d="M347 92L379 66 407 75 428 58 455 76 433 110 393 123 369 112Z"/><path d="M356 135L400 122 440 146 452 186 424 222 410 264 385 251 370 212 342 168Z"/><path d="M443 67L493 43 550 53 579 43 635 63 709 75 747 104 704 132 659 129 644 164 602 159 581 193 549 156 514 171 484 134 444 116Z"/><path d="M610 193L650 202 680 221 658 230 628 219Z"/><path d="M657 256L700 237 738 252 755 286 715 303 679 291 650 277Z"/><path d="M774 302L785 281 791 291 783 318Z"/></g></svg></div>'''
+    <g fill="url(#world-dots)" stroke="#1b4864" stroke-width="1"><path d="M50 75L95 45 153 42 189 65 232 59 254 89 211 109 194 143 160 165 137 145 117 119 81 109Z"/><path d="M176 169L210 171 244 206 260 237 234 268 216 315 196 287 185 250 162 207Z"/><path d="M242 32L289 25 306 43 283 72 263 77Z"/><path d="M347 92L379 66 407 75 428 58 455 76 433 110 393 123 369 112Z"/><path d="M356 135L400 122 440 146 452 186 424 222 410 264 385 251 370 212 342 168Z"/><path d="M443 67L493 43 550 53 579 43 635 63 709 75 747 104 704 132 659 129 644 164 602 159 581 193 549 156 514 171 484 134 444 116Z"/><path d="M610 193L650 202 680 221 658 230 628 219Z"/><path d="M657 256L700 237 738 252 755 286 715 303 679 291 650 277Z"/><path d="M774 302L785 281 791 291 783 318Z"/></g>''' + "".join(markers) + "</svg></div>"
 
 
 def render_login(error=""):
@@ -2511,6 +2560,16 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         f"<span>{html.escape(detail or kind)[:90]}</span><i>•••</i></div>"
         for ts, kind, device, ip, detail in rows[:7]
     ) or "<div class=empty-state>Событий пока нет</div>"
+    map_nodes = []
+    for node in parse_node_map_config(s.get("node_map_config", "")):
+        sample = latest_monitor.get(f"latency:{node['target']}") or latest_monitor.get(node["target"])
+        if sample and sample.get("ok"):
+            state, measurement = "ok", f"{int(sample.get('latency_ms') or 0)} мс"
+        elif sample:
+            state, measurement = "off", "нет ответа"
+        else:
+            state, measurement = "unknown", "замер ещё не выполнен"
+        map_nodes.append({**node, "state": state, "measurement": measurement})
     reference_targets = "".join(
         f"<span>{html.escape(str(target).removeprefix('latency:'))}<b class={'ok' if row.get('ok') else 'off'}>{str(row.get('latency_ms')) + ' мс' if row.get('ok') and row.get('latency_ms') is not None else 'нет ответа'}</b></span>"
         for target, row in list(latest_monitor.items())[:6]
@@ -2562,7 +2621,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <div class="card reference-kpi"><i>△</i><div><span>Открытые события</span><b>{report['open_incidents']}</b><small>Требуют внимания</small></div></div>
       </div>
       <div class=reference-top>
-        <section class=card><div class=section-head><h2>Карта сети и доступность</h2><a href="/operator?tab=latency">Все ноды →</a></div>{reference_world_map()}<div class=reference-map-note>География нод ещё не задана. Измерения доступности — ниже.</div><div class=reference-node-strip>{reference_targets}</div></section>
+        <section class=card><div class=section-head><h2>Карта нод и текущая нагрузка</h2><a href="/operator?tab=latency">Управлять нодами →</a></div>{reference_world_map(map_nodes)}<div class=reference-map-note>Показаны {len(map_nodes)} нод из реестра. Пинг измеряется с VDS; это не пинг телефона пользователя.</div><div class=reference-node-strip>{''.join(f"<span>{html.escape(node['label'])}<b class={'ok' if node['state'] == 'ok' else 'off'}>{html.escape(node['measurement'])}</b></span>" for node in map_nodes) or reference_targets}</div></section>
         <section class=card><div class=section-head><h2>Последние события</h2><a href="/operator?tab=incidents">Все события →</a></div><div class=event-list>{event_timeline}</div></section>
       </div>
       <div class=reference-bottom>
@@ -2686,8 +2745,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     </section>
 
     <section {show('latency')}>
-      <div class=card><div class=section-head><h2>Сеть и мониторинг</h2><a class="button secondary" href="{html.escape(rp_base)}" target=_blank rel=noopener>Настроить ноды ↗</a></div>{reference_world_map()}<p class=reference-map-note>Карта — обзор мира. Географические координаты нод пока не заданы.</p></div>
-      <div class=reference-node-grid>{''.join(f"<article class='card reference-node'><b>{html.escape(str(target).removeprefix('latency:'))}</b><p><span class='badge {'ok' if item.get('ok') else 'off'}'>{'Доступен' if item.get('ok') else 'Нет ответа'}</span></p><div class=latency>{str(item.get('latency_ms')) + ' мс' if item.get('ok') and item.get('latency_ms') is not None else '—'}</div><small>Последняя проверка: {time.strftime('%H:%M:%S', time.localtime(item['ts']))}</small></article>" for target, item in latest_monitor.items()) or '<div class=card>Проверки ещё не выполнялись</div>'}</div>
+      <div class=card><div class=section-head><h2>Карта нод</h2><span class=muted>Координаты из реестра нод</span></div>{reference_world_map(map_nodes)}<p class=reference-map-note>Зелёный — последний TCP-замер успешен; красный — нет ответа; жёлтый — замер ещё не выполнялся.</p></div>
+      <div class=reference-node-grid>{''.join(f"<article class='card reference-node'><b>{html.escape(node['label'])}</b><p><small>{html.escape(node['location'])} · {html.escape(node['target'])}</small></p><p><span class='badge {'ok' if node['state'] == 'ok' else 'off'}'>{'Доступна' if node['state'] == 'ok' else 'Нет ответа' if node['state'] == 'off' else 'Ожидает замер'}</span></p><div class=latency>{html.escape(node['measurement'])}</div></article>" for node in map_nodes) or '<div class=card>Ноды для карты не настроены</div>'}</div>
     </section>
     <section class=grid {show('latency')}>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=latency>
@@ -2696,6 +2755,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label>Интервал проверки, секунд<input type=number name=latency_probe_interval min=15 max=300 value="{html.escape(s.get('latency_probe_interval','30'))}"></label>
         <label>Порог деградации, мс<input type=number name=latency_max_ms min=20 max=5000 value="{html.escape(s.get('latency_max_ms','120'))}"></label>
         <label>TCP‑цели (host:port, через запятую)<textarea name=latency_probe_targets>{html.escape(s.get('latency_probe_targets','1.1.1.1:443,8.8.8.8:443'))}</textarea></label>
+        <details class=node-map-details><summary>Ноды на карте</summary><p class=muted>Одна строка: название | host:port | широта | долгота | местоположение. Координаты нужны, чтобы отметить реальную ноду на карте.</p><label>Реестр нод<textarea name=node_map_config>{html.escape(s.get('node_map_config',''))}</textarea></label></details>
         <h3 style="margin-top:16px">Автоматический карантин</h3>
         <label><input type=checkbox name=auto_quarantine_enabled {checked('auto_quarantine_enabled')}> Исключать нестабильные ноды из балансировки</label>
         <label>Ошибок до исключения<input type=number name=auto_quarantine_failures min=2 max=10 value="{html.escape(s.get('auto_quarantine_failures','3'))}"></label>
@@ -4810,11 +4870,15 @@ class App(BaseHTTPRequestHandler):
             targets = ",".join(f"{host}:{port}" for host, port in parse_latency_targets(form.get("latency_probe_targets", [""])[0]))
             if not targets:
                 return self.reply(400, '{"error":"latency_targets_required"}')
+            node_map_config = form.get("node_map_config", [""])[0].strip()[:5000]
+            if not node_map_config_is_valid(node_map_config):
+                return self.reply(400, '{"error":"invalid_node_map_config"}')
             values = {
                 "latency_optimization_enabled": "1" if "latency_optimization_enabled" in form else "0",
                 "latency_probe_interval": str(probe_interval),
                 "latency_max_ms": str(max_latency),
                 "latency_probe_targets": targets,
+                "node_map_config": node_map_config,
                 "auto_quarantine_enabled": "1" if "auto_quarantine_enabled" in form else "0",
                 "auto_quarantine_failures": str(quarantine_failures),
                 "auto_quarantine_recovery_checks": str(quarantine_recovery),

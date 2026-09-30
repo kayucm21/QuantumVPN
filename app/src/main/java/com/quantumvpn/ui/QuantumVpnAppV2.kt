@@ -78,6 +78,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.launch
@@ -118,6 +121,7 @@ private val LocalAuroraAccent = staticCompositionLocalOf { Color(0xFF3DE7FF) }
 private val LocalAuroraBackgroundStyle = staticCompositionLocalOf { AppBackgroundStyle.Aurora }
 private val LocalAuroraCustomBackground = staticCompositionLocalOf<String?> { null }
 private val LocalAuroraTouchBubbles = staticCompositionLocalOf { true }
+private data class AuroraTapBubble(val id: Long, val origin: Offset)
 private object Aurora {
     val Night: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF040B16) else Color(0xFFF3F7FB)
     val VioletNight: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF071526) else Color(0xFFE8F1FA)
@@ -144,6 +148,7 @@ private fun V2AuroraBackdrop(
     val dark = LocalAuroraDark.current
     val backgroundStyle = LocalAuroraBackgroundStyle.current
     val backgroundUri = LocalAuroraCustomBackground.current
+    val touchBubbles = LocalAuroraTouchBubbles.current
     val context = LocalContext.current
     val violetBloom = if (dark) Color(0xFF8B5CF6) else Color(0xFF6D4AFF)
     val tealBloom = if (dark) Color(0xFF2EE5C8) else Color(0xFF00A58B)
@@ -162,8 +167,29 @@ private fun V2AuroraBackdrop(
             null
         }
     }
+    var tapBubbles by remember { mutableStateOf(emptyList<AuroraTapBubble>()) }
+    tapBubbles.forEach { bubble ->
+        LaunchedEffect(bubble.id) {
+            kotlinx.coroutines.delay(520)
+            tapBubbles = tapBubbles.filterNot { it.id == bubble.id }
+        }
+    }
     Box(
-        modifier = modifier.background(
+        modifier = modifier
+            .pointerInput(touchBubbles) {
+                if (touchBubbles) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val up = awaitPointerEvent(PointerEventPass.Final).changes
+                                .firstOrNull { it.changedToUpIgnoreConsumed() }
+                            if (up != null) {
+                                tapBubbles = (tapBubbles + AuroraTapBubble(System.nanoTime(), up.position)).takeLast(5)
+                            }
+                        }
+                    }
+                }
+            }
+            .background(
             Brush.verticalGradient(
                 listOf(
                     when (backgroundStyle) {
@@ -216,6 +242,22 @@ private fun V2AuroraBackdrop(
             }
         }
         content()
+        if (tapBubbles.isNotEmpty()) {
+            Canvas(Modifier.fillMaxSize()) {
+                tapBubbles.forEach { bubble ->
+                    drawCircle(
+                        color = mint.copy(alpha = .24f),
+                        radius = 38.dp.toPx(),
+                        center = bubble.origin,
+                    )
+                    drawCircle(
+                        color = Color.White.copy(alpha = .24f),
+                        radius = 16.dp.toPx(),
+                        center = bubble.origin,
+                    )
+                }
+            }
+        }
     }
 }
 

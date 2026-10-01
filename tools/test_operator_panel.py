@@ -312,6 +312,27 @@ class OperatorTests(unittest.TestCase):
             policy = json.load(response)
         self.assertNotIn(target, policy["nodes_draining"])
 
+    def test_balancer_ignores_public_probe_not_registered_as_node(self):
+        with closing(self.panel.conn()) as db:
+            previous = self.panel.settings(db)
+            try:
+                self.panel.set_settings(db, {
+                    "node_map_config": "VPN node|31.76.68.243:443|50.1109|8.6821|Frankfurt",
+                    "latency_probe_targets": "1.1.1.1:443,31.76.68.243:443",
+                    "node_drains": "{}",
+                    "node_quarantine": "{}",
+                })
+                self.panel.record_health(db, "latency:1.1.1.1:443", {"ok": True, "latency_ms": 5, "status": "tcp:443"})
+                self.panel.record_health(db, "latency:31.76.68.243:443", {"ok": True, "latency_ms": 45, "status": "tcp:443"})
+                snapshot = self.panel.load_balancer_snapshot(db, self.panel.settings(db))
+                self.assertEqual(snapshot["selected"], "31.76.68.243:443")
+                self.assertEqual([item["target"] for item in snapshot["candidates"]], ["31.76.68.243:443"])
+            finally:
+                self.panel.set_settings(db, {
+                    key: previous[key]
+                    for key in ("node_map_config", "latency_probe_targets", "node_drains", "node_quarantine")
+                })
+
     def test_support_queue_creates_and_closes_ticket(self):
         token = base64.b64encode(b"test:test").decode()
         with urlopen(Request(

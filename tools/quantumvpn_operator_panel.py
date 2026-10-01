@@ -1482,9 +1482,10 @@ def update_auto_quarantine(db, s, targets):
 def load_balancer_snapshot(db, s):
     """Return a deterministic, health-aware node recommendation for the panel.
 
-    The operator never silently rewrites subscription data. It ranks the
-    configured TCP probe targets and exposes the decision through the policy
-    API so clients and operators can see why a target was preferred.
+    The operator never silently rewrites subscription data. It ranks only
+    endpoints registered as VPN nodes. Public probes (for example 1.1.1.1)
+    may still be kept for network diagnostics, but must never be suggested to
+    a client as a VPN node.
     """
     enabled_flag = enabled(s, "load_balancer_enabled", True)
     try:
@@ -1499,11 +1500,24 @@ def load_balancer_snapshot(db, s):
     for row in rows:
         target = str(row[1])
         latest.setdefault(target, row)
+    registered = {
+        str(node["target"]).strip()
+        for node in parse_node_map_config(s.get("node_map_config", ""))
+        if str(node.get("target") or "").strip()
+    }
+    # Older installations can omit the map entirely. In that case retain the
+    # former behaviour until the operator registers actual nodes instead of
+    # unexpectedly disabling balancing.
+    allowed = registered or {
+        f"{host}:{port}" for host, port in parse_latency_targets(s.get("latency_probe_targets", ""))
+    }
     candidates = []
     quarantined = active_quarantine(s)
     drained = manual_node_drains(s)
     for target, row in latest.items():
         short_target = target.removeprefix("latency:")
+        if short_target not in allowed:
+            continue
         if short_target in quarantined or short_target in drained:
             continue
         latency = int(row[3] or 0)
@@ -1773,19 +1787,32 @@ def run_latency_probe(db, s=None):
     if not enabled(s, "latency_optimization_enabled", True):
         return {"enabled": False, "samples": [], "best_ms": 0}
     targets = parse_latency_targets(s.get("latency_probe_targets", ""))
+    registered = {
+        str(node["target"]).strip()
+        for node in parse_node_map_config(s.get("node_map_config", ""))
+        if str(node.get("target") or "").strip()
+    }
+    node_targets = [
+        (host, port) for host, port in targets
+        if not registered or f"{host}:{port}" in registered
+    ]
     samples = []
+    node_samples = []
     for host, port in targets:
         result = probe_tcp_latency(host, port)
         record_health(db, f"latency:{host}:{port}", result)
         if result.get("ok"):
-            samples.append(int(result.get("latency_ms") or 0))
+            latency = int(result.get("latency_ms") or 0)
+            samples.append(latency)
+            if (host, port) in node_targets:
+                node_samples.append(latency)
     # Keep the quarantine state in the panel database.  The next policy
     # response and balancer decision automatically exclude failing targets.
-    quarantine = update_auto_quarantine(db, s, targets)
+    quarantine = update_auto_quarantine(db, s, node_targets)
     s = {**s, "node_quarantine": json.dumps(quarantine)}
     max_ms = max(20, min(5000, int(s.get("latency_max_ms", "120") or 120)))
-    best = min(samples) if samples else 0
-    state = "healthy" if samples and best <= max_ms else ("degraded" if samples else "offline")
+    best = min(node_samples) if node_samples else 0
+    state = "healthy" if node_samples and best <= max_ms else ("degraded" if node_samples else "offline")
     set_settings(db, {
         "latency_state": state,
         "latency_last_probe": str(int(time.time())),
@@ -1911,13 +1938,29 @@ def promote_scheduled_release(db, now=None):
 
 
 def scheduled_release_worker():
+    last_error = ""
+    last_error_at = 0
     while True:
+        db = None
         try:
             db = conn()
             promote_scheduled_release(db)
-            db.close()
-        except Exception:
-            pass
+        except Exception as error:
+            message = f"{type(error).__name__}: {error}"
+            moment = int(time.time())
+            # The worker must not silently lose a planned APK publication.
+            # Coalesce repeats, otherwise a locked SQLite database could flood
+            # the journal every 20 seconds.
+            if message != last_error or moment - last_error_at >= 300:
+                print(f"[quantumvpn] scheduled release worker: {message}", flush=True)
+                last_error = message
+                last_error_at = moment
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
         time.sleep(20)
 
 

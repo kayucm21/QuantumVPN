@@ -70,6 +70,10 @@ sealed interface UpdateState {
         val candidate: UpdateCandidate,
         val downloadedBytes: Long,
         val totalBytes: Long,
+        /** Measured by the active downloader; zero means the first sample has not arrived yet. */
+        val speedBytesPerSecond: Long = 0L,
+        /** Rounded remaining duration, available only after a meaningful speed sample. */
+        val etaSeconds: Long? = null,
     ) : UpdateState
     data class Ready(val candidate: UpdateCandidate) : UpdateState
     data class Failure(val message: String, val candidate: UpdateCandidate? = null) : UpdateState

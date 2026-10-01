@@ -13,6 +13,13 @@ import androidx.core.content.FileProvider
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 
+data class SystemDownloadProgress(
+    val downloadedBytes: Long,
+    val totalBytes: Long,
+    val speedBytesPerSecond: Long,
+    val etaSeconds: Long?,
+)
+
 /**
  * Hands the APK URL to Android's DownloadManager, then opens the system package installer
  * ("система попросит обновить") when the file is ready.
@@ -22,10 +29,14 @@ class SystemApkUpdateInstaller(context: Context) {
     private val downloadManager = app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
     private val activeId = AtomicLong(-1L)
     private var pendingCandidate: UpdateCandidate? = null
-    private var onProgress: ((downloaded: Long, total: Long) -> Unit)? = null
+    private var onProgress: ((SystemDownloadProgress) -> Unit)? = null
     private var onReady: ((File) -> Unit)? = null
     private var onFailed: ((String) -> Unit)? = null
     private var receiverRegistered = false
+    private var lastProgressBytes = 0L
+    private var lastProgressAtNanos = 0L
+    private var smoothedSpeed = 0L
+    private var completedFile: File? = null
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -38,7 +49,7 @@ class SystemApkUpdateInstaller(context: Context) {
 
     fun start(
         candidate: UpdateCandidate,
-        onProgress: (downloaded: Long, total: Long) -> Unit,
+        onProgress: (SystemDownloadProgress) -> Unit,
         onReady: (File) -> Unit,
         onFailed: (String) -> Unit,
     ) {
@@ -46,6 +57,11 @@ class SystemApkUpdateInstaller(context: Context) {
         this.onReady = onReady
         this.onFailed = onFailed
         this.pendingCandidate = candidate
+        this.completedFile?.delete()
+        this.completedFile = null
+        lastProgressBytes = 0L
+        lastProgressAtNanos = System.nanoTime()
+        smoothedSpeed = 0L
         ensureReceiver()
         cancelActive()
 
@@ -66,7 +82,7 @@ class SystemApkUpdateInstaller(context: Context) {
             return
         }
         activeId.set(id)
-        onProgress(0L, candidate.metadata.apkSize.coerceAtLeast(0L))
+        emitProgress(0L, candidate.metadata.apkSize.coerceAtLeast(0L))
     }
 
     fun pollProgress() {
@@ -81,7 +97,7 @@ class SystemApkUpdateInstaller(context: Context) {
                 ?: pendingCandidate?.metadata?.apkSize ?: -1L
             when (status) {
                 DownloadManager.STATUS_RUNNING, DownloadManager.STATUS_PENDING, DownloadManager.STATUS_PAUSED ->
-                    onProgress?.invoke(downloaded.coerceAtLeast(0L), total)
+                    emitProgress(downloaded.coerceAtLeast(0L), total)
                 DownloadManager.STATUS_SUCCESSFUL -> handleComplete(id)
                 DownloadManager.STATUS_FAILED -> {
                     val reason = cursor.int(DownloadManager.COLUMN_REASON)
@@ -109,6 +125,15 @@ class SystemApkUpdateInstaller(context: Context) {
 
     fun cancel() {
         cancelActive()
+        completedFile?.delete()
+        completedFile = null
+        pendingCandidate = null
+    }
+
+    /** Called after Android's installer returns, regardless of install/cancel result. */
+    fun finishInstallerHandoff() {
+        completedFile?.delete()
+        completedFile = null
         pendingCandidate = null
     }
 
@@ -129,7 +154,8 @@ class SystemApkUpdateInstaller(context: Context) {
             // Still hand off — installer/sha check can reject; DownloadManager sometimes omits size.
         }
         activeId.set(-1L)
-        onProgress?.invoke(file.length(), file.length())
+        completedFile = file
+        emitProgress(file.length(), file.length())
         onReady?.invoke(file)
     }
 
@@ -162,6 +188,31 @@ class SystemApkUpdateInstaller(context: Context) {
     private fun fail(message: String) {
         activeId.set(-1L)
         onFailed?.invoke(message)
+    }
+
+    private fun emitProgress(downloaded: Long, total: Long) {
+        val now = System.nanoTime()
+        val elapsedNanos = (now - lastProgressAtNanos).coerceAtLeast(1L)
+        val delta = (downloaded - lastProgressBytes).coerceAtLeast(0L)
+        val instantSpeed = delta * 1_000_000_000L / elapsedNanos
+        smoothedSpeed = when {
+            instantSpeed <= 0L -> smoothedSpeed
+            smoothedSpeed <= 0L -> instantSpeed
+            else -> ((smoothedSpeed * 3L) + instantSpeed) / 4L
+        }
+        lastProgressBytes = downloaded
+        lastProgressAtNanos = now
+        val remaining = (total - downloaded).coerceAtLeast(0L)
+        val eta = smoothedSpeed.takeIf { it >= 16L * 1024L }
+            ?.let { (remaining + it - 1L) / it }
+        onProgress?.invoke(
+            SystemDownloadProgress(
+                downloadedBytes = downloaded,
+                totalBytes = total,
+                speedBytesPerSecond = smoothedSpeed,
+                etaSeconds = eta,
+            ),
+        )
     }
 
     private fun cancelActive() {

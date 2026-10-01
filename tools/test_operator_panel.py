@@ -289,6 +289,51 @@ class OperatorTests(unittest.TestCase):
         self.assertIn("Автопилот панели", page)
         self.assertIn("Готовность релизов", page)
 
+    def test_manual_node_drain_is_excluded_from_policy(self):
+        token = base64.b64encode(b"test:test").decode()
+        target = "31.76.68.243:443"
+        with urlopen(Request(
+            self.base + "/operator/actions",
+            data=("action=drain_node&return_tab=latency&target=" + target.replace(":", "%3A")).encode(),
+            headers={"Authorization": "Basic " + token},
+        )) as response:
+            self.assertEqual(response.status, 200)
+        with urlopen(self.base + "/api/client/policy") as response:
+            policy = json.load(response)
+        self.assertIn(target, policy["nodes_draining"])
+        self.assertIn(target, policy["nodes_forbidden"])
+        with urlopen(Request(
+            self.base + "/operator/actions",
+            data=("action=restore_node&return_tab=latency&target=" + target.replace(":", "%3A")).encode(),
+            headers={"Authorization": "Basic " + token},
+        )) as response:
+            self.assertEqual(response.status, 200)
+        with urlopen(self.base + "/api/client/policy") as response:
+            policy = json.load(response)
+        self.assertNotIn(target, policy["nodes_draining"])
+
+    def test_support_queue_creates_and_closes_ticket(self):
+        token = base64.b64encode(b"test:test").decode()
+        with urlopen(Request(
+            self.base + "/operator/support",
+            data=b"action=create&subject=No+servers&device=device-test-123&body=Check+subscription",
+            headers={"Authorization": "Basic " + token},
+        )) as response:
+            self.assertEqual(response.status, 200)
+        with closing(self.panel.conn()) as db:
+            ticket_id = db.execute(
+                "select id from support_tickets where subject='No servers' order by id desc limit 1"
+            ).fetchone()[0]
+        with urlopen(Request(
+            self.base + "/operator/support",
+            data=f"action=close&id={ticket_id}".encode(),
+            headers={"Authorization": "Basic " + token},
+        )) as response:
+            self.assertEqual(response.status, 200)
+        with closing(self.panel.conn()) as db:
+            closed = db.execute("select closed_at from support_tickets where id=?", (ticket_id,)).fetchone()[0]
+        self.assertGreater(closed, 0)
+
     def test_routing_policy_is_validated_versioned_and_signed(self):
         token = base64.b64encode(b"test:test").decode()
         body = (

@@ -90,6 +90,8 @@ class MainActivity : FragmentActivity() {
     private val updateInstallerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
+        systemApkInstaller.finishInstallerHandoff()
+        systemInstallFile = null
         updateController.onInstallerFinished(result.resultCode == Activity.RESULT_OK)
     }
     private val unknownSourceLauncher = registerForActivityResult(
@@ -100,6 +102,8 @@ class MainActivity : FragmentActivity() {
         if (shouldContinue && canRequestPackageInstalls()) {
             launchUpdateInstaller()
         } else if (shouldContinue) {
+            systemApkInstaller.cancel()
+            systemInstallFile = null
             updateController.failInstallation("Android не разрешил установку из этого источника.")
         }
     }
@@ -495,10 +499,10 @@ class MainActivity : FragmentActivity() {
                 )
             } catch (_: ActivityNotFoundException) {
                 pendingUpdateInstall = false
-                updateController.failInstallation("Android не открыл настройку установки из источника.")
+                failSystemInstall("Android не открыл настройку установки из источника.")
             } catch (_: SecurityException) {
                 pendingUpdateInstall = false
-                updateController.failInstallation("Android запретил открыть настройку установки.")
+                failSystemInstall("Android запретил открыть настройку установки.")
             }
             return
         }
@@ -518,12 +522,18 @@ class MainActivity : FragmentActivity() {
             }
             updateInstallerLauncher.launch(intent)
         } catch (_: ActivityNotFoundException) {
-            updateController.failInstallation("Системный установщик APK не найден.")
+            failSystemInstall("Системный установщик APK не найден.")
         } catch (_: SecurityException) {
-            updateController.failInstallation("Android запретил запуск системной установки.")
+            failSystemInstall("Android запретил запуск системной установки.")
         } catch (error: Exception) {
-            updateController.failInstallation(error.message ?: "Не удалось открыть системную установку.")
+            failSystemInstall(error.message ?: "Не удалось открыть системную установку.")
         }
+    }
+
+    private fun failSystemInstall(message: String) {
+        systemApkInstaller.cancel()
+        systemInstallFile = null
+        updateController.failInstallation(message)
     }
 
     private fun startSystemApkDownload(candidate: UpdateCandidate) {
@@ -533,8 +543,14 @@ class MainActivity : FragmentActivity() {
         updateController.beginSystemDownload(candidate)
         systemApkInstaller.start(
             candidate = candidate,
-            onProgress = { downloaded, total ->
-                updateController.reportSystemProgress(candidate, downloaded, total)
+            onProgress = { progress ->
+                updateController.reportSystemProgress(
+                    candidate = candidate,
+                    downloaded = progress.downloadedBytes,
+                    total = progress.totalBytes,
+                    speedBytesPerSecond = progress.speedBytesPerSecond,
+                    etaSeconds = progress.etaSeconds,
+                )
             },
             onReady = { file ->
                 systemDownloadActive = false

@@ -123,7 +123,13 @@ class UpdateController(
         mutableState.value = UpdateState.Downloading(candidate, 0L, candidate.metadata.apkSize)
     }
 
-    fun reportSystemProgress(candidate: UpdateCandidate, downloaded: Long, total: Long) {
+    fun reportSystemProgress(
+        candidate: UpdateCandidate,
+        downloaded: Long,
+        total: Long,
+        speedBytesPerSecond: Long = 0L,
+        etaSeconds: Long? = null,
+    ) {
         if (mutableState.value !is UpdateState.Downloading &&
             mutableState.value !is UpdateState.Available &&
             mutableState.value !is UpdateState.Failure
@@ -134,6 +140,8 @@ class UpdateController(
             candidate,
             downloaded.coerceAtLeast(0L),
             total.takeIf { it > 0L } ?: candidate.metadata.apkSize,
+            speedBytesPerSecond.coerceAtLeast(0L),
+            etaSeconds?.coerceAtLeast(0L),
         )
     }
 
@@ -183,11 +191,15 @@ class UpdateController(
             partial.delete()
         }
         var lastPublishedAt = 0L
+        var lastSampleAt = System.nanoTime()
+        var lastSampleBytes = 0L
+        var smoothedSpeed = 0L
         val already = partial.takeIf { it.isFile }?.length() ?: 0L
         try {
             val downloadJob = coroutineContext[Job]
             // Prefer Wi‑Fi/LTE under the VPN so panel:8443 is not killed mid-APK.
             // Never wipe .part: HTTP client resumes; VPN fallback is last resort only.
+            lastSampleBytes = already
             mutableState.value = UpdateState.Downloading(candidate, already, candidate.metadata.apkSize)
             // Never flip the VPN for APK download — updaterRouting resets progress and
             // shows "защищённый канал", then the splash exits with a panel error.
@@ -201,11 +213,26 @@ class UpdateController(
                     downloadJob?.ensureActive()
                     val now = System.nanoTime()
                     if (downloaded == candidate.metadata.apkSize || now - lastPublishedAt >= 250_000_000L) {
+                        val elapsedNanos = (now - lastSampleAt).coerceAtLeast(1L)
+                        val transferred = (downloaded - lastSampleBytes).coerceAtLeast(0L)
+                        val instantSpeed = transferred * 1_000_000_000L / elapsedNanos
+                        smoothedSpeed = when {
+                            instantSpeed <= 0L -> smoothedSpeed
+                            smoothedSpeed <= 0L -> instantSpeed
+                            else -> ((smoothedSpeed * 3L) + instantSpeed) / 4L
+                        }
+                        lastSampleAt = now
+                        lastSampleBytes = downloaded
                         lastPublishedAt = now
+                        val remaining = (candidate.metadata.apkSize - downloaded).coerceAtLeast(0L)
+                        val eta = smoothedSpeed.takeIf { it >= 16L * 1024L }
+                            ?.let { (remaining + it - 1L) / it }
                         mutableState.value = UpdateState.Downloading(
                             candidate,
                             downloaded,
                             candidate.metadata.apkSize,
+                            smoothedSpeed,
+                            eta,
                         )
                     }
                 }

@@ -352,7 +352,9 @@ private fun V2StartupSplash(
         is UpdateState.Downloading -> {
             val downloaded = updateState.downloadedBytes / 1024f / 1024f
             val total = updateState.totalBytes / 1024f / 1024f
-            "Система загружает обновление… %.0f%% · %.1f / %.1f МБ".format(displayedProgress * 100, downloaded, total)
+            val speed = formatUpdateSpeed(updateState.speedBytesPerSecond)
+            val eta = formatUpdateEta(updateState.etaSeconds)
+            "Обновление ${updateState.candidate.metadata.versionName}: %.0f%% · %.1f / %.1f МБ\n$speed · $eta".format(displayedProgress * 100, downloaded, total)
         }
         is UpdateState.Ready -> "Готово · Android запросит установку…"
         is UpdateState.Available -> "Найдено обновление · передаём системе…"
@@ -467,6 +469,21 @@ private fun V2StartupSplash(
             Spacer(Modifier.height(12.dp))
             Text("Больше свободы. Больше возможностей. Везде с вами.", color = Color(0xFF93AABE), fontSize = 11.sp)
         }
+    }
+}
+
+private fun formatUpdateSpeed(bytesPerSecond: Long): String = when {
+    bytesPerSecond < 16L * 1024L -> "Считаем скорость…"
+    bytesPerSecond < 1024L * 1024L -> "${bytesPerSecond / 1024L} КБ/с"
+    else -> "%.1f МБ/с".format(bytesPerSecond / 1024f / 1024f)
+}
+
+private fun formatUpdateEta(seconds: Long?): String {
+    if (seconds == null) return "время уточняется"
+    return when {
+        seconds < 60L -> "осталось ${seconds.coerceAtLeast(1L)} с"
+        seconds < 3600L -> "осталось ${seconds / 60L} мин"
+        else -> "осталось ${seconds / 3600L} ч"
     }
 }
 

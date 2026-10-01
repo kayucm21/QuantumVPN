@@ -68,10 +68,10 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.10-control.2"
-VERSION = "5.10.10"
-VERSION_CODE = 135
-DEFAULT_NOTE = "QuantumVPN 5.10.10: серверная игра «Дурак с друзьями», виртуальные Q-coins, локальные фоны и обновлённый Quantum Control."
+PANEL_BUILD = "5.10.11-control.1"
+VERSION = "5.10.11"
+VERSION_CODE = 136
+DEFAULT_NOTE = "QuantumVPN 5.10.11: отдельный экран обновления с объёмом, скоростью и оставшимся временем; расширенный Quantum Control."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 CARD_GAME_TICKET_TTL = 6 * 3600
@@ -464,6 +464,17 @@ def conn():
                     created_at integer not null default 0,
                     updated_at integer not null default 0
                 );
+                create table if not exists support_tickets (
+                    id integer primary key autoincrement,
+                    created_at integer not null,
+                    updated_at integer not null,
+                    closed_at integer not null default 0,
+                    source text not null default 'operator',
+                    device text not null default '',
+                    subject text not null,
+                    body text not null default '',
+                    admin_note text not null default ''
+                );
                 create index if not exists idx_events_device on events(device);
                 create index if not exists idx_events_kind_ts on events(kind, ts);
                 create index if not exists idx_events_ts on events(ts);
@@ -477,6 +488,7 @@ def conn():
                 create index if not exists idx_routing_revisions_revision on routing_revisions(revision desc);
                 create index if not exists idx_card_tables_state_updated on card_tables(state, updated_at desc);
                 create index if not exists idx_card_wallets_updated on card_wallets(updated_at desc);
+                create index if not exists idx_support_tickets_state_updated on support_tickets(closed_at, updated_at desc);
                 """
             )
             defaults = {
@@ -583,6 +595,10 @@ def conn():
                 "auto_quarantine_recovery_checks": "2",
                 "auto_quarantine_ttl_minutes": "30",
                 "node_quarantine": "{}",
+                # A manual drain is an operator-controlled exclusion. It is
+                # separate from auto quarantine so a recovered probe never
+                # silently returns a node that is being serviced.
+                "node_drains": "{}",
                 "rate_limit_per_min": "120",
                 "webhook_enabled": "0",
                 "webhook_url": "",
@@ -1284,6 +1300,27 @@ def service_status():
     xray = process("xray run -c")
     opera = process("opera-proxy")
     disk = shutil.disk_usage("/")
+    cpu_load_percent = 0.0
+    memory_used_pct = 0.0
+    try:
+        load_1m = os.getloadavg()[0]
+        cpu_load_percent = round(min(100.0, load_1m / max(1, os.cpu_count() or 1) * 100.0), 1)
+    except (AttributeError, OSError):
+        pass
+    try:
+        meminfo = {}
+        with open("/proc/meminfo", encoding="utf-8") as mem_file:
+            for line in mem_file:
+                key, _, value = line.partition(":")
+                amount = value.strip().split(" ", 1)[0]
+                if amount.isdigit():
+                    meminfo[key] = int(amount)
+        total = meminfo.get("MemTotal", 0)
+        available = meminfo.get("MemAvailable", 0)
+        if total > 0:
+            memory_used_pct = round((total - available) / total * 100.0, 1)
+    except (OSError, ValueError):
+        pass
     outbounds = []
     try:
         cfg = json.load(open("/var/lib/rospanel/xray/config.json"))
@@ -1297,6 +1334,8 @@ def service_status():
         "opera": opera,
         "disk_free_gb": round(disk.free / (1024**3), 2),
         "disk_used_pct": round(disk.used / disk.total * 100, 1),
+        "cpu_load_pct": cpu_load_percent,
+        "memory_used_pct": memory_used_pct,
         "outbounds": outbounds,
     }
 
@@ -1366,6 +1405,27 @@ def active_quarantine(s):
         for target, value in raw.items()
         if isinstance(value, dict) and int(value.get("until", 0) or 0) > now
     }
+
+
+def manual_node_drains(s):
+    """Return validated manually drained node targets with their operator note."""
+    try:
+        raw = json.loads(s.get("node_drains") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    result = {}
+    for target, value in raw.items():
+        target = str(target).strip()[:253]
+        if not target or not isinstance(value, dict):
+            continue
+        result[target] = {
+            "since": max(0, int(value.get("since", 0) or 0)),
+            "actor": str(value.get("actor") or "operator")[:64],
+            "note": str(value.get("note") or "")[:240],
+        }
+    return result
 
 
 def update_auto_quarantine(db, s, targets):
@@ -1441,9 +1501,10 @@ def load_balancer_snapshot(db, s):
         latest.setdefault(target, row)
     candidates = []
     quarantined = active_quarantine(s)
+    drained = manual_node_drains(s)
     for target, row in latest.items():
         short_target = target.removeprefix("latency:")
-        if short_target in quarantined:
+        if short_target in quarantined or short_target in drained:
             continue
         latency = int(row[3] or 0)
         ok = bool(row[2])
@@ -1465,6 +1526,7 @@ def load_balancer_snapshot(db, s):
         "selected": selected,
         "decision_at": int(s.get("load_balancer_last_decision", "0") or 0),
         "quarantined": sorted(quarantined),
+        "drained": sorted(drained),
         "candidates": candidates[:12],
     }
 
@@ -1818,8 +1880,8 @@ def promote_scheduled_release(db, now=None):
         "app_changelog": note[:1000],
         "min_version_code": str(min_code),
         "update_notifications_enabled": "1",
-        "announce": f"Доступен QuantumVPN {version}: Horizon Glass 2026 и адаптивное оформление.",
-        "announce_en": f"QuantumVPN {version} is available: Horizon Glass 2026 and adaptive theming.",
+        "announce": f"Доступен QuantumVPN {version}. Откройте уведомление, чтобы обновить приложение.",
+        "announce_en": f"QuantumVPN {version} is available. Open the notification to update the app.",
         "force_update_message": f"Доступно обновление QuantumVPN {version}.",
         "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
         "release_schedule_enabled": "0",
@@ -2410,12 +2472,18 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         routing_history = [dict(row) for row in monitor_db.execute(
             "select id,revision,created_at,actor,state,note,payload from routing_revisions order by id desc limit 12"
         ).fetchall()]
+        support_tickets = [dict(row) for row in monitor_db.execute(
+            "select id,created_at,updated_at,closed_at,source,device,subject,body,admin_note "
+            "from support_tickets order by closed_at asc, updated_at desc limit 120"
+        ).fetchall()]
     finally:
         monitor_db.close()
     release_guard = release_guard_snapshot(s)
     backup_info = latest_backup_info()
     quarantined_nodes = balancer.get("quarantined") or []
     quarantine_html = ", ".join(html.escape(str(x)) for x in quarantined_nodes) or "нет"
+    drained_nodes = manual_node_drains(s)
+    drain_html = ", ".join(html.escape(str(x)) for x in drained_nodes) or "нет"
     latest_monitor = {}
     for item in monitor_rows:
         latest_monitor.setdefault(item["target"], item)
@@ -2471,6 +2539,20 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
             f"<td>{state}</td><td>{close}</td></tr>"
         )
     incident_html = "".join(incident_row(item) for item in incident_rows) or "<tr><td colspan=6>Инцидентов пока нет</td></tr>"
+    support_open = sum(1 for item in support_tickets if not int(item.get("closed_at") or 0))
+    def support_row(item):
+        is_open = not int(item.get("closed_at") or 0)
+        action = "close" if is_open else "reopen"
+        action_label = "Закрыть" if is_open else "Открыть"
+        state = "Открыто" if is_open else "Закрыто"
+        return (
+            f"<tr><td>#{int(item['id'])}</td><td class={'warn' if is_open else 'ok'}>{state}</td>"
+            f"<td><b>{html.escape(item['subject'])}</b><br><span class=muted>{html.escape(item['body'][:180])}</span></td>"
+            f"<td>{html.escape(item['device'] or item['source'] or '—')}</td>"
+            f"<td>{time.strftime('%d.%m %H:%M', time.localtime(item['updated_at']))}</td>"
+            f"<td><form method=post action=/operator/support class=actions><input type=hidden name=action value={action}><input type=hidden name=id value={int(item['id'])}><button class=secondary>{action_label}</button></form></td></tr>"
+        )
+    support_html = "".join(support_row(item) for item in support_tickets) or "<tr><td colspan=6>Обращений пока нет</td></tr>"
     webhook_events = html.escape(s.get("webhook_events", "incident,release,maintenance,diagnostic"))
     routing_profile_options = "".join(
         f"<option value='{name}' {'selected' if s.get('routing_profile', 'balanced') == name else ''}>{html.escape(label)}</option>"
@@ -2570,6 +2652,13 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         else:
             state, measurement = "unknown", "замер ещё не выполнен"
         map_nodes.append({**node, "state": state, "measurement": measurement})
+    node_drain_cards = "".join(
+        f"<article class='card reference-node'><b>{html.escape(node['label'])}</b><p><small>{html.escape(node['location'])} · {html.escape(node['target'])}</small></p>"
+        f"<p><span class='badge {'warn' if node['target'] in drained_nodes else ('ok' if node['state'] == 'ok' else 'off')}'>{'Техобслуживание' if node['target'] in drained_nodes else 'Доступна' if node['state'] == 'ok' else 'Нет ответа' if node['state'] == 'off' else 'Ожидает замер'}</span></p>"
+        f"<div class=latency>{html.escape(node['measurement'])}</div>"
+        f"<form method=post action=/operator/actions class=actions style='margin-top:10px'><input type=hidden name=return_tab value=latency><input type=hidden name=target value='{html.escape(node['target'], quote=True)}'><input type=hidden name=action value={'restore_node' if node['target'] in drained_nodes else 'drain_node'}><button class=secondary>{'Вернуть в балансировку' if node['target'] in drained_nodes else 'Перевести в техработы'}</button></form></article>"
+        for node in map_nodes
+    ) or "<div class=card>Ноды для карты не настроены</div>"
     reference_targets = "".join(
         f"<span>{html.escape(str(target).removeprefix('latency:'))}<b class={'ok' if row.get('ok') else 'off'}>{str(row.get('latency_ms')) + ' мс' if row.get('ok') and row.get('latency_ms') is not None else 'нет ответа'}</b></span>"
         for target, row in list(latest_monitor.items())[:6]
@@ -2582,7 +2671,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         f"<div class=reference-audit><time>{time.strftime('%H:%M', time.localtime(a[0]))}</time><span>{html.escape(str(a[1]))} · {html.escape(str(a[3]))}</span></div>"
         for a in audit_rows[:4]
     ) or '<p class=muted>Записей пока нет</p>'
-    page_titles = {'dashboard': ('КОМАНДНЫЙ ЦЕНТР', 'Обзор состояния VPN-инфраструктуры'), 'latency': ('Ноды', 'Доступность и задержка подключений'), 'users': ('Пользователи', 'Подписчики и активность'), 'service': ('Подписки', 'Доступ, протоколы и обслуживание сервиса'), 'release': ('Релизы', 'Сборки приложения и расписание публикации'), 'incidents': ('События', 'Состояние сервисов и инциденты'), 'audit': ('Аудит', 'Журнал действий администраторов'), 'cards': ('Игры и награды', 'Карточные столы и виртуальные Q-coins')}
+    page_titles = {'dashboard': ('КОМАНДНЫЙ ЦЕНТР', 'Обзор состояния VPN-инфраструктуры'), 'latency': ('Ноды', 'Доступность и задержка подключений'), 'users': ('Пользователи', 'Подписчики и активность'), 'service': ('Подписки', 'Доступ, протоколы и обслуживание сервиса'), 'release': ('Релизы', 'Сборки приложения и расписание публикации'), 'incidents': ('События', 'Состояние сервисов и инциденты'), 'audit': ('Аудит', 'Журнал действий администраторов'), 'cards': ('Игры и награды', 'Карточные столы и виртуальные Q-coins'), 'support': ('Поддержка', 'Обращения, заметки и диагностика')}
     page_title, page_description = page_titles.get(section, ('Quantum Control', 'Управление сервисом'))
     current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -2600,7 +2689,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a class="{'active' if section in ('incidents','logs','reports') else ''}" href="/operator?tab=incidents"><span class=nav-ico>♧</span> События</a>
         <a class="{'active' if section in ('audit','integrations','security','admins') else ''}" href="/operator?tab=audit"><span class=nav-ico>▤</span> Аудит</a>
         <details class=nav-group><summary>Ещё</summary>
-          <a href="/operator?tab=fleet">Центр флота</a><a href="/operator?tab=automation">Автопилот</a><a href="/operator?tab=devices">Устройства</a><a href="/operator?tab=features">Функции</a><a href="/operator?tab=branding">Оформление</a><a href="/operator?tab=donations">Пожертвования</a><a href="/operator?tab=reports">Отчёты</a><a href="/operator?tab=integrations">Интеграции</a><a href="/operator?tab=security">Безопасность</a><a href="/operator?tab=logs">Живые логи</a>
+          <a href="/operator?tab=fleet">Центр флота</a><a href="/operator?tab=automation">Автопилот</a><a href="/operator?tab=devices">Устройства</a><a href="/operator?tab=features">Функции</a><a href="/operator?tab=branding">Оформление</a><a href="/operator?tab=donations">Пожертвования</a><a href="/operator?tab=reports">Отчёты</a><a href="/operator?tab=support">Поддержка</a><a href="/operator?tab=integrations">Интеграции</a><a href="/operator?tab=security">Безопасность</a><a href="/operator?tab=logs">Живые логи</a>
           {('<a href="/operator?tab=admins">Администраторы</a>' if role_at_least(actor_role, 'owner') else '')}
         </details>
         <a href="/operator/logout">Выход</a>
@@ -2621,7 +2710,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <div class="card reference-kpi"><i>△</i><div><span>Открытые события</span><b>{report['open_incidents']}</b><small>Требуют внимания</small></div></div>
       </div>
       <div class=reference-top>
-        <section class=card><div class=section-head><h2>Карта нод и текущая нагрузка</h2><a href="/operator?tab=latency">Управлять нодами →</a></div>{reference_world_map(map_nodes)}<div class=reference-map-note>Показаны {len(map_nodes)} нод из реестра. Пинг измеряется с VDS; это не пинг телефона пользователя.</div><div class=reference-node-strip>{''.join(f"<span>{html.escape(node['label'])}<b class={'ok' if node['state'] == 'ok' else 'off'}>{html.escape(node['measurement'])}</b></span>" for node in map_nodes) or reference_targets}</div></section>
+        <section class=card><div class=section-head><h2>Карта нод и текущая нагрузка</h2><a href="/operator?tab=latency">Управлять нодами →</a></div>{reference_world_map(map_nodes)}<div class=reference-map-note>Показаны {len(map_nodes)} нод из реестра · CPU {status.get('cpu_load_pct', 0)}% · RAM {status.get('memory_used_pct', 0)}% · диск {status.get('disk_used_pct', 0)}%. Пинг измеряется с VDS; это не пинг телефона пользователя.</div><div class=reference-node-strip>{''.join(f"<span>{html.escape(node['label'])}<b class={'ok' if node['state'] == 'ok' else 'off'}>{html.escape(node['measurement'])}</b></span>" for node in map_nodes) or reference_targets}</div></section>
         <section class=card><div class=section-head><h2>Последние события</h2><a href="/operator?tab=incidents">Все события →</a></div><div class=event-list>{event_timeline}</div></section>
       </div>
       <div class=reference-bottom>
@@ -2746,7 +2835,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
 
     <section {show('latency')}>
       <div class=card><div class=section-head><h2>Карта нод</h2><span class=muted>Координаты из реестра нод</span></div>{reference_world_map(map_nodes)}<p class=reference-map-note>Зелёный — последний TCP-замер успешен; красный — нет ответа; жёлтый — замер ещё не выполнялся.</p></div>
-      <div class=reference-node-grid>{''.join(f"<article class='card reference-node'><b>{html.escape(node['label'])}</b><p><small>{html.escape(node['location'])} · {html.escape(node['target'])}</small></p><p><span class='badge {'ok' if node['state'] == 'ok' else 'off'}'>{'Доступна' if node['state'] == 'ok' else 'Нет ответа' if node['state'] == 'off' else 'Ожидает замер'}</span></p><div class=latency>{html.escape(node['measurement'])}</div></article>" for node in map_nodes) or '<div class=card>Ноды для карты не настроены</div>'}</div>
+      <div class=reference-node-grid>{node_drain_cards}</div>
     </section>
     <section class=grid {show('latency')}>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=latency>
@@ -2762,7 +2851,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label>Проверок для возврата<input type=number name=auto_quarantine_recovery_checks min=1 max=10 value="{html.escape(s.get('auto_quarantine_recovery_checks','2'))}"></label>
         <label>Время карантина, минут<input type=number name=auto_quarantine_ttl_minutes min=5 max=1440 value="{html.escape(s.get('auto_quarantine_ttl_minutes','30'))}"></label>
         <p class=muted>Панель помечает недоступные/нестабильные направления для автоматического выбора клиента. Для реального снижения 150–200 мс нужен VDS ближе к пользователям или дополнительная нода в другом регионе.</p>
-        <p class=notice><b>Сейчас в карантине:</b> {quarantine_html}</p>
+        <p class=notice><b>Сейчас в карантине:</b> {quarantine_html}<br><b>Ручные техработы:</b> {drain_html}</p>
         <button>Сохранить оптимизацию</button>
       </form>
       <section class=card>
@@ -2994,6 +3083,22 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </div>
       <table style="margin-top:14px"><thead><tr><th>Тип события</th><th>Количество</th></tr></thead><tbody>{''.join(f'<tr><td>{html.escape(k)}</td><td>{v}</td></tr>' for k,v in sorted(report['events'].items())) or '<tr><td colspan=2>Нет событий</td></tr>'}</tbody></table>
       <div class=actions style="margin-top:14px"><a class="button secondary" href="/operator/report.txt">Скачать TXT</a><a class="button secondary" href="/operator/report.json">Скачать JSON</a></div>
+    </section>
+
+    <section class=grid {show('support')}>
+      <form class=card method=post action=/operator/support>
+        <input type=hidden name=action value=create>
+        <h2>Новое обращение</h2>
+        <p class=muted>Внутренний центр поддержки. Диагностика и секреты пользователей сюда не копируются автоматически.</p>
+        <label>Тема<input name=subject maxlength=160 required placeholder="Например: пользователь не видит серверы"></label>
+        <label>Устройство / источник<input name=device maxlength=128 placeholder="ID устройства или имя пользователя"></label>
+        <label>Описание<textarea name=body maxlength=1600 placeholder="Что уже проверили, время, наблюдение"></textarea></label>
+        <button>Создать обращение</button>
+      </form>
+      <section class=card>
+        <div class=section-head><h2>Очередь поддержки</h2><span class="badge {'warn' if support_open else 'ok'}">{support_open} открыто</span></div>
+        <table><thead><tr><th>#</th><th>Статус</th><th>Тема</th><th>Источник</th><th>Изменено</th><th></th></tr></thead><tbody>{support_html}</tbody></table>
+      </section>
     </section>
 
     <section class=grid {show('integrations')}>
@@ -3780,8 +3885,9 @@ class App(BaseHTTPRequestHandler):
             min_vc = int(s.get("min_version_code") or 0)
             force_update = bool(min_vc and client_vc and client_vc < min_vc)
             quarantined_nodes = sorted(active_quarantine(s))
+            drained_nodes = sorted(manual_node_drains(s))
             manual_forbidden = [x.strip() for x in (s.get("nodes_forbidden") or "").split(",") if x.strip()]
-            forbidden_nodes = list(dict.fromkeys(manual_forbidden + quarantined_nodes))
+            forbidden_nodes = list(dict.fromkeys(manual_forbidden + quarantined_nodes + drained_nodes))
             result = {
                 "platform": "android",
                 "maintenance": maintenance,
@@ -3803,6 +3909,7 @@ class App(BaseHTTPRequestHandler):
                 "nodes_recommended": [x.strip() for x in (s.get("nodes_recommended") or "").split(",") if x.strip()],
                 "nodes_forbidden": forbidden_nodes,
                 "nodes_quarantined": quarantined_nodes,
+                "nodes_draining": drained_nodes,
                 "node_health_policy": {
                     "auto_quarantine": enabled(s, "auto_quarantine_enabled", True),
                     "failures_before_quarantine": max(2, min(10, int(s.get("auto_quarantine_failures", "3") or 3))),
@@ -4594,7 +4701,7 @@ class App(BaseHTTPRequestHandler):
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             action = form.get("action", [""])[0]
             return_tab = form.get("return_tab", ["dashboard"])[0]
-            if return_tab not in {"dashboard", "automation", "latency", "routing", "release", "service", "incidents", "security"}:
+            if return_tab not in {"dashboard", "automation", "latency", "routing", "release", "service", "incidents", "security", "support"}:
                 return_tab = "dashboard"
             flash = "Готово"
             if action == "bump_revision":
@@ -4619,6 +4726,29 @@ class App(BaseHTTPRequestHandler):
                 key = (form.get("incident_key", [""])[0] or "").strip()[:160]
                 ok = bool(key) and incident_close(db, key, s)
                 flash = "Инцидент закрыт" if ok else "Активный инцидент не найден"
+            elif action in ("drain_node", "restore_node"):
+                target = (form.get("target", [""])[0] or "").strip()[:253]
+                allowed_targets = {
+                    node["target"] for node in parse_node_map_config(s.get("node_map_config", ""))
+                }
+                allowed_targets.update(f"{host}:{port}" for host, port in parse_latency_targets(s.get("latency_probe_targets", "")))
+                if target not in allowed_targets:
+                    flash = "Нода не найдена в реестре"
+                else:
+                    drains = manual_node_drains(s)
+                    if action == "drain_node":
+                        drains[target] = {"since": int(time.time()), "actor": actor, "note": "manual maintenance"}
+                        event_kind = "node_drained"
+                        flash = f"{target} исключена из балансировки"
+                    else:
+                        drains.pop(target, None)
+                        event_kind = "node_restored"
+                        flash = f"{target} возвращена в балансировку"
+                    set_settings(db, {"node_drains": json.dumps(drains, ensure_ascii=False, separators=(",", ":"))})
+                    db.execute(
+                        "insert into events values (?,?,?,?,?)",
+                        (int(time.time()), event_kind, actor, ip, json.dumps({"target": target}, ensure_ascii=False)),
+                    )
             elif action in ("run_health_check", "run_latency_probe"):
                 def background_probe(kind=action, requested_by=actor, requested_ip=ip):
                     probe_db = None
@@ -4678,6 +4808,51 @@ class App(BaseHTTPRequestHandler):
             audit(db, actor, ip, action or "action", {"flash": flash})
             db.commit()
             return self.redirect_operator(return_tab, flash)
+
+        if path == "/operator/support":
+            length = int(self.headers.get("Content-Length", "0"))
+            form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            action = (form.get("action", [""])[0] or "").strip()
+            now = int(time.time())
+            if action == "create":
+                subject = (form.get("subject", [""])[0] or "").strip()[:160]
+                device = (form.get("device", [""])[0] or "").strip()[:128]
+                body = (form.get("body", [""])[0] or "").strip()[:1600]
+                if not subject:
+                    return self.redirect_operator("support", "Укажите тему обращения")
+                db.execute(
+                    "insert into support_tickets(created_at,updated_at,closed_at,source,device,subject,body,admin_note) values (?,?,?,?,?,?,?,?)",
+                    (now, now, 0, "operator", device, subject, body, ""),
+                )
+                db.execute(
+                    "insert into events values (?,?,?,?,?)",
+                    (now, "support_ticket_created", actor, ip, json.dumps({"subject": subject, "device": device}, ensure_ascii=False)),
+                )
+                flash = "Обращение создано"
+            elif action in ("close", "reopen"):
+                try:
+                    ticket_id = int(form.get("id", ["0"])[0])
+                except (TypeError, ValueError):
+                    ticket_id = 0
+                if ticket_id <= 0:
+                    return self.redirect_operator("support", "Некорректный номер обращения")
+                closed = now if action == "close" else 0
+                cursor = db.execute(
+                    "update support_tickets set closed_at=?, updated_at=? where id=?",
+                    (closed, now, ticket_id),
+                )
+                if not cursor.rowcount:
+                    return self.redirect_operator("support", "Обращение не найдено")
+                db.execute(
+                    "insert into events values (?,?,?,?,?)",
+                    (now, "support_ticket_" + action, actor, ip, json.dumps({"id": ticket_id}, ensure_ascii=False)),
+                )
+                flash = "Обращение закрыто" if action == "close" else "Обращение снова открыто"
+            else:
+                return self.redirect_operator("support", "Неизвестное действие поддержки")
+            audit(db, actor, ip, "support:" + action, {"result": flash})
+            db.commit()
+            return self.redirect_operator("support", flash)
 
         if path in ("/operator/device", "/operator/device/clear-diagnostic"):
             length = int(self.headers.get("Content-Length", "0"))

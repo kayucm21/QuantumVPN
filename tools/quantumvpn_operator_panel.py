@@ -68,7 +68,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.11-control.1"
+PANEL_BUILD = "5.10.11-control.2"
 VERSION = "5.10.11"
 VERSION_CODE = 136
 DEFAULT_NOTE = "QuantumVPN 5.10.11: отдельный экран обновления с объёмом, скоростью и оставшимся временем; расширенный Quantum Control."
@@ -115,6 +115,15 @@ MAX_ROUTING_SCAN_TARGETS = 24
 MAX_ROUTING_SCAN_ADDRESSES = 3
 ROUTING_SCAN_CONNECT_TIMEOUT_SECONDS = 1.2
 ROUTING_SCAN_WALL_TIMEOUT_SECONDS = 10.0
+
+# The assistant is intentionally local-only.  Keeping the endpoint fixed to
+# loopback makes it impossible for an operator setting to turn the panel into
+# an SSRF proxy or to send health data, subscriber information, or secrets to
+# an external AI service.
+QWEN_LOCAL_ENDPOINT = "http://127.0.0.1:11434"
+QWEN_DEFAULT_MODEL = "qwen3:0.6b"
+AI_MIN_INTERVAL_SECONDS = 300
+AI_MAX_INTERVAL_SECONDS = 24 * 3600
 
 
 def b64url(data: bytes) -> str:
@@ -502,6 +511,10 @@ def conn():
                 "announce_en": "",
                 "subscription_main_enabled": "1",
                 "reserve_profile_enabled": "1",
+                "subscription_category_title": "Подписка",
+                "subscription_category_description": "Управление доступом и резервным профилем",
+                "subscription_main_label": "Встроенная подписка включена",
+                "reserve_profile_label": "Публиковать пятый профиль «Резерв TLS»",
                 "update_notifications_enabled": "1",
                 "rollout_percent": "100",
                 "staging_enabled": "0",
@@ -572,6 +585,19 @@ def conn():
                 "telegram_digest_time_msk": "09:00",
                 "telegram_digest_last_sent_date": "",
                 "telegram_digest_last_attempt": "0",
+                # Qwen is an advisory-only local assistant. It receives a
+                # compact aggregate of service/node health, never subscriber
+                # records, API keys, profile URIs, or raw request logs.
+                "ai_advisor_enabled": "1",
+                "ai_model": QWEN_DEFAULT_MODEL,
+                "ai_interval_seconds": "900",
+                "ai_telegram_enabled": "1",
+                "ai_last_run": "0",
+                "ai_last_status": "ожидание",
+                "ai_last_advice": "Модель ещё не выполнила анализ.",
+                "ai_last_error": "",
+                "ai_last_notification_hash": "",
+                "ai_last_notification_at": "0",
                 "health_monitor_enabled": "1",
                 "health_monitor_interval_seconds": "60",
                 "latency_optimization_enabled": "1",
@@ -2198,6 +2224,205 @@ def maybe_send_daily_digest(db, s, now=None):
     return True
 
 
+def qwen_local_status(model: str = QWEN_DEFAULT_MODEL) -> dict:
+    """Check only the local Ollama catalogue; never follow an operator URL."""
+    try:
+        request = Request(f"{QWEN_LOCAL_ENDPOINT}/api/tags", headers={"Accept": "application/json"})
+        with urlopen(request, timeout=3) as response:
+            if not 200 <= response.status < 300:
+                return {"ok": False, "ready": False, "error": f"HTTP {response.status}"}
+            payload = json.loads(response.read(64 * 1024).decode("utf-8", "replace"))
+        names = {
+            str(item.get("name") or "")
+            for item in (payload.get("models") or [])
+            if isinstance(item, dict)
+        }
+        ready = model in names
+        return {
+            "ok": True,
+            "ready": ready,
+            "model": model,
+            "available_models": sorted(name for name in names if name.startswith("qwen"))[:12],
+            "error": "" if ready else f"Модель {model} ещё не загружена",
+        }
+    except Exception as exc:
+        return {"ok": False, "ready": False, "model": model, "available_models": [], "error": f"Ollama недоступна: {type(exc).__name__}"}
+
+
+def ai_operations_snapshot(db, s: dict) -> dict:
+    """Build an aggregate-only snapshot appropriate for a local advisor.
+
+    The snapshot deliberately excludes account identifiers, profile URIs, API
+    keys, operator notes and raw logs. Qwen gets infrastructure figures only,
+    so an advice request cannot turn into a privacy export.
+    """
+    report = report_snapshot(db)
+    service = cached_service_status(ttl=0)
+    balancer = load_balancer_snapshot(db, s)
+    latest = {}
+    for row in db.execute(
+        "select ts,target,ok,latency_ms,detail from server_health "
+        "where target like 'latency:%' order by ts desc limit 160"
+    ).fetchall():
+        latest.setdefault(str(row[1]).removeprefix("latency:"), row)
+    nodes = []
+    for target, row in sorted(latest.items())[:12]:
+        nodes.append({
+            "target": target,
+            "ok": bool(row[2]),
+            "latency_ms": int(row[3] or 0),
+            "checked_at": int(row[0]),
+        })
+    return {
+        "generated_at": int(time.time()),
+        "services": {
+            "rospanel": service.get("rospanel", "unknown"),
+            "operator": service.get("operator", "unknown"),
+            "xray": service.get("xray", "unknown"),
+            "cpu_load_pct": service.get("cpu_load_pct", 0),
+            "memory_used_pct": service.get("memory_used_pct", 0),
+            "disk_used_pct": service.get("disk_used_pct", 0),
+        },
+        "health": {
+            "uptime_percent_24h": report.get("health_uptime_percent", 0),
+            "open_incidents": report.get("open_incidents", 0),
+            "average_latency_ms": report.get("average_latency_ms", 0),
+            "latency_state": s.get("latency_state", "unknown"),
+            "best_latency_ms": int(s.get("latency_best_ms", "0") or 0),
+        },
+        "balancer": {
+            "enabled": bool(balancer.get("enabled")),
+            "selected": balancer.get("selected") or "",
+            "quarantined_count": len(balancer.get("quarantined") or []),
+            "drained_count": len(balancer.get("drained") or []),
+        },
+        "nodes": nodes,
+    }
+
+
+def ai_prompt(snapshot: dict) -> str:
+    """Keep the local model in a read-only, concise operations role."""
+    return (
+        "Ты локальный помощник Quantum Control. Анализируй ТОЛЬКО агрегированную "
+        "телеметрию ниже. Не выполняй команды, не предлагай менять конфигурацию "
+        "автоматически, не запрашивай секреты и не упоминай персональные данные. "
+        "Пинг зависит от физической дистанции: не обещай невозможных значений. "
+        "Ответь по-русски, максимум 900 символов, в трёх коротких частях: "
+        "«Статус», «Риски», «Следующий ручной шаг». Если всё в норме, так и скажи.\n\n"
+        + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def clean_ai_advice(value) -> str:
+    text = " ".join(str(value or "").split())
+    text = "".join(char for char in text if char >= " " or char in "\n\t")
+    return (text or "Модель вернула пустой ответ.")[:1800]
+
+
+def run_ai_analysis(db, s: dict, trigger: str = "scheduled") -> dict:
+    """Ask local Qwen for advice without giving it execution capabilities."""
+    now = int(time.time())
+    model = (s.get("ai_model") or QWEN_DEFAULT_MODEL).strip()
+    if not enabled(s, "ai_advisor_enabled", True):
+        result = {"ok": False, "status": "выключен", "advice": "ИИ‑советник выключен оператором."}
+    elif model != QWEN_DEFAULT_MODEL:
+        result = {"ok": False, "status": "ошибка", "advice": "Разрешена только локальная модель Qwen3 0.6B.", "error": "unsupported_model"}
+    else:
+        status = qwen_local_status(model)
+        if not status.get("ready"):
+            result = {"ok": False, "status": "ожидание модели", "advice": status.get("error") or "Локальная модель ещё не готова.", "error": status.get("error", "")}
+        else:
+            snapshot = ai_operations_snapshot(db, s)
+            request_body = json.dumps({
+                "model": model,
+                "prompt": ai_prompt(snapshot),
+                "stream": False,
+                # Qwen3 defaults to long reasoning. The advisor is a small
+                # operational summary, so suppress reasoning tokens to keep a
+                # CPU-only VDS responsive and reserve output tokens for advice.
+                "think": False,
+                "options": {"temperature": 0.1, "num_predict": 260, "num_ctx": 2048},
+            }, ensure_ascii=False).encode("utf-8")
+            try:
+                request = Request(
+                    f"{QWEN_LOCAL_ENDPOINT}/api/generate",
+                    data=request_body,
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    method="POST",
+                )
+                # The first CPU-only load can take a few minutes on a small
+                # VDS. This runs in a background worker, not the HTTP request
+                # path, so an operator page remains responsive while Ollama
+                # warms its compact model.
+                with urlopen(request, timeout=300) as response:
+                    if not 200 <= response.status < 300:
+                        raise RuntimeError(f"Ollama HTTP {response.status}")
+                    payload = json.loads(response.read(96 * 1024).decode("utf-8", "replace"))
+                result = {"ok": True, "status": "готов", "advice": clean_ai_advice(payload.get("response")), "snapshot": snapshot}
+            except Exception as exc:
+                result = {"ok": False, "status": "ошибка", "advice": "Локальная модель не ответила. Проверка нод и балансировщик продолжают работать без ИИ.", "error": f"{type(exc).__name__}: {exc}"[:280]}
+
+    advice = clean_ai_advice(result.get("advice"))
+    result["advice"] = advice
+    values = {
+        "ai_last_run": str(now),
+        "ai_last_status": str(result.get("status") or "ошибка")[:64],
+        "ai_last_advice": advice,
+        "ai_last_error": str(result.get("error") or "")[:280],
+    }
+    # Bot delivery is opt-in, deduplicated and never includes the raw telemetry.
+    digest = hashlib.sha256((values["ai_last_status"] + "\n" + advice).encode("utf-8")).hexdigest()
+    try:
+        last_notice = int(s.get("ai_last_notification_at", "0") or 0)
+    except (TypeError, ValueError):
+        last_notice = 0
+    should_notify = (
+        enabled(s, "ai_telegram_enabled", True)
+        and enabled(s, "telegram_alerts_enabled", False)
+        and digest != s.get("ai_last_notification_hash", "")
+        and now - last_notice >= 15 * 60
+    )
+    sent = False
+    if should_notify:
+        sent = telegram_send(s, f"[Quantum Control · Qwen]\nСтатус: {values['ai_last_status']}\n{advice}")
+        if sent:
+            values.update({"ai_last_notification_hash": digest, "ai_last_notification_at": str(now)})
+    set_settings(db, values)
+    db.execute(
+        "insert into events values (?,?,?,?,?)",
+        (now, "ai_analysis", "qwen-local", "", json.dumps({"trigger": trigger, "ok": bool(result.get("ok")), "status": values["ai_last_status"], "telegram_sent": sent}, ensure_ascii=False)),
+    )
+    db.commit()
+    return {**result, "telegram_sent": sent}
+
+
+def ai_worker():
+    """Run the local advisor on a bounded cadence; it never changes a node."""
+    while True:
+        db = None
+        try:
+            db = conn()
+            s = settings(db)
+            interval = max(AI_MIN_INTERVAL_SECONDS, min(AI_MAX_INTERVAL_SECONDS, int(s.get("ai_interval_seconds", "900") or 900)))
+            last_run = int(s.get("ai_last_run", "0") or 0)
+            if enabled(s, "ai_advisor_enabled", True) and int(time.time()) - last_run >= interval:
+                run_ai_analysis(db, s, "scheduled")
+        except Exception as exc:
+            if db is not None:
+                try:
+                    db.execute("insert into events values (?,?,?,?,?)", (int(time.time()), "ai_analysis_error", "qwen-local", "", f"{type(exc).__name__}: {exc}"[:500]))
+                    db.commit()
+                except Exception:
+                    pass
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        time.sleep(60)
+
+
 def alert_worker():
     while True:
         try:
@@ -2504,6 +2729,10 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         for row in (card_wallet_rows or [])
     ) or "<tr><td colspan=4>Игроки ещё не входили за стол</td></tr>"
     card_code_state = "настроен" if s.get("card_game_access_hash") else "не настроен"
+    subscription_category_title = s.get("subscription_category_title", "Подписка")[:80]
+    subscription_category_description = s.get("subscription_category_description", "Управление доступом и резервным профилем")[:240]
+    subscription_main_label = s.get("subscription_main_label", "Встроенная подписка включена")[:160]
+    reserve_profile_label = s.get("reserve_profile_label", "Публиковать пятый профиль «Резерв TLS»")[:160]
     totp_setup = ""
     if not role_at_least(actor_role, "operator"):
         totp_setup = "<p class=muted>Настройки безопасности доступны только ролям operator и owner.</p>"
@@ -2562,6 +2791,11 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         time.strftime("%d.%m.%Y %H:%M", time.localtime(backup_info["ts"]))
         if backup_info.get("exists") else "ещё нет"
     )
+    ai_last_run = int(s.get("ai_last_run", "0") or 0)
+    ai_last_run_label = time.strftime("%d.%m.%Y %H:%M", time.localtime(ai_last_run)) if ai_last_run else "ещё не запускался"
+    ai_status = s.get("ai_last_status", "ожидание")[:64]
+    ai_advice = s.get("ai_last_advice", "Модель ещё не выполнила анализ.")[:1800]
+    ai_error = s.get("ai_last_error", "")[:280]
     def release_guard_row(item):
         if item.get("ready"):
             state = "готов"
@@ -2729,7 +2963,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         f"<div class=reference-audit><time>{time.strftime('%H:%M', time.localtime(a[0]))}</time><span>{html.escape(str(a[1]))} · {html.escape(str(a[3]))}</span></div>"
         for a in audit_rows[:4]
     ) or '<p class=muted>Записей пока нет</p>'
-    page_titles = {'dashboard': ('КОМАНДНЫЙ ЦЕНТР', 'Обзор состояния VPN-инфраструктуры'), 'latency': ('Ноды', 'Доступность и задержка подключений'), 'users': ('Пользователи', 'Подписчики и активность'), 'service': ('Подписки', 'Доступ, протоколы и обслуживание сервиса'), 'release': ('Релизы', 'Сборки приложения и расписание публикации'), 'incidents': ('События', 'Состояние сервисов и инциденты'), 'audit': ('Аудит', 'Журнал действий администраторов'), 'cards': ('Игры и награды', 'Карточные столы и виртуальные Q-coins'), 'support': ('Поддержка', 'Обращения, заметки и диагностика')}
+    page_titles = {'dashboard': ('КОМАНДНЫЙ ЦЕНТР', 'Обзор состояния VPN-инфраструктуры'), 'latency': ('Ноды', 'Доступность и задержка подключений'), 'users': ('Пользователи', 'Подписчики и активность'), 'service': ('Подписки', 'Доступ, протоколы и обслуживание сервиса'), 'release': ('Релизы', 'Сборки приложения и расписание публикации'), 'incidents': ('События', 'Состояние сервисов и инциденты'), 'audit': ('Аудит', 'Журнал действий администраторов'), 'cards': ('Игры и награды', 'Карточные столы и виртуальные Q-coins'), 'support': ('Поддержка', 'Обращения, заметки и диагностика'), 'ai': ('ИИ‑СОВЕТНИК', 'Локальный Qwen для анализа агрегированных метрик')}
     page_title, page_description = page_titles.get(section, ('Quantum Control', 'Управление сервисом'))
     current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -2747,7 +2981,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a class="{'active' if section in ('incidents','logs','reports') else ''}" href="/operator?tab=incidents"><span class=nav-ico>♧</span> События</a>
         <a class="{'active' if section in ('audit','integrations','security','admins') else ''}" href="/operator?tab=audit"><span class=nav-ico>▤</span> Аудит</a>
         <details class=nav-group><summary>Ещё</summary>
-          <a href="/operator?tab=fleet">Центр флота</a><a href="/operator?tab=automation">Автопилот</a><a href="/operator?tab=devices">Устройства</a><a href="/operator?tab=features">Функции</a><a href="/operator?tab=branding">Оформление</a><a href="/operator?tab=donations">Пожертвования</a><a href="/operator?tab=reports">Отчёты</a><a href="/operator?tab=support">Поддержка</a><a href="/operator?tab=integrations">Интеграции</a><a href="/operator?tab=security">Безопасность</a><a href="/operator?tab=logs">Живые логи</a>
+          <a class="{'active' if section == 'ai' else ''}" href="/operator?tab=ai">ИИ‑советник</a><a href="/operator?tab=fleet">Центр флота</a><a href="/operator?tab=automation">Автопилот</a><a href="/operator?tab=devices">Устройства</a><a href="/operator?tab=features">Функции</a><a href="/operator?tab=branding">Оформление</a><a href="/operator?tab=donations">Пожертвования</a><a href="/operator?tab=reports">Отчёты</a><a href="/operator?tab=support">Поддержка</a><a href="/operator?tab=integrations">Интеграции</a><a href="/operator?tab=security">Безопасность</a><a href="/operator?tab=logs">Живые логи</a>
           {('<a href="/operator?tab=admins">Администраторы</a>' if role_at_least(actor_role, 'owner') else '')}
         </details>
         <a href="/operator/logout">Выход</a>
@@ -2828,13 +3062,23 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <button>Сохранить</button>
       </form>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=subscription>
-        <h2>Подписка</h2>
-        <label><input type=checkbox name=subscription_main_enabled {checked('subscription_main_enabled')}> Встроенная подписка включена</label>
-        <label><input type=checkbox name=reserve_profile_enabled {checked('reserve_profile_enabled')}> Публиковать пятый профиль «Резерв TLS»</label>
+        <h2>{html.escape(subscription_category_title)}</h2>
+        <p class=muted>{html.escape(subscription_category_description)}</p>
+        <label><input type=checkbox name=subscription_main_enabled {checked('subscription_main_enabled')}> {html.escape(subscription_main_label)}</label>
+        <label><input type=checkbox name=reserve_profile_enabled {checked('reserve_profile_enabled')}> {html.escape(reserve_profile_label)}</label>
         <p class=muted>Резерв добавляется только после проверки устройства RosPanel; секрет профиля не показывается в панели и не попадает в экспорт.</p>
         <p>{reserve_profile_state}</p>
         <p class=muted>Upstream: <code>{html.escape(UPSTREAM[:64])}…</code></p>
         <button>Сохранить</button>
+      </form>
+      <form class=card method=post action=/operator/policy><input type=hidden name=section value=subscription_text>
+        <h2>Тексты категории подписки</h2>
+        <p class=muted>Меняет только подписи этой дополнительной панели. Данные пользователей, ссылки и настройки RosPanel не затрагиваются.</p>
+        <label>Название категории<input name=subscription_category_title maxlength=80 value="{html.escape(subscription_category_title)}"></label>
+        <label>Краткое описание<textarea name=subscription_category_description maxlength=240>{html.escape(subscription_category_description)}</textarea></label>
+        <label>Текст основного переключателя<input name=subscription_main_label maxlength=160 value="{html.escape(subscription_main_label)}"></label>
+        <label>Текст резервного переключателя<input name=reserve_profile_label maxlength=160 value="{html.escape(reserve_profile_label)}"></label>
+        <button>Сохранить тексты</button>
       </form>
       <form class=card method=post action=/operator/protocols>
         <h2>Протоколы</h2>{toggles}<button>Сохранить протоколы</button>
@@ -2967,6 +3211,32 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <section class="card routing-notice"><i>ⓘ</i><div><b>Блокировка рекламы не гарантируется для рекламы с доменов самого видеосервиса.</b><p>Фильтр безопасно блокирует только отдельные рекламные и трекерные домены; правила не должны ломать авторизацию, банки или обновления ОС.</p></div></section>
       </section>
       <details class="card routing-history"><summary>История маршрутизации и откат</summary><p class=muted>Откат создаёт новую ревизию — аудит и предыдущие версии сохраняются.</p><table><thead><tr><th>Ревизия</th><th>Время</th><th>Оператор</th><th>Канал</th><th>Заметка</th><th></th></tr></thead><tbody>{routing_history_html}</tbody></table></details>
+    </section>
+
+    <section class=grid {show('ai')}>
+      <form class=card method=post action=/operator/policy>
+        <input type=hidden name=section value=ai>
+        <h2>Локальный Qwen</h2>
+        <p class=muted>Советник анализирует агрегированные данные нод и сервисов на этом VDS. Он не получает пользователей, ключи, подписки, IP клиентов или журналы запросов.</p>
+        <label><input type=checkbox name=ai_advisor_enabled {checked('ai_advisor_enabled')}> Включить ИИ‑советник</label>
+        <label>Модель<input name=ai_model value="{html.escape(s.get('ai_model', QWEN_DEFAULT_MODEL))}" readonly></label>
+        <label>Интервал анализа, секунд<input type=number name=ai_interval_seconds min=300 max=86400 value="{html.escape(s.get('ai_interval_seconds','900'))}"></label>
+        <label><input type=checkbox name=ai_telegram_enabled {checked('ai_telegram_enabled')}> Отправлять новый важный вывод в Telegram</label>
+        <p class=notice><b>Безопасность:</b> Qwen не имеет доступа к shell, API‑ключам, настройкам нод или кнопкам перезапуска. Балансировщик и карантин остаются детерминированными.</p>
+        <button>Сохранить ИИ‑настройки</button>
+      </form>
+      <section class=card>
+        <h2>Последний анализ</h2>
+        <p><span class="badge {'ok' if ai_status == 'готов' else 'warn' if ai_status == 'ожидание модели' else 'off'}">{html.escape(ai_status)}</span> · {html.escape(ai_last_run_label)}</p>
+        <p style="white-space:pre-wrap">{html.escape(ai_advice)}</p>
+        {("<p class=off>" + html.escape(ai_error) + "</p>") if ai_error else ""}
+        <form method=post action=/operator/actions class=actions>
+          <input type=hidden name=return_tab value=ai>
+          <button name=action value=run_ai_analysis>Запустить анализ</button>
+          <button class=secondary name=action value=check_ai_model>Проверить модель</button>
+        </form>
+        <p class=muted style="margin-top:12px">Если Telegram настроен в «Безопасность», панель отправляет только новый вывод и не чаще раза в 15 минут.</p>
+      </section>
     </section>
 
     <section class=grid {show('automation')}>
@@ -4759,7 +5029,7 @@ class App(BaseHTTPRequestHandler):
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             action = form.get("action", [""])[0]
             return_tab = form.get("return_tab", ["dashboard"])[0]
-            if return_tab not in {"dashboard", "automation", "latency", "routing", "release", "service", "incidents", "security", "support"}:
+            if return_tab not in {"dashboard", "automation", "latency", "routing", "release", "service", "incidents", "security", "support", "ai"}:
                 return_tab = "dashboard"
             flash = "Готово"
             if action == "bump_revision":
@@ -4843,6 +5113,37 @@ class App(BaseHTTPRequestHandler):
                                 pass
                 threading.Thread(target=background_probe, daemon=True).start()
                 flash = "Проверка запущена в фоне"
+            elif action in ("run_ai_analysis", "check_ai_model"):
+                if action == "check_ai_model":
+                    model_status = qwen_local_status(s.get("ai_model") or QWEN_DEFAULT_MODEL)
+                    flash = "Qwen готова" if model_status.get("ready") else (model_status.get("error") or "Qwen недоступна")
+                    db.execute(
+                        "insert into events values (?,?,?,?,?)",
+                        (int(time.time()), "ai_model_check", actor, ip, json.dumps({"ready": bool(model_status.get("ready"))}, ensure_ascii=False)),
+                    )
+                else:
+                    def background_ai(requested_by=actor, requested_ip=ip):
+                        analysis_db = None
+                        try:
+                            analysis_db = conn()
+                            result = run_ai_analysis(analysis_db, settings(analysis_db), "manual")
+                            audit(analysis_db, requested_by, requested_ip, "ai_analysis_manual", {"ok": bool(result.get("ok")), "status": result.get("status", "")})
+                            analysis_db.commit()
+                        except Exception as exc:
+                            if analysis_db is not None:
+                                try:
+                                    analysis_db.execute("insert into events values (?,?,?,?,?)", (int(time.time()), "ai_analysis_error", requested_by, requested_ip, f"{type(exc).__name__}: {exc}"[:500]))
+                                    analysis_db.commit()
+                                except Exception:
+                                    pass
+                        finally:
+                            if analysis_db is not None:
+                                try:
+                                    analysis_db.close()
+                                except Exception:
+                                    pass
+                    threading.Thread(target=background_ai, daemon=True).start()
+                    flash = "Анализ Qwen запущен в фоне"
             elif action == "release_preflight":
                 guard = release_guard_snapshot(s)
                 failures = [item["name"] for item in guard.values() if item.get("configured", True) and not item.get("ready")]
@@ -5008,6 +5309,20 @@ class App(BaseHTTPRequestHandler):
                 "subscription_main_enabled": "1" if "subscription_main_enabled" in form else "0",
                 "reserve_profile_enabled": "1" if "reserve_profile_enabled" in form else "0",
             }
+        elif section == "subscription_text":
+            tab = "service"
+            title = " ".join((form.get("subscription_category_title", [""])[0] or "").split())[:80]
+            description = " ".join((form.get("subscription_category_description", [""])[0] or "").split())[:240]
+            main_label = " ".join((form.get("subscription_main_label", [""])[0] or "").split())[:160]
+            reserve_label = " ".join((form.get("reserve_profile_label", [""])[0] or "").split())[:160]
+            if not all((title, description, main_label, reserve_label)):
+                return self.redirect_operator(tab, "Не сохранено: заполните все четыре текста категории")
+            values = {
+                "subscription_category_title": title,
+                "subscription_category_description": description,
+                "subscription_main_label": main_label,
+                "reserve_profile_label": reserve_label,
+            }
         elif section == "nodes":
             tab = "service"
             values = {
@@ -5146,6 +5461,21 @@ class App(BaseHTTPRequestHandler):
                 "telegram_daily_digest_enabled": "1" if "telegram_daily_digest_enabled" in form else "0",
                 "telegram_digest_time_msk": digest_time,
             }
+        elif section == "ai":
+            tab = "ai"
+            try:
+                interval = bounded_form_int(form, "ai_interval_seconds", current.get("ai_interval_seconds", "900"), AI_MIN_INTERVAL_SECONDS, AI_MAX_INTERVAL_SECONDS)
+            except Exception:
+                return self.redirect_operator(tab, "Не сохранено: интервал ИИ должен быть целым числом")
+            requested_model = (form.get("ai_model", [QWEN_DEFAULT_MODEL])[0] or "").strip()
+            if requested_model != QWEN_DEFAULT_MODEL:
+                return self.redirect_operator(tab, "Не сохранено: разрешена только локальная Qwen3 0.6B")
+            values = {
+                "ai_advisor_enabled": "1" if "ai_advisor_enabled" in form else "0",
+                "ai_model": QWEN_DEFAULT_MODEL,
+                "ai_interval_seconds": str(interval),
+                "ai_telegram_enabled": "1" if "ai_telegram_enabled" in form else "0",
+            }
         elif section == "security":
             tab = "security"
             try:
@@ -5192,7 +5522,7 @@ class App(BaseHTTPRequestHandler):
         else:
             return self.redirect_operator("dashboard", "Неизвестный раздел настроек")
 
-        if section in ("service", "features", "nodes", "ab", "branding", "latency", "release", "automation") and any(current.get(k) != v for k, v in values.items()):
+        if section in ("service", "subscription_text", "features", "nodes", "ab", "branding", "latency", "release", "automation", "ai") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)
         changes = {k: {"before": current.get(k), "after": v} for k, v in values.items() if current.get(k) != v}
         maintenance_before = effective_maintenance(current)
@@ -5223,6 +5553,7 @@ def main():
     threading.Thread(target=hourly_backup_worker, daemon=True).start()
     threading.Thread(target=latency_worker, daemon=True).start()
     threading.Thread(target=health_worker, daemon=True).start()
+    threading.Thread(target=ai_worker, daemon=True).start()
     threading.Thread(target=scheduled_release_worker, daemon=True).start()
     try:
         OperatorHTTPServer.request_queue_size = int(os.environ.get("QV_BACKLOG", "512"))

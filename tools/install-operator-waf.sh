@@ -77,6 +77,16 @@ Include /etc/modsecurity/crs/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf
 
 # The panel only needs browser/API methods.  Reject unexpected verbs early.
 SecRule REQUEST_METHOD "!@within GET HEAD POST OPTIONS" "id:1001001,phase:1,deny,status:405,log,auditlog,msg:'Quantum Control: method not allowed'"
+
+# RosPanel operators legitimately save Russian UTF-8 maintenance notices,
+# category labels and release notes. CRS 941310 mistakes certain UTF-8 byte
+# sequences for malformed XSS and answers 403 before the authenticated panel
+# can receive the form. Narrowly remove only that false positive on the policy
+# endpoint; output is HTML-escaped by the application and the rest of CRS stays
+# active. CRS 920220 similarly misreads the panel's URL-encoded Cyrillic flash
+# messages after a successful redirect.
+SecRule REQUEST_URI "@beginsWith /operator/policy" "id:1001002,phase:1,pass,nolog,ctl:ruleRemoveById=941310"
+SecRule REQUEST_URI "@beginsWith /operator" "id:1001003,phase:1,pass,nolog,ctl:ruleRemoveById=920220"
 RULES
 chmod 640 "$WAF_RULES"
 

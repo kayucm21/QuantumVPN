@@ -63,6 +63,54 @@ class OperatorTests(unittest.TestCase):
                 initial_audit_count + 2,
             )
 
+    def test_subscription_category_texts_are_saved_without_changing_access(self):
+        token = base64.b64encode(b"test:test").decode()
+        body = (
+            "section=subscription_text&subscription_category_title=%D0%A2%D0%B0%D1%80%D0%B8%D1%84%D1%8B"
+            "&subscription_category_description=%D0%94%D0%BE%D1%81%D1%82%D1%83%D0%BF"
+            "&subscription_main_label=%D0%9E%D1%81%D0%BD%D0%BE%D0%B2%D0%BD%D0%B0%D1%8F"
+            "&reserve_profile_label=%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2"
+        ).encode()
+        with urlopen(Request(self.base + "/operator/policy", data=body, headers={"Authorization": "Basic " + token})) as response:
+            self.assertEqual(response.status, 200)
+        with closing(self.panel.conn()) as db:
+            saved = self.panel.settings(db)
+            self.assertEqual(saved["subscription_category_title"], "Тарифы")
+            self.assertEqual(saved["subscription_main_enabled"], "1")
+
+    def test_local_qwen_advice_is_aggregate_only_and_cannot_execute(self):
+        class Reply:
+            status = 200
+            def read(self, _size=-1):
+                return json.dumps({"response": "Статус: стабильно. Риски: нет. Следующий ручной шаг: наблюдать."}, ensure_ascii=False).encode("utf-8")
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+
+        with closing(self.panel.conn()) as db:
+            self.panel.set_settings(db, {
+                "ai_advisor_enabled": "1",
+                "ai_model": self.panel.QWEN_DEFAULT_MODEL,
+                "telegram_bot_token": "secret-must-not-reach-model",
+                "telegram_chat_id": "12345",
+            })
+            db.commit()
+            captured = []
+            def fake_urlopen(request, timeout=0):
+                captured.append(request)
+                return Reply()
+            with mock.patch.object(self.panel, "qwen_local_status", return_value={"ok": True, "ready": True}), \
+                    mock.patch.object(self.panel, "urlopen", side_effect=fake_urlopen):
+                result = self.panel.run_ai_analysis(db, self.panel.settings(db), "test")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "готов")
+            payload = captured[0].data.decode("utf-8")
+            self.assertNotIn("secret-must-not-reach-model", payload)
+            self.assertNotIn("telegram_chat_id", payload)
+            saved = self.panel.settings(db)
+            self.assertEqual(saved["ai_last_status"], "готов")
+
     def test_operator_download_buttons_use_current_version(self):
         token = base64.b64encode(b"test:test").decode()
         with urlopen(Request(self.base + "/operator", headers={"Authorization": "Basic " + token})) as response:

@@ -2003,6 +2003,13 @@ def promote_scheduled_release(db, now=None):
         (now, "release_promoted", "operator", "", json.dumps({"version": version, "version_code": code}, ensure_ascii=False)),
     )
     db.commit()
+    # Devices receive the in-app update banner on their next policy refresh.
+    # The owner chat receives one operational confirmation too; it is not a
+    # substitute for a mobile push because a bot cannot notify every APK.
+    telegram_send(
+        settings(db),
+        f"[Quantum Control] Выпуск {version} опубликован. Охват: {rollout}% · versionCode: {code}.",
+    )
     webhook_emit(settings(db), "release.promoted", {"version": version, "version_code": code, "rollout_percent": rollout})
     release_info.cache_clear()
     return True

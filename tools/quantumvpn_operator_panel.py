@@ -2259,6 +2259,7 @@ def ai_operations_snapshot(db, s: dict) -> dict:
     report = report_snapshot(db)
     service = cached_service_status(ttl=0)
     balancer = load_balancer_snapshot(db, s)
+    backup = latest_backup_info()
     latest = {}
     for row in db.execute(
         "select ts,target,ok,latency_ms,detail from server_health "
@@ -2296,6 +2297,12 @@ def ai_operations_snapshot(db, s: dict) -> dict:
             "quarantined_count": len(balancer.get("quarantined") or []),
             "drained_count": len(balancer.get("drained") or []),
         },
+        "backup": {
+            "exists": bool(backup.get("exists")),
+            "created_at": int(backup.get("ts") or 0),
+            "size_bytes": int(backup.get("size") or 0),
+            "hourly_delivery_enabled": enabled(s, "telegram_backups_enabled", False),
+        },
         "nodes": nodes,
     }
 
@@ -2307,6 +2314,7 @@ def ai_prompt(snapshot: dict) -> str:
         "телеметрию ниже. Не выполняй команды, не предлагай менять конфигурацию "
         "автоматически, не запрашивай секреты и не упоминай персональные данные. "
         "Пинг зависит от физической дистанции: не обещай невозможных значений. "
+        "Отдельно отметь, если резервная копия отсутствует или устарела. "
         "Ответь по-русски, максимум 900 символов, в трёх коротких частях: "
         "«Статус», «Риски», «Следующий ручной шаг». Если всё в норме, так и скажи.\n\n"
         + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))

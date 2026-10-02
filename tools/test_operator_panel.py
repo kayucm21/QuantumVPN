@@ -381,6 +381,26 @@ class OperatorTests(unittest.TestCase):
                 self.panel.set_settings(db, {"maintenance": previous["maintenance"], "public_download_enabled": previous["public_download_enabled"]})
                 db.commit()
 
+    def test_public_status_settings_save_without_cross_tab_redirect(self):
+        token = base64.b64encode(b"test:test").decode()
+        body = (
+            b"section=public_status&public_download_enabled=on&"
+            b"public_status_note_en=All+services+are+being+monitored."
+        )
+        with urlopen(
+            Request(
+                self.base + "/operator/policy",
+                data=body,
+                headers={"Authorization": "Basic " + token},
+            ),
+        ) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn(b"Public status site", response.read())
+        with closing(self.panel.conn()) as db:
+            saved = self.panel.settings(db)
+            self.assertEqual(saved["public_download_enabled"], "1")
+            self.assertEqual(saved["public_status_note_en"], "All services are being monitored.")
+
     def test_automation_policy_and_release_guard(self):
         token = base64.b64encode(b"test:test").decode()
         body = (

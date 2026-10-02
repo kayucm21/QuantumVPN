@@ -1731,6 +1731,21 @@ def parse_latency_targets(raw: str):
     return targets[:8]
 
 
+def bounded_form_int(form: dict, key: str, fallback, minimum: int, maximum: int) -> int:
+    """Read a numeric form value without turning an empty browser field into 400.
+
+    Some embedded browsers omit an empty ``<input type=number>`` altogether.
+    Treat that case as "leave the current value unchanged".  A non-empty
+    malformed value is still rejected by the caller, so this does not silently
+    accept a typo such as ``12ms``.
+    """
+    raw = (form.get(key, [""])[0] or "").strip()
+    if not raw:
+        raw = str(fallback)
+    value = int(raw)
+    return max(minimum, min(maximum, value))
+
+
 def parse_node_map_config(raw: str) -> list[dict]:
     """Parse bounded, operator-maintained node locations for the network map."""
     items = []
@@ -4974,9 +4989,9 @@ class App(BaseHTTPRequestHandler):
                 start = parse_datetime_value(form.get("maintenance_start", [""])[0])
                 end = parse_datetime_value(form.get("maintenance_end", [""])[0])
             except Exception:
-                return self.reply(400, '{"error":"invalid_maintenance_time"}')
+                return self.redirect_operator(tab, "Не сохранено: проверьте время технических работ")
             if "maintenance_schedule_enabled" in form and (start <= 0 or end <= start):
-                return self.reply(400, '{"error":"maintenance_end_must_follow_start"}')
+                return self.redirect_operator(tab, "Не сохранено: окончание работ должно быть позже начала")
             values = {
                 "maintenance": "1" if "maintenance" in form else "0",
                 "maintenance_schedule_enabled": "1" if "maintenance_schedule_enabled" in form else "0",
@@ -5009,7 +5024,7 @@ class App(BaseHTTPRequestHandler):
                 scheduled_rollout = max(1, min(100, int(form.get("scheduled_rollout_percent", ["100"])[0])))
                 publish_at = max(0, int(form.get("release_publish_at", ["0"])[0] or 0))
             except Exception:
-                return self.reply(400, '{"error":"invalid_release"}')
+                return self.redirect_operator(tab, "Не сохранено: проверьте версию, versionCode и процент выпуска")
             values = {
                 "app_version": form.get("app_version", [VERSION])[0][:32],
                 "app_version_code": str(vc),
@@ -5030,7 +5045,7 @@ class App(BaseHTTPRequestHandler):
                 rollout = max(1, min(100, int(form.get("staging_rollout_percent", ["100"])[0])))
                 vc = int(form.get("staging_version_code", [str(VERSION_CODE)])[0])
             except Exception:
-                return self.reply(400, '{"error":"invalid_staging"}')
+                return self.redirect_operator(tab, "Не сохранено: проверьте staging versionCode и процент выпуска")
             values = {
                 "staging_enabled": "1" if "staging_enabled" in form else "0",
                 "staging_version": form.get("staging_version", [""])[0][:32],
@@ -5069,7 +5084,7 @@ class App(BaseHTTPRequestHandler):
             tagline = form.get("brand_tagline", ["HORIZON GLASS · 2026"])[0].strip()[:80]
             accent = form.get("brand_accent", ["#3DE7FF"])[0].strip().upper()
             if not name or not tagline or not re.fullmatch(r"#[0-9A-F]{6}", accent):
-                return self.reply(400, '{"error":"invalid_branding"}')
+                return self.redirect_operator(tab, "Не сохранено: заполните название, подзаголовок и цвет вида #12AB34")
             values = {
                 "brand_name": name,
                 "brand_tagline": tagline,
@@ -5078,19 +5093,19 @@ class App(BaseHTTPRequestHandler):
         elif section == "latency":
             tab = "latency"
             try:
-                probe_interval = max(15, min(300, int(form.get("latency_probe_interval", ["30"])[0])))
-                max_latency = max(20, min(5000, int(form.get("latency_max_ms", ["120"])[0])))
-                quarantine_failures = max(2, min(10, int(form.get("auto_quarantine_failures", ["3"])[0])))
-                quarantine_recovery = max(1, min(10, int(form.get("auto_quarantine_recovery_checks", ["2"])[0])))
-                quarantine_ttl = max(5, min(1440, int(form.get("auto_quarantine_ttl_minutes", ["30"])[0])))
+                probe_interval = bounded_form_int(form, "latency_probe_interval", current.get("latency_probe_interval", "30"), 15, 300)
+                max_latency = bounded_form_int(form, "latency_max_ms", current.get("latency_max_ms", "120"), 20, 5000)
+                quarantine_failures = bounded_form_int(form, "auto_quarantine_failures", current.get("auto_quarantine_failures", "3"), 2, 10)
+                quarantine_recovery = bounded_form_int(form, "auto_quarantine_recovery_checks", current.get("auto_quarantine_recovery_checks", "2"), 1, 10)
+                quarantine_ttl = bounded_form_int(form, "auto_quarantine_ttl_minutes", current.get("auto_quarantine_ttl_minutes", "30"), 5, 1440)
             except Exception:
-                return self.reply(400, '{"error":"invalid_latency_settings"}')
+                return self.redirect_operator(tab, "Не сохранено: в оптимизации нод укажите целые числа")
             targets = ",".join(f"{host}:{port}" for host, port in parse_latency_targets(form.get("latency_probe_targets", [""])[0]))
             if not targets:
-                return self.reply(400, '{"error":"latency_targets_required"}')
+                return self.redirect_operator(tab, "Не сохранено: добавьте хотя бы одну TCP-цель ноды")
             node_map_config = form.get("node_map_config", [""])[0].strip()[:5000]
             if not node_map_config_is_valid(node_map_config):
-                return self.reply(400, '{"error":"invalid_node_map_config"}')
+                return self.redirect_operator(tab, "Не сохранено: реестр нод — одна строка «название | host:порт | широта | долгота | регион»")
             values = {
                 "latency_optimization_enabled": "1" if "latency_optimization_enabled" in form else "0",
                 "latency_probe_interval": str(probe_interval),
@@ -5105,9 +5120,9 @@ class App(BaseHTTPRequestHandler):
         elif section == "latency_balancer":
             tab = "latency"
             try:
-                max_balancer_latency = max(20, min(5000, int(form.get("load_balancer_max_latency_ms", ["250"])[0])))
+                max_balancer_latency = bounded_form_int(form, "load_balancer_max_latency_ms", current.get("load_balancer_max_latency_ms", "250"), 20, 5000)
             except Exception:
-                return self.reply(400, '{"error":"invalid_balancer_settings"}')
+                return self.redirect_operator(tab, "Не сохранено: максимальный пинг должен быть целым числом")
             strategy = form.get("load_balancer_strategy", ["latency_health"])[0]
             if strategy not in ("latency_health", "stable"):
                 strategy = "latency_health"
@@ -5119,12 +5134,12 @@ class App(BaseHTTPRequestHandler):
         elif section == "automation":
             tab = "automation"
             try:
-                health_interval = max(30, min(600, int(form.get("health_monitor_interval_seconds", ["60"])[0])))
+                health_interval = bounded_form_int(form, "health_monitor_interval_seconds", current.get("health_monitor_interval_seconds", "60"), 30, 600)
             except Exception:
-                return self.reply(400, '{"error":"invalid_health_monitor_interval"}')
+                return self.redirect_operator(tab, "Не сохранено: интервал мониторинга должен быть целым числом")
             digest_time = (form.get("telegram_digest_time_msk", ["09:00"])[0] or "").strip()
             if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", digest_time):
-                return self.reply(400, '{"error":"invalid_digest_time_msk"}')
+                return self.redirect_operator(tab, "Не сохранено: время сводки укажите в формате ЧЧ:ММ")
             values = {
                 "health_monitor_enabled": "1" if "health_monitor_enabled" in form else "0",
                 "health_monitor_interval_seconds": str(health_interval),
@@ -5134,9 +5149,9 @@ class App(BaseHTTPRequestHandler):
         elif section == "security":
             tab = "security"
             try:
-                rl = max(10, min(5000, int(form.get("rate_limit_per_min", ["120"])[0])))
+                rl = bounded_form_int(form, "rate_limit_per_min", current.get("rate_limit_per_min", "120"), 10, 5000)
             except Exception:
-                return self.reply(400, '{"error":"invalid_rate"}')
+                return self.redirect_operator(tab, "Не сохранено: лимит запросов должен быть целым числом")
             totp_on = "totp_enabled" in form
             secret = current.get("totp_secret") or ""
             if totp_on and not secret:
@@ -5161,7 +5176,7 @@ class App(BaseHTTPRequestHandler):
             tab = "integrations"
             url = (form.get("webhook_url", [""])[0] or "").strip()[:2048]
             if url and not url.lower().startswith("https://"):
-                return self.reply(400, '{"error":"webhook_https_required"}')
+                return self.redirect_operator(tab, "Не сохранено: вебхук должен начинаться с https://")
             events = []
             for item in (form.get("webhook_events", [""])[0] or "").split(","):
                 item = item.strip().lower()
@@ -5175,7 +5190,7 @@ class App(BaseHTTPRequestHandler):
                 "webhook_events": ",".join(events)[:500],
             }
         else:
-            return self.reply(400, '{"error":"unknown_section"}')
+            return self.redirect_operator("dashboard", "Неизвестный раздел настроек")
 
         if section in ("service", "features", "nodes", "ab", "branding", "latency", "release", "automation") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)

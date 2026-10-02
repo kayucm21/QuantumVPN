@@ -23,6 +23,10 @@ data class CardTableSnapshot(
     val message: String,
     /** Virtual game points only: no purchase, withdrawal, or real-money value. */
     val qCoins: Long = 0L,
+    /** The virtual stake deducted from each player after both confirm ready. */
+    val stakeQCoins: Long = 0L,
+    /** The complete virtual pot paid to the winner once the game ends. */
+    val winnerRewardQCoins: Long = 0L,
     val gamePhase: String = "waiting",
     val hand: List<String> = emptyList(),
     val opponentCards: Int = 0,
@@ -120,6 +124,8 @@ class CardTableRepository(context: Context) {
             opponentName = payload.optString("opponent_name"),
             message = payload.optString("message"),
             qCoins = payload.optLong("q_coins", 0L).coerceAtLeast(0L),
+            stakeQCoins = payload.optLong("stake_q_coins", 0L).coerceAtLeast(0L),
+            winnerRewardQCoins = payload.optLong("winner_reward_q_coins", 0L).coerceAtLeast(0L),
             gamePhase = payload.optString("game_phase", "waiting"),
             hand = buildList {
                 val cards = payload.optJSONArray("hand")

@@ -68,10 +68,10 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.11-control.2"
-VERSION = "5.10.11"
-VERSION_CODE = 136
-DEFAULT_NOTE = "QuantumVPN 5.10.11: отдельный экран обновления с объёмом, скоростью и оставшимся временем; расширенный Quantum Control."
+PANEL_BUILD = "5.10.12-control.0"
+VERSION = "5.10.12"
+VERSION_CODE = 137
+DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
 SESSION_TTL = 12 * 3600
 SESSION_COOKIE = "qv_session"
 CARD_GAME_TICKET_TTL = 6 * 3600
@@ -124,6 +124,15 @@ QWEN_LOCAL_ENDPOINT = "http://127.0.0.1:11434"
 QWEN_DEFAULT_MODEL = "qwen3:0.6b"
 AI_MIN_INTERVAL_SECONDS = 300
 AI_MAX_INTERVAL_SECONDS = 24 * 3600
+
+
+def telegram_bot_token(s: dict) -> str:
+    """Prefer the root-owned service environment over SQLite.
+
+    Secrets entered in a browser can leak through backups or accidental HTML
+    rendering. The VDS environment file is intentionally outside both.
+    """
+    return (os.environ.get("QV_TELEGRAM_BOT_TOKEN") or s.get("telegram_bot_token") or "").strip()
 
 
 def b64url(data: bytes) -> str:
@@ -511,6 +520,9 @@ def conn():
                 "announce_en": "",
                 "subscription_main_enabled": "1",
                 "reserve_profile_enabled": "1",
+                # Presence in the control panel does not manufacture a peer:
+                # actual AmneziaWG keys/config are issued by the subscription.
+                "amneziawg_port": "59333",
                 "subscription_category_title": "Подписка",
                 "subscription_category_description": "Управление доступом и резервным профилем",
                 "subscription_main_label": "Встроенная подписка включена",
@@ -563,6 +575,11 @@ def conn():
                 "routing_staging_revision": "0",
                 "routing_staging_rollout_percent": "10",
                 "routing_staging_payload": "{}",
+                # A draft is deliberately kept separate from the signed live
+                # policy.  It gives the operator a visible Save action without
+                # accidentally changing routes on devices.
+                "routing_draft_payload": "{}",
+                "routing_draft_updated_at": "0",
                 # Saved operator-only output of the bounded target advisor.
                 # It is never included in /api/client/routing or consumed by
                 # APKs until a reviewed revision is explicitly published.
@@ -637,9 +654,22 @@ def conn():
                 "card_game_access_hash": "",
                 "card_game_wait_minutes": "20",
                 "card_game_start_coins": "1200",
+                # Q-coins are closed-loop virtual game points only.  A stake
+                # is debited from both players at deal start and the complete
+                # virtual pot is credited to the winner exactly once.
+                "card_game_stake_q_coins": "25",
+                # The public status page exposes no operator data.  Downloads
+                # close automatically during maintenance and can also be
+                # paused explicitly by an owner.
+                "public_download_enabled": "1",
+                "public_status_note_en": "Live service information for QuantumVPN users.",
             }
             for key, value in defaults.items():
                 db.execute("insert or ignore into settings values (?,?)", (key, value))
+            # The Android core already supports AmneziaWG .conf profiles. Keep
+            # the sixth protocol visible even though a HWID-bound subscription
+            # cannot be fetched generically by the operator panel.
+            db.execute("insert or ignore into protocols values (?,1)", ("amneziawg",))
             card_columns = {row[1] for row in db.execute("pragma table_info(card_tables)")}
             if "game_json" not in card_columns:
                 db.execute("alter table card_tables add column game_json text not null default ''")
@@ -2036,7 +2066,7 @@ def release_guard_snapshot(s):
 
 
 def telegram_send(s, text: str):
-    token = (s.get("telegram_bot_token") or "").strip()
+    token = telegram_bot_token(s)
     chat = (s.get("telegram_chat_id") or "").strip()
     if not token or not chat:
         return False
@@ -2051,7 +2081,7 @@ def telegram_send(s, text: str):
 
 def telegram_send_document(s, path: str, caption: str = ""):
     """Upload one backup archive to the configured Telegram chat."""
-    token = (s.get("telegram_bot_token") or "").strip()
+    token = telegram_bot_token(s)
     chat = (s.get("telegram_chat_id") or "").strip()
     if not token or not chat or not os.path.isfile(path):
         return False
@@ -2089,12 +2119,18 @@ def telegram_send_document(s, path: str, caption: str = ""):
 
 
 def create_backup_archive():
-    """Create a consistent, local operator backup without touching the live DB."""
+    """Create an encrypted consistent snapshot of both panel SQLite stores.
+
+    Environment secrets (including the Telegram token) are deliberately not
+    part of the archive. The RosPanel snapshot is optional so an operator
+    backup still succeeds during a RosPanel repair.
+    """
     folder = os.path.join(ROOT, "backups")
     os.makedirs(folder, exist_ok=True)
     stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     archive = os.path.join(folder, f"quantum-control-{stamp}.zip")
     temp_db = os.path.join(folder, f".operator-{stamp}.db")
+    temp_rospanel_db = os.path.join(folder, f".rospanel-{stamp}.db")
     source = sqlite3.connect(DB, timeout=30)
     try:
         target = sqlite3.connect(temp_db)
@@ -2104,19 +2140,37 @@ def create_backup_archive():
             target.close()
     finally:
         source.close()
+    rospanel_included = False
     try:
+        if os.path.isfile(ROSPANEL_DB):
+            source = sqlite3.connect(f"file:{ROSPANEL_DB}?mode=ro", uri=True, timeout=30)
+            try:
+                target = sqlite3.connect(temp_rospanel_db)
+                try:
+                    source.backup(target)
+                    rospanel_included = True
+                finally:
+                    target.close()
+            finally:
+                source.close()
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
             bundle.write(temp_db, "operator.db")
+            if rospanel_included:
+                bundle.write(temp_rospanel_db, "rospanel.db")
             secret = os.path.join(ROOT, "session.secret")
             if os.path.isfile(secret):
                 bundle.write(secret, "session.secret")
             bundle.writestr(
                 "backup-info.json",
-                json.dumps({"created_at": int(time.time()), "panel_build": PANEL_BUILD}, ensure_ascii=False),
+                json.dumps({"created_at": int(time.time()), "panel_build": PANEL_BUILD, "rospanel_included": rospanel_included}, ensure_ascii=False),
             )
     finally:
         try:
             os.remove(temp_db)
+        except OSError:
+            pass
+        try:
+            os.remove(temp_rospanel_db)
         except OSError:
             pass
     encrypted = encrypt_backup_archive(archive)
@@ -2185,7 +2239,7 @@ def maybe_send_daily_digest(db, s, now=None):
     """Send one opt-in, compact daily operations digest to the Telegram chat."""
     if not enabled(s, "telegram_daily_digest_enabled", False):
         return False
-    if not (s.get("telegram_bot_token") or "").strip() or not (s.get("telegram_chat_id") or "").strip():
+    if not telegram_bot_token(s) or not (s.get("telegram_chat_id") or "").strip():
         return False
     target = (s.get("telegram_digest_time_msk") or "09:00").strip()
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", target):
@@ -2646,6 +2700,20 @@ def render_login(error=""):
 
 def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None):
     checked = lambda key: "checked" if s.get(key) == "1" else ""
+    # Keep an operator draft local to the panel.  The client receives only a
+    # signed production/staging revision, never this data.
+    routing_form_state = dict(s)
+    routing_draft_label = "Черновика нет"
+    try:
+        routing_draft = json.loads(s.get("routing_draft_payload") or "{}")
+        if routing_draft:
+            routing_form_state.update(routing_settings_from_payload(routing_draft))
+            updated_at = int(s.get("routing_draft_updated_at", "0") or 0)
+            routing_draft_label = "Черновик сохранён" + (
+                " · " + time.strftime("%d.%m %H:%M", time.localtime(updated_at)) if updated_at else ""
+            )
+    except (ValueError, TypeError, json.JSONDecodeError):
+        routing_draft_label = "Черновик повреждён — используется текущая опубликованная политика"
     events = "".join(
         f"<tr><td>{time.strftime('%d.%m %H:%M', time.localtime(x[0]))}</td><td>{html.escape(x[1])}</td>"
         f"<td><a href='/operator?tab=devices&q={quote(x[2])}'>{html.escape(x[2])}</a></td>"
@@ -2755,7 +2823,11 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
 
     flash_html = f"<div class=flash>{html.escape(flash)}</div>" if flash else ""
     outbounds = ", ".join(status.get("outbounds") or []) or "—"
-    telegram_token = s.get("telegram_bot_token", "") if role_at_least(actor_role, "operator") else ""
+    telegram_env_managed = bool(os.environ.get("QV_TELEGRAM_BOT_TOKEN", "").strip())
+    # Never render a usable token, even to an owner.  Server environment is
+    # preferred and the legacy SQLite value remains only for migration.
+    telegram_token = ""
+    telegram_token_hint = "Токен управляется секретом VDS" if telegram_env_managed else "Введите токен один раз; после сохранения он не показывается"
     monitor_db = conn()
     try:
         monitor_rows = health_snapshot(monitor_db, limit=200)
@@ -2855,7 +2927,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     support_html = "".join(support_row(item) for item in support_tickets) or "<tr><td colspan=6>Обращений пока нет</td></tr>"
     webhook_events = html.escape(s.get("webhook_events", "incident,release,maintenance,diagnostic"))
     routing_profile_options = "".join(
-        f"<option value='{name}' {'selected' if s.get('routing_profile', 'balanced') == name else ''}>{html.escape(label)}</option>"
+        f"<option value='{name}' {'selected' if routing_form_state.get('routing_profile', 'balanced') == name else ''}>{html.escape(label)}</option>"
         for name, label in ROUTING_PROFILES.items()
     )
     routing_dns_options = "".join(
@@ -3079,6 +3151,14 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <p class=muted>Upstream: <code>{html.escape(UPSTREAM[:64])}…</code></p>
         <button>Сохранить</button>
       </form>
+      <form class=card method=post action=/operator/policy><input type=hidden name=section value=public_status>
+        <h2>Public status site</h2>
+        <p class={'off' if effective_maintenance(s) or not enabled(s, 'public_download_enabled', True) else 'ok'}>{'Downloads closed' if effective_maintenance(s) or not enabled(s, 'public_download_enabled', True) else 'Status online · downloads open'}</p>
+        <p class=muted>Public English page without registration: <a href="/status" target=_blank rel=noopener>/status</a>. During maintenance downloads always close automatically.</p>
+        <label><input type=checkbox name=public_download_enabled {'checked' if enabled(s, 'public_download_enabled', True) else ''}> Allow Android download when service is operational</label>
+        <label>English public note<textarea name=public_status_note_en maxlength=160>{html.escape(s.get('public_status_note_en',''))}</textarea></label>
+        <button>Save public site</button>
+      </form>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=subscription_text>
         <h2>Тексты категории подписки</h2>
         <p class=muted>Меняет только подписи этой дополнительной панели. Данные пользователей, ссылки и настройки RosPanel не затрагиваются.</p>
@@ -3089,7 +3169,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <button>Сохранить тексты</button>
       </form>
       <form class=card method=post action=/operator/protocols>
-        <h2>Протоколы</h2>{toggles}<button>Сохранить протоколы</button>
+        <h2>Протоколы</h2>{toggles}<p class=muted>AMNEZIA‑WG: UDP {html.escape(s.get('amneziawg_port','59333'))}. Работоспособность зависит от полного профиля с ключами, выданного вашей подпиской; панель не создаёт ключи и не подменяет конфигурацию.</p><button>Сохранить протоколы</button>
       </form>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=nodes>
         <h2>Ноды для клиента</h2>
@@ -3198,20 +3278,21 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <form id=routing-policy class="routing-policy-form" method=post action=/operator/routing>
           <section class="card routing-card routing-rules">
             <h2>Правила маршрута</h2><p class=routing-subtitle>Домен или CIDR через запятую либо с новой строки.</p>
-            <section class="route-group proxy"><div class=route-group-head><b>Через VPN</b><span>защищённый маршрут</span></div><label><textarea rows=2 name=routing_proxy_domains aria-label="Домены через VPN">{html.escape(s.get('routing_proxy_domains',''))}</textarea></label><details class=route-advanced><summary>CIDR / IP через VPN</summary><label><textarea rows=2 name=routing_proxy_cidrs aria-label="CIDR через VPN" placeholder="198.51.100.0/24">{html.escape(s.get('routing_proxy_cidrs',''))}</textarea></label></details></section>
-            <section class="route-group direct"><div class=route-group-head><b>Напрямую</b><span>исключения из VPN</span></div><label><textarea rows=1 name=routing_direct_domains aria-label="Домены напрямую" placeholder="service.example">{html.escape(s.get('routing_direct_domains',''))}</textarea></label><details class=route-advanced><summary>CIDR / IP напрямую</summary><label><textarea rows=2 name=routing_direct_cidrs aria-label="CIDR напрямую" placeholder="203.0.113.0/24">{html.escape(s.get('routing_direct_cidrs',''))}</textarea></label></details></section>
-            <section class="route-group block"><div class=route-group-head><b>Блок-лист</b><span>реклама и трекеры</span></div><label><textarea rows=1 name=routing_block_domains aria-label="Заблокированные домены" placeholder="ads.example">{html.escape(s.get('routing_block_domains',''))}</textarea></label></section>
+            <section class="route-group proxy"><div class=route-group-head><b>Через VPN</b><span>защищённый маршрут</span></div><label><textarea rows=2 name=routing_proxy_domains aria-label="Домены через VPN">{html.escape(routing_form_state.get('routing_proxy_domains',''))}</textarea></label><details class=route-advanced><summary>CIDR / IP через VPN</summary><label><textarea rows=2 name=routing_proxy_cidrs aria-label="CIDR через VPN" placeholder="198.51.100.0/24">{html.escape(routing_form_state.get('routing_proxy_cidrs',''))}</textarea></label></details></section>
+            <section class="route-group direct"><div class=route-group-head><b>Напрямую</b><span>исключения из VPN</span></div><label><textarea rows=1 name=routing_direct_domains aria-label="Домены напрямую" placeholder="service.example">{html.escape(routing_form_state.get('routing_direct_domains',''))}</textarea></label><details class=route-advanced><summary>CIDR / IP напрямую</summary><label><textarea rows=2 name=routing_direct_cidrs aria-label="CIDR напрямую" placeholder="203.0.113.0/24">{html.escape(routing_form_state.get('routing_direct_cidrs',''))}</textarea></label></details></section>
+            <section class="route-group block"><div class=route-group-head><b>Блок-лист</b><span>реклама и трекеры</span></div><label><textarea rows=1 name=routing_block_domains aria-label="Заблокированные домены" placeholder="ads.example">{html.escape(routing_form_state.get('routing_block_domains',''))}</textarea></label></section>
           </section>
         </form>
         <section class="card routing-card routing-dns">
           <h2>DNS и публикация</h2><p class=routing-subtitle>Настройка действует только в активном VPN-туннеле.</p>
-          <label class=routing-switch><span><b>Управляемая маршрутизация</b><small>Применять подписанную политику в APK с поддержкой rule-set.</small></span><input form=routing-policy type=checkbox name=routing_enabled {checked('routing_enabled')}></label>
-          <label class=routing-switch><span><b>DNS только внутри VPN</b><small>Системный Private DNS Android не изменяется.</small></span><input form=routing-policy type=checkbox name=routing_dns_mode value=vpn_only {'checked' if s.get('routing_dns_mode','vpn_only') == 'vpn_only' else ''}></label>
+          <label class=routing-switch><span><b>Управляемая маршрутизация</b><small>Применять подписанную политику в APK с поддержкой rule-set.</small></span><input form=routing-policy type=checkbox name=routing_enabled {'checked' if routing_form_state.get('routing_enabled') == '1' else ''}></label>
+          <label class=routing-switch><span><b>DNS только внутри VPN</b><small>Системный Private DNS Android не изменяется.</small></span><input form=routing-policy type=checkbox name=routing_dns_mode value=vpn_only {'checked' if routing_form_state.get('routing_dns_mode','vpn_only') == 'vpn_only' else ''}></label>
           <input form=routing-policy type=hidden name=routing_dns_mode value=vpn_only>
-          <label class=routing-switch><span><b>Блокировка рекламы</b><small>Фильтрация только по опубликованному блок-листу доменов.</small></span><input form=routing-policy type=checkbox name=routing_adblock_enabled {checked('routing_adblock_enabled')}></label>
-          <div class=dns-field><label>DNS-over-HTTPS<select form=routing-policy name=routing_dns_resolver><option value="{html.escape(s.get('routing_dns_resolver',''))}">{html.escape(s.get('routing_dns_resolver','') or 'Не выбран')}</option><option value="https://dns.adguard-dns.com/dns-query">AdGuard DNS</option><option value="https://cloudflare-dns.com/dns-query">Cloudflare</option></select></label><label>Профиль<select form=routing-policy name=routing_profile>{routing_profile_options}</select></label></div>
+          <label class=routing-switch><span><b>Блокировка рекламы</b><small>Фильтрация только по опубликованному блок-листу доменов.</small></span><input form=routing-policy type=checkbox name=routing_adblock_enabled {'checked' if routing_form_state.get('routing_adblock_enabled') == '1' else ''}></label>
+          <div class=dns-field><label>DNS-over-HTTPS<select form=routing-policy name=routing_dns_resolver><option value="{html.escape(routing_form_state.get('routing_dns_resolver',''))}">{html.escape(routing_form_state.get('routing_dns_resolver','') or 'Не выбран')}</option><option value="https://dns.adguard-dns.com/dns-query">AdGuard DNS</option><option value="https://cloudflare-dns.com/dns-query">Cloudflare</option></select></label><label>Профиль<select form=routing-policy name=routing_profile>{routing_profile_options}</select></label></div>
           <label style="margin:10px 0 0">Тестовый канал, %<input form=routing-policy type=number min=1 max=100 name=routing_staging_rollout_percent value="{routing_staging_rollout}"></label>
-          <div class=routing-actions><button form=routing-policy class=secondary name=action value=stage>Тестовый канал</button><button form=routing-policy name=action value=publish>Опубликовать r{int(s.get('routing_revision','1') or 1) + 1}</button></div>
+          <p class=muted>{html.escape(routing_draft_label)}. «Сохранить черновик» ничего не отправляет в APK.</p>
+          <div class=routing-actions><button form=routing-policy class=secondary name=action value=save>Сохранить черновик</button><button form=routing-policy class=secondary name=action value=stage>Тестовый канал</button><button form=routing-policy name=action value=publish>Опубликовать r{int(s.get('routing_revision','1') or 1) + 1}</button></div>
         </section>
       </section>
       <section class=routing-footer>
@@ -3328,6 +3409,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <label><input type=checkbox name=card_game_enabled {checked('card_game_enabled')}> Включить карточный стол</label>
         <label>Новый код доступа<input type=password name=card_game_access_code minlength=8 maxlength=80 autocomplete=new-password placeholder="Минимум 8 символов"></label>
         <label>Время ожидания второго игрока, минут<input type=number name=card_game_wait_minutes min=5 max=120 value="{html.escape(s.get('card_game_wait_minutes','20'))}"></label>
+        <label>Ставка на игрока, Q-coins<input type=number name=card_game_stake_q_coins min=0 max=100000 value="{html.escape(s.get('card_game_stake_q_coins','25'))}"></label>
+        <p class=muted>Только виртуальные Q-coins: при старте партии одинаковая ставка списывается у обоих, общий виртуальный банк получает победитель. Денег, покупки и вывода нет.</p>
         <p class={'ok' if s.get('card_game_access_hash') else 'warn'}>Код доступа: <b>{card_code_state}</b>. Оставьте поле пустым, чтобы не менять существующий код.</p>
         <button>Сохранить доступ к столу</button>
       </form>
@@ -3469,7 +3552,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <h2>Telegram алерты</h2>
         <label><input type=checkbox name=telegram_alerts_enabled {checked('telegram_alerts_enabled')}> Включить</label>
         <label><input type=checkbox name=telegram_backups_enabled {checked('telegram_backups_enabled')}> Резервная копия каждый час</label>
-        <label>Bot token<input name=telegram_bot_token value="{html.escape(telegram_token)}" autocomplete=off></label>
+        <label>Bot token<input type=password name=telegram_bot_token value="{html.escape(telegram_token)}" autocomplete=off {'disabled' if telegram_env_managed else ''} placeholder="{html.escape(telegram_token_hint)}"></label>
+        <p class=muted>{html.escape(telegram_token_hint)}</p>
         <label>Chat ID<input name=telegram_chat_id value="{html.escape(s.get('telegram_chat_id',''))}"></label>
         <div class=actions><button>Сохранить</button>
         <button class=secondary formaction=/operator/actions name=action value=telegram_test>Тест сообщения</button>
@@ -3687,6 +3771,11 @@ class App(BaseHTTPRequestHandler):
         defender = "guest" if attacker == "host" else "host"
         all_defended = bool(table_cards) and all(isinstance(item, dict) and item.get("defense") for item in table_cards)
         ready_flags = game.get("ready") if isinstance(game.get("ready"), dict) else {}
+        try:
+            stake = max(0, min(100_000, int(game.get("stake_q_coins") or 0)))
+        except (TypeError, ValueError):
+            stake = 0
+        winner_reward = stake * 2 if phase == "finished" and game.get("stake_settled") else 0
         return {
             "table_id": row[0],
             "state": state,
@@ -3698,6 +3787,8 @@ class App(BaseHTTPRequestHandler):
             "waiting": state == "waiting",
             "ready": state in ("ready", "playing", "finished"),
             "q_coins": max(0, int(wallet[0] or 0)) if wallet else 0,
+            "stake_q_coins": stake,
+            "winner_reward_q_coins": winner_reward,
             "game_phase": phase,
             "hand": [str(card) for card in hand if re.fullmatch(r"(?:10|[6-9JQKA])[SHDC]", str(card))],
             "opponent_cards": len(game.get("hands", {}).get("guest" if seat == "host" else "host", [])) if isinstance(game.get("hands"), dict) else 0,
@@ -3789,7 +3880,7 @@ class App(BaseHTTPRequestHandler):
         payload["ticket"] = card_game_ticket(device, table_id)
         return payload
 
-    def card_game_action(self, db, device: str, table_id: str, action: str, card: str = ""):
+    def card_game_action(self, db, s: dict, device: str, table_id: str, action: str, card: str = ""):
         """Apply one legal Durak action under a short SQLite write transaction."""
         if action not in ("ready", "attack", "defend", "take", "pass"):
             raise ValueError("Неизвестное действие игры")
@@ -3817,9 +3908,30 @@ class App(BaseHTTPRequestHandler):
                 ready = game.setdefault("ready", {"host": False, "guest": False})
                 ready[seat] = True
                 if ready.get("host") and ready.get("guest"):
+                    stake = max(0, min(100_000, int(s.get("card_game_stake_q_coins") or 25)))
+                    # Charge each player exactly once at the point a deal
+                    # begins.  The game JSON is transactional state, so a
+                    # retry or restart cannot create a duplicate pot.
+                    if not game.get("stake_settled") and "stake_q_coins" not in game:
+                        balances = {
+                            item[0]: max(0, int(item[1] or 0))
+                            for item in db.execute(
+                                "select device,q_coins from card_wallets where device in (?,?)",
+                                (row[1], row[2]),
+                            )
+                        }
+                        if balances.get(row[1], 0) < stake or balances.get(row[2], 0) < stake:
+                            raise ValueError("Для начала партии каждому игроку нужно достаточно виртуальных Q-coins")
+                        if stake:
+                            db.execute(
+                                "update card_wallets set q_coins=q_coins-?, updated_at=? where device in (?,?)",
+                                (stake, now, row[1], row[2]),
+                            )
+                        game["stake_q_coins"] = stake
+                        game["stake_settled"] = False
                     game["phase"] = "playing"
                     state = "playing"
-                    last_action = "Раздача началась"
+                    last_action = f"Раздача началась · банк {stake * 2} Q-coins"
                 else:
                     state = "ready"
                     last_action = f"{seat} готов к раздаче"
@@ -3876,11 +3988,15 @@ class App(BaseHTTPRequestHandler):
                 if winner:
                     state = "finished"
                     winner_device = row[1] if winner == "host" else row[2]
-                    db.execute(
-                        "update card_wallets set q_coins=q_coins+25, updated_at=? where device=?",
-                        (now, winner_device),
-                    )
-                    last_action = "Партия завершена: +25 Q-coins победителю"
+                    stake = max(0, min(100_000, int(game.get("stake_q_coins") or 0)))
+                    if not game.get("stake_settled"):
+                        if stake:
+                            db.execute(
+                                "update card_wallets set q_coins=q_coins+?, updated_at=? where device=?",
+                                (stake * 2, now, winner_device),
+                            )
+                        game["stake_settled"] = True
+                    last_action = f"Партия завершена: банк {stake * 2} Q-coins переведён победителю"
             db.execute(
                 "update card_tables set state=?,updated_at=?,last_action=?,game_json=? where id=?",
                 (state, now, last_action, json.dumps(game, separators=(",", ":")), table_id),
@@ -3910,7 +4026,7 @@ class App(BaseHTTPRequestHandler):
         self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         if PUBLIC_BASE.lower().startswith("https://"):
             self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-        if content_type.startswith("text/html"):
+        if content_type.startswith("text/html") and not (headers and "Content-Security-Policy" in headers):
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
@@ -3974,6 +4090,27 @@ class App(BaseHTTPRequestHandler):
             int(s.get("rollout_percent") or 100),
             s.get("app_changelog") or DEFAULT_NOTE,
         )
+
+    def public_status_html(self, s: dict) -> str:
+        """Render the intentionally data-minimal public user status page."""
+        maintenance = effective_maintenance(s)
+        version, _version_code, _rollout, _note = self.current_release(s, "production")
+        artifact = os.path.join(DOWNLOAD_ROOT, version, f"QuantumVPN-{version}-operator-debug-arm64-v8a.apk")
+        downloads_open = not maintenance and enabled(s, "public_download_enabled", True) and os.path.isfile(artifact)
+        services = cached_service_status()
+        required = ("operator", "rospanel", "xray")
+        services_ok = all(services.get(name) in ("active", "running") for name in required)
+        state = "Maintenance" if maintenance else "Operational" if services_ok else "Degraded"
+        state_class = "danger" if maintenance or not services_ok else "good"
+        headline = "Scheduled maintenance is in progress." if maintenance else "The VPN service is operating normally." if services_ok else "We are investigating a service disruption."
+        note = " ".join((s.get("public_status_note_en") or "").split())[:160]
+        download = (
+            f'<a class="download" href="/downloads/{quote(version)}/QuantumVPN-{quote(version)}-operator-debug-arm64-v8a.apk">Download for Android</a>'
+            if downloads_open else
+            '<span class="download closed">Android download temporarily unavailable</span>'
+        )
+        return f"""<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>QuantumVPN Status</title><style>
+        :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 0,#153c5f,#06111f 50%,#03070e);font:16px system-ui,-apple-system,Segoe UI,sans-serif;color:#eaf6ff}}main{{width:min(620px,calc(100% - 32px));padding:42px;border:1px solid #244866;border-radius:28px;background:#09182acc;box-shadow:0 28px 90px #0008}}.brand{{font-size:28px;font-weight:800;letter-spacing:-.7px}}.brand i{{color:#3de7ff;font-style:normal}}.badge{{display:inline-flex;gap:9px;align-items:center;margin:32px 0 16px;padding:10px 15px;border-radius:999px;font-weight:700}}.badge:before{{content:'';width:9px;height:9px;border-radius:50%;background:currentColor;box-shadow:0 0 14px currentColor}}.good{{background:#0b4037;color:#62f4c4}}.danger{{background:#4b1c2a;color:#ff7790}}h1{{margin:0;font-size:32px}}p{{color:#a9bfd1;line-height:1.55}}.row{{display:flex;justify-content:space-between;gap:18px;margin:30px 0 18px;padding:17px 0;border-top:1px solid #244866;border-bottom:1px solid #244866;color:#a9bfd1}}.row b{{color:#fff}}.download{{display:block;text-align:center;text-decoration:none;margin-top:24px;padding:15px 18px;border-radius:14px;background:linear-gradient(100deg,#32d5e8,#5ce6bb);color:#04111e;font-weight:800}}.closed{{background:#45202b;color:#ffb1c0}}small{{display:block;margin-top:26px;color:#748fa7;text-align:center}}</style></head><body><main><div class=brand>Quantum<i>VPN</i></div><div class="badge {state_class}">{state}</div><h1>{html.escape(headline)}</h1><p>{html.escape(note or 'Service and Android release availability are shown here in real time.')}</p><div class=row><span>Android release</span><b>{html.escape(version)}</b></div>{download}<small>This page contains no account, subscription, or administrator data.</small></main></body></html>"""
 
     def device_search(self, db, q, limit=50):
         q = (q or "").strip()
@@ -4088,6 +4225,16 @@ class App(BaseHTTPRequestHandler):
         db = self.connection_db()
         s = settings(db)
 
+        if path == "/status":
+            # A public, registration-free page. It intentionally bypasses the
+            # operator session path and includes no control-plane information.
+            return self.reply(
+                200,
+                self.public_status_html(s),
+                "text/html; charset=utf-8",
+                {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"},
+            )
+
         if path.startswith("/api/"):
             limit = int(s.get("rate_limit_per_min") or 120)
             ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
@@ -4177,6 +4324,10 @@ class App(BaseHTTPRequestHandler):
             payload = self.card_game_payload(db, device, table_id)
             if not payload:
                 return self.reply(404, '{"error":"game_table_not_found"}')
+            # State polling must preserve the signed device-bound ticket.  If
+            # it is omitted, Compose replaces the snapshot with a blank ticket
+            # and cancels the lobby poll as soon as the second player joins.
+            payload["ticket"] = ticket
             return self.reply(200, json.dumps(payload, ensure_ascii=False))
 
         if path.startswith("/api/client/policy"):
@@ -4533,6 +4684,8 @@ class App(BaseHTTPRequestHandler):
         scheduled_version = relative.split("/", 1)[0]
         db = self.connection_db()
         s = settings(db)
+        if effective_maintenance(s) or not enabled(s, "public_download_enabled", True):
+            return self.reply(503, "Downloads temporarily unavailable", "text/plain; charset=utf-8", {"Retry-After": "300"})
         if (
             enabled(s, "release_schedule_enabled", False)
             and scheduled_version == (s.get("scheduled_app_version") or "").strip()
@@ -4721,6 +4874,7 @@ class App(BaseHTTPRequestHandler):
                     return self.reply(403, '{"error":"game_ticket_device_mismatch"}')
                 result = self.card_game_action(
                     db,
+                    s,
                     device,
                     str(ticket_data.get("table") or ""),
                     str(payload.get("action") or ""),
@@ -4819,11 +4973,14 @@ class App(BaseHTTPRequestHandler):
             raw_code = (form.get("card_game_access_code", [""])[0] or "").strip()
             try:
                 wait_minutes = max(5, min(120, int(form.get("card_game_wait_minutes", ["20"])[0] or 20)))
+                stake_q_coins = max(0, min(100_000, int(form.get("card_game_stake_q_coins", ["25"])[0] or 0)))
             except ValueError:
                 wait_minutes = 20
+                stake_q_coins = 25
             values = {
                 "card_game_enabled": "1" if "card_game_enabled" in form else "0",
                 "card_game_wait_minutes": str(wait_minutes),
+                "card_game_stake_q_coins": str(stake_q_coins),
             }
             if raw_code:
                 if len(raw_code) < 8 or len(raw_code) > 80:
@@ -4833,6 +4990,7 @@ class App(BaseHTTPRequestHandler):
             audit(db, actor, ip, "card_game_config", {
                 "enabled": values["card_game_enabled"] == "1",
                 "wait_minutes": wait_minutes,
+                "stake_q_coins": stake_q_coins,
                 "code_rotated": bool(raw_code),
             })
             db.execute(
@@ -4901,11 +5059,28 @@ class App(BaseHTTPRequestHandler):
                     ready = sum(1 for item in findings if item.get("status") == "ok")
                     return self.redirect_operator("routing", f"Проверено целей: {len(findings)}, TCP/443 доступно: {ready}")
 
-                if action in ("publish", "stage"):
+                if action in ("save", "publish", "stage"):
                     candidate_values = routing_candidate_from_form(form)
                     candidate_state = dict(s)
                     candidate_state.update(candidate_values)
                     current_revision = max(1, int(s.get("routing_revision", "1") or 1))
+                    if action == "save":
+                        draft_payload = routing_payload(candidate_state, current_revision)
+                        now = int(time.time())
+                        set_settings(db, {
+                            "routing_draft_payload": canonical_json(draft_payload).decode("utf-8"),
+                            "routing_draft_updated_at": str(now),
+                        })
+                        audit(db, actor, ip, "routing:save_draft", {
+                            "revision_base": current_revision,
+                            "sha256": hashlib.sha256(canonical_json(draft_payload)).hexdigest(),
+                        })
+                        db.execute(
+                            "insert into events values (?,?,?,?,?)",
+                            (now, "routing_draft_saved", actor, ip, json.dumps({"revision_base": current_revision}, ensure_ascii=False)),
+                        )
+                        db.commit()
+                        return self.redirect_operator("routing", "Черновик маршрутизации сохранён. APK его не получает до публикации.")
                     if action == "stage":
                         staged_revision = current_revision + 1
                         staged_payload = routing_payload(candidate_state, staged_revision)
@@ -4941,6 +5116,8 @@ class App(BaseHTTPRequestHandler):
                         "routing_staging_enabled": "0",
                         "routing_staging_revision": "0",
                         "routing_staging_payload": "{}",
+                        "routing_draft_payload": "{}",
+                        "routing_draft_updated_at": "0",
                         "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
                     })
                     set_settings(db, values)
@@ -5331,6 +5508,13 @@ class App(BaseHTTPRequestHandler):
                 "subscription_main_label": main_label,
                 "reserve_profile_label": reserve_label,
             }
+        elif section == "public_status":
+            tab = "service"
+            public_note = " ".join((form.get("public_status_note_en", [""])[0] or "").split())[:160]
+            values = {
+                "public_download_enabled": "1" if "public_download_enabled" in form else "0",
+                "public_status_note_en": public_note or "Live service information for QuantumVPN users.",
+            }
         elif section == "nodes":
             tab = "service"
             values = {
@@ -5507,9 +5691,11 @@ class App(BaseHTTPRequestHandler):
             values = {
                 "telegram_alerts_enabled": "1" if "telegram_alerts_enabled" in form else "0",
                 "telegram_backups_enabled": "1" if "telegram_backups_enabled" in form else "0",
-                "telegram_bot_token": form.get("telegram_bot_token", [""])[0][:200],
                 "telegram_chat_id": form.get("telegram_chat_id", [""])[0][:64],
             }
+            supplied_token = (form.get("telegram_bot_token", [""])[0] or "").strip()
+            if supplied_token and not os.environ.get("QV_TELEGRAM_BOT_TOKEN", "").strip():
+                values["telegram_bot_token"] = supplied_token[:200]
         elif section == "webhooks":
             tab = "integrations"
             url = (form.get("webhook_url", [""])[0] or "").strip()[:2048]
@@ -5530,7 +5716,7 @@ class App(BaseHTTPRequestHandler):
         else:
             return self.redirect_operator("dashboard", "Неизвестный раздел настроек")
 
-        if section in ("service", "subscription_text", "features", "nodes", "ab", "branding", "latency", "release", "automation", "ai") and any(current.get(k) != v for k, v in values.items()):
+        if section in ("service", "subscription_text", "public_status", "features", "nodes", "ab", "branding", "latency", "release", "automation", "ai") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)
         changes = {k: {"before": current.get(k), "after": v} for k, v in values.items() if current.get(k) != v}
         maintenance_before = effective_maintenance(current)

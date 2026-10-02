@@ -246,6 +246,7 @@ class OperatorTests(unittest.TestCase):
             restored = json.load(response)
         self.assertEqual(restored["state"], "ready")
         self.assertEqual(restored["opponent_name"], "Борис")
+        self.assertEqual(restored["ticket"], host["ticket"])
 
         wrong_device = Request(
             self.base + "/api/client/cards/state?ticket=" + host["ticket"],
@@ -313,7 +314,72 @@ class OperatorTests(unittest.TestCase):
                 "select q_coins from card_wallets where device=?",
                 (self.panel.device_id("durak-host-0001"),),
             ).fetchone()
-        self.assertEqual(wallet[0], 1200)
+        # A ready deal now reserves 25 virtual Q-coins from each player; the
+        # complete virtual pot is paid only when the server decides a winner.
+        self.assertEqual(wallet[0], 1175)
+
+    def test_card_game_virtual_pot_transfers_only_after_server_finish(self):
+        with closing(self.panel.conn()) as db:
+            self.panel.set_settings(db, {
+                "card_game_enabled": "1",
+                "card_game_access_hash": self.panel.password_hash("pot-code-2026"),
+                "card_game_start_coins": "1200",
+                "card_game_stake_q_coins": "40",
+            })
+            host_device = self.panel.device_id("pot-host-0001")
+            guest_device = self.panel.device_id("pot-guest-002")
+            handler = object.__new__(self.panel.App)
+            host = handler.join_card_game(db, self.panel.settings(db), host_device, "127.0.0.1", "pot-code-2026", "Хост")
+            guest = handler.join_card_game(db, self.panel.settings(db), guest_device, "127.0.0.1", "pot-code-2026", "Гость")
+            handler.card_game_action(db, self.panel.settings(db), host_device, host["table_id"], "ready")
+            handler.card_game_action(db, self.panel.settings(db), guest_device, guest["table_id"], "ready")
+            row = db.execute("select game_json from card_tables where id=?", (host["table_id"],)).fetchone()
+            game = json.loads(row[0])
+            game.update({"deck": [], "hands": {"host": ["6S"], "guest": ["7H"]}, "attacker": "guest", "table": []})
+            db.execute("update card_tables set state='playing',game_json=? where id=?", (json.dumps(game), host["table_id"]))
+            db.commit()
+            result = handler.card_game_action(db, self.panel.settings(db), guest_device, host["table_id"], "attack", "7H")
+            self.assertEqual(result["game_phase"], "finished")
+            self.assertEqual(result["winner"], "host")
+            self.assertEqual(result["winner_reward_q_coins"], 80)
+            host_wallet = db.execute("select q_coins from card_wallets where device=?", (host_device,)).fetchone()[0]
+            guest_wallet = db.execute("select q_coins from card_wallets where device=?", (guest_device,)).fetchone()[0]
+            self.assertEqual((host_wallet, guest_wallet), (1240, 1160))
+
+    def test_routing_draft_saves_doh_without_publishing(self):
+        token = base64.b64encode(b"test:test").decode()
+        with closing(self.panel.conn()) as db:
+            initial = self.panel.settings(db)
+            revision = initial["routing_revision"]
+        body = (
+            b"action=save&routing_enabled=on&routing_profile=balanced&routing_adblock_enabled=on"
+            b"&routing_dns_mode=vpn_only&routing_dns_resolver=https%3A%2F%2Fdns.adguard-dns.com%2Fdns-query"
+            b"&routing_proxy_domains=youtube.com&routing_direct_domains=&routing_block_domains="
+            b"&routing_proxy_cidrs=&routing_direct_cidrs="
+        )
+        with urlopen(Request(self.base + "/operator/routing", data=body, headers={"Authorization": "Basic " + token})) as response:
+            self.assertEqual(response.status, 200)
+        with closing(self.panel.conn()) as db:
+            saved = self.panel.settings(db)
+            self.assertEqual(saved["routing_revision"], revision)
+            draft = json.loads(saved["routing_draft_payload"])
+            self.assertEqual(draft["dns"]["resolver"], "https://dns.adguard-dns.com/dns-query")
+
+    def test_public_status_hides_download_during_maintenance(self):
+        with closing(self.panel.conn()) as db:
+            previous = self.panel.settings(db)
+            self.panel.set_settings(db, {"maintenance": "1", "public_download_enabled": "1"})
+            db.commit()
+        try:
+            with urlopen(self.base + "/status") as response:
+                page = response.read().decode("utf-8")
+            self.assertIn("Maintenance", page)
+            self.assertIn("download temporarily unavailable", page)
+            self.assertNotIn("QuantumVPN-", page)
+        finally:
+            with closing(self.panel.conn()) as db:
+                self.panel.set_settings(db, {"maintenance": previous["maintenance"], "public_download_enabled": previous["public_download_enabled"]})
+                db.commit()
 
     def test_automation_policy_and_release_guard(self):
         token = base64.b64encode(b"test:test").decode()

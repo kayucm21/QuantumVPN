@@ -901,7 +901,10 @@ private fun V2Cards(onBack: () -> Unit) {
         while (true) {
             kotlinx.coroutines.delay(if (snapshot?.waiting == true) 5_000 else 2_500)
             repository.state(ticket).onSuccess { refreshed ->
-                snapshot = refreshed
+                // Older panel builds omitted ticket from state polling.  Keep
+                // the current device-bound ticket as a compatibility guard so
+                // the coroutine cannot silently stop after a guest joins.
+                snapshot = refreshed.copy(ticket = refreshed.ticket.ifBlank { ticket })
                 error = null
             }.onFailure { failure ->
                 error = failure.message ?: "Не удалось обновить состояние стола"
@@ -998,6 +1001,9 @@ private fun V2Cards(onBack: () -> Unit) {
                         Text(if (table.ready) "♠  Стол готов" else "♠  Ожидаем игрока", color = if (table.ready) Aurora.Mint else Color(0xFFCDA4FF), fontSize = 24.sp, fontWeight = FontWeight.Bold)
                         Text("Привет, ${table.name}!", color = Aurora.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                         Text(table.message, color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 13.sp)
+                        if (table.stakeQCoins > 0 && table.gamePhase != "finished") {
+                            Text("Виртуальная ставка: ${table.stakeQCoins} Q-coins с игрока", color = Color(0xFFFFD36E), fontSize = 11.sp)
+                        }
                         if (table.opponentName.isNotBlank()) {
                             Surface(color = Aurora.Mint.copy(alpha = .12f), shape = RoundedCornerShape(14.dp)) {
                                 Text("Ваш соперник: ${table.opponentName}", color = Aurora.Mint, modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp), fontWeight = FontWeight.SemiBold)
@@ -1019,7 +1025,7 @@ private fun V2Cards(onBack: () -> Unit) {
                                 "playing" -> V2DurakTablePreview(table = table, busy = joining, onAction = ::play)
                                 "finished" -> {
                                     Text(
-                                        if (table.winner == table.seat) "Вы выиграли: +25 Q-coins" else "Партия завершена. Победил ${table.opponentName}.",
+                                        if (table.winner == table.seat) "Вы выиграли: +${table.winnerRewardQCoins} Q-coins" else "Партия завершена. Победил ${table.opponentName}. Ставка ${table.stakeQCoins} Q-coins переведена победителю.",
                                         color = if (table.winner == table.seat) Aurora.Mint else Aurora.Muted,
                                         textAlign = TextAlign.Center,
                                         fontWeight = FontWeight.SemiBold,

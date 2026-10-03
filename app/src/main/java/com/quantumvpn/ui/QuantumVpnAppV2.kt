@@ -175,7 +175,12 @@ private fun V2AuroraBackdrop(
     val mint = Aurora.Mint
     val dark = LocalAuroraDark.current
     val backgroundStyle = LocalAuroraBackgroundStyle.current
-    val backgroundUri = LocalAuroraCustomBackground.current
+    val resources = LocalAppResources.current
+    val app = LocalContext.current.applicationContext as QuantumVpnApplication
+    // A panel background is a default only; never replace a user-selected style/photo.
+    val backgroundUri = if (backgroundStyle == AppBackgroundStyle.Aurora && resources?.assets?.containsKey("background") == true) {
+        app.container.appResourceRepository.imageFile("background")?.let { Uri.fromFile(it).toString() }
+    } else LocalAuroraCustomBackground.current
     val touchBubbles = LocalAuroraTouchBubbles.current && !LocalAuroraReduceMotion.current
     val context = LocalContext.current
     val violetBloom = if (dark) Color(0xFF8B5CF6) else Color(0xFF6D4AFF)
@@ -185,7 +190,7 @@ private fun V2AuroraBackdrop(
         key1 = backgroundStyle,
         key2 = backgroundUri,
     ) {
-        value = if (backgroundStyle == AppBackgroundStyle.Custom && !backgroundUri.isNullOrBlank()) {
+        value = if (backgroundStyle in setOf(AppBackgroundStyle.Custom, AppBackgroundStyle.Aurora) && !backgroundUri.isNullOrBlank()) {
             withContext(Dispatchers.IO) {
                 runCatching {
                     decodeCustomBackground(context, Uri.parse(backgroundUri))
@@ -240,7 +245,7 @@ private fun V2AuroraBackdrop(
                 modifier = Modifier.fillMaxSize(),
             )
         }
-        if (backgroundStyle == AppBackgroundStyle.Aurora && dark) {
+        if (backgroundStyle == AppBackgroundStyle.Aurora && dark && customBitmap == null) {
             AuroraGlassBackdrop(Modifier.fillMaxSize(), motionEnabled = false)
         }
         Canvas(Modifier.fillMaxSize()) {
@@ -477,6 +482,14 @@ fun QuantumVpnAppV2(
     }
     val app = context.applicationContext as QuantumVpnApplication
     val policy by app.container.clientPolicyRepository.policy.collectAsState()
+    val resources by app.container.appResourceRepository.resources.collectAsState()
+    LaunchedEffect(visible) {
+        if (!visible) return@LaunchedEffect
+        while (true) {
+            app.container.appResourceRepository.refresh()
+            kotlinx.coroutines.delay(300_000)
+        }
+    }
     val trafficHistory by viewModel.sessionTrafficHistory.collectAsState()
     val switchHistory by viewModel.switchHistory.collectAsState()
     val reliabilityScores by viewModel.reliabilityScores.collectAsState()
@@ -500,11 +513,13 @@ fun QuantumVpnAppV2(
     val adaptiveAccent = if (state.settings.useDynamicColor) {
         MaterialTheme.colorScheme.primary
     } else {
-        if (policy.branding.accentHex.equals("#3DE7FF", ignoreCase = true)) Color(0xFF58F4CE)
+        if (resources?.accent != null && !state.settings.highContrast) remoteAccent(resources!!.accent!!)
+        else if (policy.branding.accentHex.equals("#3DE7FF", ignoreCase = true)) Color(0xFF58F4CE)
         else remoteAccent(policy.branding.accentHex)
     }
     val density = LocalDensity.current
     BackHandler(tab != V2Tab.Home) { tab = V2Tab.Home }
+    ResourcePresentation(app.container.appResourceRepository) {
     CompositionLocalProvider(
         LocalAuroraDark provides dark,
         LocalAuroraAccent provides adaptiveAccent,
@@ -644,6 +659,7 @@ fun QuantumVpnAppV2(
             )
         }
         else -> Unit
+    }
     }
     }
 }
@@ -811,6 +827,7 @@ internal fun V2Home(
 ) {
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     val hapticsEnabled = LocalAuroraHaptics.current
+    val resources = LocalAppResources.current
     val stateText = when {
         connected -> "Защищено"
         busy -> "Подключение…"
@@ -833,7 +850,7 @@ internal fun V2Home(
     }
     V2AuroraBackdrop(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
-        val compact = maxHeight < 620.dp
+        val compact = maxHeight < 620.dp || resources?.compactHome == true
         Column(
             Modifier
                 .fillMaxSize()
@@ -845,9 +862,9 @@ internal fun V2Home(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 AuroraBrandMark(connected = connected, modifier = Modifier.size(34.dp))
                 Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                    Text(policy.branding.name, color = Aurora.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    Text(resources?.text("brand_name", policy.branding.name) ?: policy.branding.name, color = Aurora.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        policy.branding.tagline.ifBlank { "Свобода без границ" },
+                        resources?.text("tagline", policy.branding.tagline.ifBlank { "Свобода без границ" }) ?: policy.branding.tagline.ifBlank { "Свобода без границ" },
                         color = Aurora.Muted,
                         fontSize = 12.sp,
                         maxLines = 1,
@@ -947,8 +964,8 @@ internal fun V2Home(
                 Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("♠  ♥", color = Color(0xFFC6A7FF), fontSize = 26.sp)
                     Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                        Text("Игры", color = Aurora.Text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                        Text("Дурак с друзьями · виртуальные Q-coins", color = Aurora.Muted, fontSize = 11.sp)
+                        Text(resources?.text("games_title", "Игры") ?: "Игры", color = Aurora.Text, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(resources?.text("games_subtitle", "Дурак с друзьями · виртуальные Q-coins") ?: "Дурак с друзьями · виртуальные Q-coins", color = Aurora.Muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     Text("›", color = Aurora.Mint, fontSize = 24.sp)
                 }
@@ -1542,6 +1559,10 @@ private fun V2Settings(
     var moreOpen by rememberSaveable { mutableStateOf(false) }
     var appearanceOpen by rememberSaveable { mutableStateOf(false) }
     var accessibilityOpen by rememberSaveable { mutableStateOf(false) }
+    var resourcesOpen by rememberSaveable { mutableStateOf(false) }
+    if (resourcesOpen) {
+        ResourceStatusDialog((LocalContext.current.applicationContext as QuantumVpnApplication).container.appResourceRepository) { resourcesOpen = false }
+    }
     if (accessibilityOpen) {
         V2AccessibilityPage(uiSettings, onLargeText, onHighContrast, onReduceMotion, onHaptics) { accessibilityOpen = false }
         return
@@ -1721,6 +1742,7 @@ private fun V2Settings(
                 V2MiniNav("Логи", onClick = { logConsentOpen = true }, modifier = Modifier.weight(1f))
                 V2MiniNav("Помощь", onClick = { moreOpen = true }, modifier = Modifier.weight(1f))
             }
+            V2MiniNav("Ресурсы и исправления", onClick = { resourcesOpen = true }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
         }
         if (logStatus.isNotBlank()) Text(logStatus, color = Aurora.Muted, fontSize = 10.sp, modifier = Modifier.padding(top = 5.dp))
         }

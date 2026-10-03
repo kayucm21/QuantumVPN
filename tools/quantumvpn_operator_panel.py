@@ -38,6 +38,11 @@ except ModuleNotFoundError:
     from tools.quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, subscription_evidence, validate_backup
 
 try:
+    import quantumvpn_resources as resources
+except ModuleNotFoundError:
+    from tools import quantumvpn_resources as resources
+
+try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
@@ -73,7 +78,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.12-control.1"
+PANEL_BUILD = "5.11.1-resources.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -2944,6 +2949,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
             "from support_tickets order by closed_at asc, updated_at desc limit 120"
         ).fetchall()]
         quality_html = render_quality(quality_snapshot(monitor_db, s, ROSPANEL_DB), s) if section == "quality" else ""
+        resources_html = resources.render(monitor_db) if section == "resources" else ""
     finally:
         monitor_db.close()
     release_guard = release_guard_snapshot(s)
@@ -3146,6 +3152,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     ) or '<p class=muted>Записей пока нет</p>'
     page_titles = {'dashboard': ('КОМАНДНЫЙ ЦЕНТР', 'Обзор состояния VPN-инфраструктуры'), 'latency': ('Ноды', 'Доступность и задержка подключений'), 'users': ('Пользователи', 'Подписчики и активность'), 'service': ('Подписки', 'Доступ, протоколы и обслуживание сервиса'), 'release': ('Релизы', 'Сборки приложения и расписание публикации'), 'incidents': ('События', 'Состояние сервисов и инциденты'), 'audit': ('Аудит', 'Журнал действий администраторов'), 'cards': ('Игры и награды', 'Карточные столы и виртуальные Q-coins'), 'support': ('Поддержка', 'Обращения, заметки и диагностика'), 'ai': ('ИИ‑СОВЕТНИК', 'Локальный Qwen для анализа агрегированных метрик')}
     page_title, page_description = page_titles.get(section, ('Quantum Control', 'Управление сервисом'))
+    if section == 'resources':
+        page_title, page_description = 'РЕСУРСЫ И ИСПРАВЛЕНИЯ', 'Подписанные пакеты оформления · тестовая группа · откат'
     if section == 'quality':
         page_title, page_description = 'КОНТРОЛЬ КАЧЕСТВА', 'Подписка, маршруты, измерения и доказательства восстановления'
     current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
@@ -3162,6 +3170,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a class="{'active' if section == 'cards' else ''}" href="/operator?tab=cards"><span class=nav-ico>♠</span> Игры и награды</a>
         <a class="{'active' if section == 'service' else ''}" href="/operator?tab=service"><span class=nav-ico>▭</span> Подписки</a>
         <a class="{'active' if section in ('release','features','branding') else ''}" href="/operator?tab=release"><span class=nav-ico>◇</span> Релизы</a>
+        <a class="{'active' if section == 'resources' else ''}" href="/operator?tab=resources"><span class=nav-ico>◈</span> Ресурсы и исправления</a>
         <a class="{'active' if section in ('incidents','logs','reports') else ''}" href="/operator?tab=incidents"><span class=nav-ico>♧</span> События</a>
         <a class="{'active' if section in ('audit','integrations','security','admins') else ''}" href="/operator?tab=audit"><span class=nav-ico>▤</span> Аудит</a>
         <details class=nav-group><summary>Ещё</summary>
@@ -3178,6 +3187,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     {flash_html}
     <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>Quantum Control</small></header>
     {quality_html}
+    {resources_html}
 
     <section class="dashboard" {show('dashboard')}>
       <div class=reference-kpis>
@@ -4545,6 +4555,23 @@ class App(BaseHTTPRequestHandler):
             }
             return self.reply(200, json.dumps(result, ensure_ascii=False))
 
+        if path.startswith("/api/client/resources/assets/"):
+            try:
+                resources.schema(db)
+                body, mime = resources.asset_bytes(db, ROOT, path.rsplit("/", 1)[-1])
+                return self.reply(200, body, mime, {"Cache-Control": "public, max-age=31536000, immutable", "X-Content-Type-Options": "nosniff"})
+            except (ValueError, OSError):
+                return self.reply(404, '{"error":"asset_unavailable"}')
+
+        if path == "/api/client/resources":
+            try:
+                dev, _ip = self.client()
+                version = int(query.get("version_code", ["0"])[0])
+                result = resources.client_manifest(db, dev, version, routing_signing_key)
+                return self.reply(200 if result else 204, json.dumps(result, ensure_ascii=False) if result else b"", headers={"Cache-Control": "no-store"})
+            except (ValueError, RuntimeError, OSError):
+                return self.reply(503, '{"error":"resources_unavailable"}')
+
         if path == "/api/client/routing":
             # The app will pin the public key in its next routing-capable
             # release.  Until then this endpoint is harmless configuration
@@ -5072,6 +5099,20 @@ class App(BaseHTTPRequestHandler):
         actor, ip = adm["user"], adm["ip"]
         if not self.require_role(adm, "operator"):
             return
+
+        if path == "/operator/resources":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 5 * 1024 * 1024:
+                    return self.reply(413, "Пакет: не более 5 МБ", "text/plain; charset=utf-8")
+                form, files = parse_multipart(self)
+                message = resources.action(db, ROOT, form, files, actor)
+                audit(db, actor, ip, "resources:" + form.get("action", [""])[0], {"result": message})
+                db.commit()
+                return self.redirect_operator("resources", message)
+            except (ValueError, OSError, ImportError):
+                db.rollback()
+                return self.redirect_operator("resources", "Пакет не принят. Проверьте поля, формат и лимиты изображений.")
 
         if path == "/operator/admins":
             if not self.require_role(adm, "owner"):

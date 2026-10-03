@@ -78,6 +78,8 @@ fun StartupSplashScreen(
     reduceMotion: Boolean = false,
     onFinished: () -> Unit,
 ) {
+    val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as com.quantumvpn.QuantumVpnApplication
+    ResourcePresentation(app.container.appResourceRepository) {
     AuroraStartup2026(
         ready = ready,
         update = updateState,
@@ -85,6 +87,7 @@ fun StartupSplashScreen(
         reduceMotion = reduceMotion,
         onFinished = onFinished,
     )
+    }
     return
 
     val progress = remember { Animatable(0f) }

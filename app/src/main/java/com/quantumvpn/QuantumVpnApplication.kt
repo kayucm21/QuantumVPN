@@ -28,6 +28,7 @@ class QuantumVpnApplication : Application() {
         container.wifiAutoConnect.start()
         container.vpnSchedule.start()
         container.clientPolicyRepository.start()
+        CoroutineScope(Dispatchers.IO).launch { container.appResourceRepository.loadCache() }
         VpnScheduleAlarms.reschedule(this)
         com.quantumvpn.vpn.SubscriptionRefreshAlarms.reschedule(this)
         com.quantumvpn.vpn.UpdateCheckAlarms.reschedule(this)

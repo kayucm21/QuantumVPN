@@ -81,6 +81,7 @@ class AppContainer(
     val appContext: Context = context.applicationContext
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val clientPolicyRepository = ClientPolicyRepository(appContext = appContext, scope = appScope)
+    val appResourceRepository = com.quantumvpn.resources.AppResourceRepository(appContext)
     val libboxRuntime = LibboxRuntime(appContext)
     val configValidator = LibboxConfigValidator()
     val profileStore = ProfileStore(

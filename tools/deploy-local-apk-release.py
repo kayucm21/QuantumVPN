@@ -31,6 +31,7 @@ def main():
     parser.add_argument("version")
     parser.add_argument("--host", required=True)
     parser.add_argument("--promote", action="store_true")
+    parser.add_argument("--notes", help="Release-specific user-visible changelog (no credentials)")
     args = parser.parse_args()
     assert re.fullmatch(r"\d+\.\d+\.\d+", args.version)
     folder = ROOT / "artifacts" / args.version
@@ -79,7 +80,7 @@ print(json.dumps({{'staged':{args.version!r},'verified_files':len(files)}}))
 """)
         if not args.promote:
             return
-        note = f"QuantumVPN {args.version}: Aurora 2026, мятно-синий интерфейс, общий фон и своя фотография, доступность, поиск серверов, меньше фоновой нагрузки и улучшенная загрузка обновлений."
+        note = args.notes or f"QuantumVPN {args.version}: Aurora 2026, мятно-синий интерфейс, общий фон и своя фотография, доступность, поиск серверов, меньше фоновой нагрузки и улучшенная загрузка обновлений."
         # Metadata and device banners become visible in one transaction.
         remote(client, f"""import json,os,shlex,sqlite3,sys,time
 from pathlib import Path
@@ -100,7 +101,7 @@ with sqlite3.connect(str(backup_file)) as target: db.backup(target)
 os.chmod(backup_file,0o600)
 db.execute('begin immediate')
 s=app.settings(db)
-banner='Доступно обновление QuantumVPN '+version+'. Новый дизайн Aurora 2026 — откройте уведомление для установки.'
+banner='Доступно обновление QuantumVPN '+version+'. Откройте уведомление для установки.'
 values={{'app_version':version,'app_version_code':str(code),'app_changelog':{note!r},
  'min_version_code':'0','rollout_percent':'100','release_schedule_enabled':'0',
  'update_notifications_enabled':'1','announce':banner,'announce_en':'QuantumVPN '+version+' is available.',

@@ -23,6 +23,7 @@ import com.quantumvpn.updates.UpdateState
 internal fun AuroraStartup2026(ready: Boolean, update: UpdateState, servers: Int, reduceMotion: Boolean, onFinished: () -> Unit) {
     LaunchedEffect(ready) { if (ready) onFinished() }
     val mint = Color(0xFF58F4CE)
+    val resources = LocalAppResources.current
     val muted = Color(0xFFABC0D4)
     val download = update as? UpdateState.Downloading
     val fraction = download?.let { startupDownloadProgress(it.downloadedBytes, it.totalBytes) }
@@ -44,11 +45,13 @@ internal fun AuroraStartup2026(ready: Boolean, update: UpdateState, servers: Int
         ) {
             Spacer(Modifier.height(8.dp))
             AuroraBrandMark(ready, Modifier.size(64.dp))
-            Row {
+            if (resources?.texts?.containsKey("brand_name") == true) {
+                Text(resources.text("brand_name", "QuantumVPN"), color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            } else Row {
                 Text("Quantum", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
                 Text("VPN", color = mint, fontSize = 30.sp, fontWeight = FontWeight.Bold)
             }
-            Text("Больше свободы. Ближе к людям.", color = muted, fontSize = 14.sp)
+            Text(resources?.text("welcome", "Больше свободы. Ближе к людям.") ?: "Больше свободы. Ближе к людям.", color = muted, fontSize = 14.sp)
             Spacer(Modifier.height(12.dp))
             AuroraConnectButton(connected = ready, busy = !ready, enabled = false, reduceMotion = reduceMotion, actionLabel = "Подготовка", compact = true, onClick = {})
             Text(status, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)

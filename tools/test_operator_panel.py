@@ -47,6 +47,38 @@ class OperatorTests(unittest.TestCase):
             with urlopen(Request(self.base + path, method="HEAD")) as response:
                 self.assertEqual(int(response.headers["Content-Length"]), info["size"])
 
+    def test_resource_post_preserves_tab_and_signed_manifest(self):
+        token = base64.b64encode(b"test:test").decode()
+        headers = {"Authorization": "Basic " + token}
+        with closing(self.panel.conn()) as db:
+            before = self.panel.settings(db)["app_version"]
+        with urlopen(Request(self.base + "/operator/resources", data=b"action=save&brand_name=QuantumVPN&accent=%2358F4CE&note=resource-test", headers=headers)) as response:
+            self.assertIn("tab=resources", response.url)
+            self.assertIn("РЕСУРСЫ И ИСПРАВЛЕНИЯ", response.read().decode())
+        with closing(self.panel.conn()) as db:
+            revision = db.execute("select max(id) from resource_bundles").fetchone()[0]
+        with urlopen(Request(self.base + "/operator/resources", data=f"action=production&revision={revision}".encode(), headers=headers)) as response:
+            self.assertIn("tab=resources", response.url)
+        with urlopen(self.base + "/api/client/resources?version_code=501101099") as response:
+            value = json.load(response)
+            self.assertEqual(value["payload"]["texts"]["brand_name"], "QuantumVPN")
+            self.assertEqual(value["payload"]["kind"], "quantumvpn-resources-v1")
+        with urlopen(self.base + "/api/client/resources?version_code=137") as response:
+            self.assertEqual(response.status, 204)
+        with closing(self.panel.conn()) as db:
+            self.assertEqual(self.panel.settings(db)["app_version"], before)
+
+    def test_resource_post_rejects_foreign_origin_and_oversized_body(self):
+        token = base64.b64encode(b"test:test").decode()
+        request = Request(self.base + "/operator/resources", data=b"action=save", headers={"Authorization": "Basic " + token, "Origin": "https://evil.invalid"})
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(request)
+        self.assertEqual(caught.exception.code, 403)
+        request = Request(self.base + "/operator/resources", data=b"x" * (5 * 1024 * 1024 + 1), headers={"Authorization": "Basic " + token})
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(request)
+        self.assertEqual(caught.exception.code, 413)
+
     def test_forms_preserve_other_settings(self):
         token = base64.b64encode(b"test:test").decode()
         with closing(self.panel.conn()) as db:

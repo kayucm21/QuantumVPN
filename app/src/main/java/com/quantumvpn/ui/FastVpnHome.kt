@@ -58,6 +58,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -717,6 +718,16 @@ internal fun AuroraBrandMark(
     connected: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val resourceLogo = LocalResourceLogo.current
+    if (resourceLogo != null) {
+        androidx.compose.foundation.Image(
+            bitmap = resourceLogo.asImageBitmap(),
+            contentDescription = null,
+            modifier = modifier,
+            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+        )
+        return
+    }
     val glow = if (connected) CosmicTokens.StatusGreen else CosmicTokens.Orbit
     Canvas(modifier = modifier) {
         val center = Offset(size.width / 2f, size.height / 2f)

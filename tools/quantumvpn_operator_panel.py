@@ -43,6 +43,11 @@ except ModuleNotFoundError:
     from tools import quantumvpn_resources as resources
 
 try:
+    from quantumvpn_aurora import aurora_css, aurora_script
+except ModuleNotFoundError:
+    from tools.quantumvpn_aurora import aurora_css, aurora_script
+
+try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
@@ -78,7 +83,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.11.1-resources.1"
+PANEL_BUILD = "2.0.0-aurora.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -95,6 +100,69 @@ _LAST_EVENT_CLEANUP = 0
 _RATE = defaultdict(deque)
 _RATE_LOCK = threading.Lock()
 _ALERT_STATE = {"last": {}, "lock": threading.Lock()}
+
+# The same registry drives navigation and page headings. Legacy URLs and POST
+# return_tab values remain unchanged; grouping is a presentation-only change.
+PAGE_TITLES = {
+    "dashboard": ("Командный центр", "Состояние VPN-инфраструктуры и приоритетные события"),
+    "fleet": ("Центр флота", "Приложения, подписки и доступность VDS"),
+    "quality": ("КОНТРОЛЬ КАЧЕСТВА", "Подписка, маршруты и доказательства восстановления"),
+    "latency": ("Ноды", "Реестр, TCP-задержка и распределение нагрузки"),
+    "automation": ("Автопилот", "Проверки и автоматические действия с заданными ограничениями"),
+    "users": ("Пользователи", "Подписчики и активность"),
+    "service": ("Подписки", "Доступ, протоколы и обслуживание сервиса"),
+    "devices": ("Устройства", "История подключений, флаги и диагностика"),
+    "support": ("Поддержка", "Обращения пользователей и заметки оператора"),
+    "donations": ("Пожертвования", "История добровольной поддержки сервиса"),
+    "routing": ("Маршрутизация и DNS", "Проверка целей, черновики и подписанные правила"),
+    "release": ("Релизы", "Сборки APK и действующее расписание публикации"),
+    "resources": ("РЕСУРСЫ И ИСПРАВЛЕНИЯ", "Подписанное оформление, тестовая группа и откат"),
+    "features": ("Функции приложения", "Удалённые флаги и условия их применения"),
+    "branding": ("Оформление", "Тексты, акценты и доступные параметры интерфейса"),
+    "incidents": ("События", "Инциденты и состояние сервисов"),
+    "logs": ("Живые логи", "События панели без перезагрузки страницы"),
+    "reports": ("Отчёты", "Агрегированная статистика и экспорт"),
+    "audit": ("Аудит", "Журнал действий администраторов"),
+    "security": ("Безопасность", "Доступ, проверка запросов и защитные ограничения"),
+    "admins": ("Администраторы", "Учётные записи и роли доступа"),
+    "ai": ("ИИ‑СОВЕТНИК", "Локальный Qwen: анализ метрик и рекомендации"),
+    "cards": ("Игры и награды", "Карточные столы и виртуальные Q-coins"),
+    "integrations": ("Система", "Резервные копии, Telegram-бот и интеграции"),
+}
+AURORA_NAV_GROUPS = (
+    ("overview", "Обзор", "▦", ("dashboard", "fleet", "quality")),
+    ("nodes", "Ноды", "▤", ("latency", "automation")),
+    ("clients", "Клиенты", "♧", ("users", "service", "devices", "support", "donations")),
+    ("routes", "Маршруты", "⇄", ("routing",)),
+    ("releases", "Релизы", "◇", ("release", "resources", "features", "branding")),
+    ("events", "События", "≡", ("incidents", "logs", "reports", "audit")),
+    ("security", "Защита", "♢", ("security", "admins", "ai")),
+    ("games", "Игры", "♠", ("cards",)),
+    ("system", "Система", "⚙", ("integrations",)),
+)
+
+
+def aurora_navigation(section: str, actor_role: str = "owner") -> tuple[str, str]:
+    links, child_links = [], []
+    for key, label, glyph, members in AURORA_NAV_GROUPS:
+        allowed = tuple(tab for tab in members if tab != "admins" or actor_role == "owner")
+        active = section in allowed
+        links.append(
+            f'<a class="aurora-group {"active" if active else ""}" data-group="{key}" '
+            f'href="/operator?tab={allowed[0]}"'
+            + (' aria-current="page"' if active else '')
+            + f'><span class=nav-ico aria-hidden=true>{glyph}</span><span>{label}</span></a>'
+        )
+        if active:
+            for tab in allowed:
+                title = PAGE_TITLES[tab][0]
+                links_title = {"dashboard": "Сводка", "latency": "Все ноды", "routing": "Правила и DNS", "release": "APK", "resources": "Ресурсы", "features": "Функции", "incidents": "Инциденты", "ai": "Qwen", "cards": "Столы и награды", "integrations": "Бот и резерв"}
+                child_links.append(
+                    f'<a class="{"active" if tab == section else ""}" href="/operator?tab={tab}"'
+                    + (' aria-current="page"' if tab == section else '')
+                    + f'>{html.escape(links_title.get(tab, title.capitalize()))}</a>'
+                )
+    return '<nav class="tabs aurora-nav" aria-label="Разделы панели">' + ''.join(links) + '</nav>', '<nav class=aurora-subnav aria-label="Страницы раздела">' + ''.join(child_links) + '</nav>'
 
 ROUTING_PROFILES = {
     "balanced": "Оптимальный — локальные сервисы напрямую, остальное через VPN",
@@ -2771,6 +2839,19 @@ def control_reference_css():
     """
 
 
+@lru_cache(maxsize=1)
+def operator_world_geometry() -> str:
+    asset = os.path.join(os.path.dirname(__file__), 'assets', 'quantumvpn-world.svg')
+    try:
+        with open(asset, encoding='utf-8') as stream:
+            geometry = stream.read(256_001)
+        if len(geometry) > 256_000 or not geometry.startswith('<g class="world-countries"'):
+            return ''
+        return geometry
+    except OSError:
+        return ''
+
+
 def reference_world_map(nodes: list[dict]):
     """Render a world base plus pins supplied by the authenticated node registry."""
     markers = []
@@ -2784,14 +2865,17 @@ def reference_world_map(nodes: list[dict]):
         markers.append(
             f"<g><title>{html.escape(title)}</title><circle cx='{x:.1f}' cy='{y:.1f}' r='12' fill='{color}' opacity='.16'/><circle cx='{x:.1f}' cy='{y:.1f}' r='6' fill='{color}' stroke='#d8f8ff' stroke-width='1.5'/><text x='{label_x:.1f}' y='{label_y:.1f}' fill='{color}' font-size='12'>{html.escape(node['label'])}</text></g>"
         )
-    return '''<div class=reference-map><svg viewBox="0 0 800 350" aria-label="Карта реальных нод" role=img>
+    geometry = operator_world_geometry()
+    if not geometry:
+        return '<div class="reference-map empty-state">Географическая карта недоступна. Реестр и замеры нод показаны ниже.</div>'
+    return '''<div class=reference-map data-world-source=natural-earth><svg viewBox="0 0 800 350" aria-label="Карта реальных нод" role=img>
     <defs><pattern id=world-dots width=7 height=7 patternUnits=userSpaceOnUse><circle cx=2 cy=2 r=1.4 fill="#267395"/></pattern></defs>
-    <g fill="url(#world-dots)" stroke="#1b4864" stroke-width="1"><path d="M50 75L95 45 153 42 189 65 232 59 254 89 211 109 194 143 160 165 137 145 117 119 81 109Z"/><path d="M176 169L210 171 244 206 260 237 234 268 216 315 196 287 185 250 162 207Z"/><path d="M242 32L289 25 306 43 283 72 263 77Z"/><path d="M347 92L379 66 407 75 428 58 455 76 433 110 393 123 369 112Z"/><path d="M356 135L400 122 440 146 452 186 424 222 410 264 385 251 370 212 342 168Z"/><path d="M443 67L493 43 550 53 579 43 635 63 709 75 747 104 704 132 659 129 644 164 602 159 581 193 549 156 514 171 484 134 444 116Z"/><path d="M610 193L650 202 680 221 658 230 628 219Z"/><path d="M657 256L700 237 738 252 755 286 715 303 679 291 650 277Z"/><path d="M774 302L785 281 791 291 783 318Z"/></g>''' + "".join(markers) + "</svg></div>"
+    ''' + geometry + "".join(markers) + "</svg></div>"
 
 
 def render_login(error=""):
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-    <title>Quantum Control · вход</title><style>{css()}</style>
+    <title>Quantum Control · вход</title><style>{css()}{control_reference_css()}{aurora_css()}</style><body class=aurora-panel data-ui=Aurora2>
     <main class=login><section class=hero><div class=accent>QUANTUM CONTROL</div><h1>Вход в панель</h1>
     <p class=muted>Доп. веб-панель приложения. RosPanel не изменяется.</p>
     {"<p class=off>" + html.escape(error) + "</p>" if error else ""}
@@ -2800,7 +2884,7 @@ def render_login(error=""):
       <label>Пароль<input type=password name=password autocomplete=current-password required></label>
       <label>Код 2FA (если включён)<input name=totp inputmode=numeric autocomplete=one-time-code placeholder=000000></label>
       <button>Войти</button>
-    </form></section></main>"""
+    </form></section></main>{aurora_script()}</body></html>"""
 
 
 def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None):
@@ -3150,42 +3234,23 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         f"<div class=reference-audit><time>{time.strftime('%H:%M', time.localtime(a[0]))}</time><span>{html.escape(str(a[1]))} · {html.escape(str(a[3]))}</span></div>"
         for a in audit_rows[:4]
     ) or '<p class=muted>Записей пока нет</p>'
-    page_titles = {'dashboard': ('КОМАНДНЫЙ ЦЕНТР', 'Обзор состояния VPN-инфраструктуры'), 'latency': ('Ноды', 'Доступность и задержка подключений'), 'users': ('Пользователи', 'Подписчики и активность'), 'service': ('Подписки', 'Доступ, протоколы и обслуживание сервиса'), 'release': ('Релизы', 'Сборки приложения и расписание публикации'), 'incidents': ('События', 'Состояние сервисов и инциденты'), 'audit': ('Аудит', 'Журнал действий администраторов'), 'cards': ('Игры и награды', 'Карточные столы и виртуальные Q-coins'), 'support': ('Поддержка', 'Обращения, заметки и диагностика'), 'ai': ('ИИ‑СОВЕТНИК', 'Локальный Qwen для анализа агрегированных метрик')}
-    page_title, page_description = page_titles.get(section, ('Quantum Control', 'Управление сервисом'))
-    if section == 'resources':
-        page_title, page_description = 'РЕСУРСЫ И ИСПРАВЛЕНИЯ', 'Подписанные пакеты оформления · тестовая группа · откат'
-    if section == 'quality':
-        page_title, page_description = 'КОНТРОЛЬ КАЧЕСТВА', 'Подписка, маршруты, измерения и доказательства восстановления'
+    page_title, page_description = PAGE_TITLES.get(section, PAGE_TITLES['dashboard'])
+    navigation, subnavigation = aurora_navigation(section, actor_role)
     current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-    <title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}</style><main><div class=panel-shell>
+    <title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}{aurora_css()}</style><body class=aurora-panel data-ui=Aurora2><main><div class=panel-shell>
       <aside class=sidebar>
-      <div class=sidebar-brand>Quantum Control<span>VPN OPERATOR PANEL</span></div>
-      <nav class=tabs>
-        <a class="{'active' if section == 'dashboard' else ''}" href="/operator?tab=dashboard"><span class=nav-ico>▦</span> Командный центр</a>
-        <a class="{'active' if section == 'latency' else ''}" href="/operator?tab=latency"><span class=nav-ico>▤</span> Ноды</a>
-        <a class="{'active' if section == 'routing' else ''}" href="/operator?tab=routing"><span class=nav-ico>⇄</span> Маршрутизация</a>
-        <a class="{'active' if section == 'quality' else ''}" href="/operator?tab=quality"><span class=nav-ico>✓</span> Контроль качества</a>
-        <a class="{'active' if section in ('users','devices','fleet') else ''}" href="/operator?tab=users"><span class=nav-ico>♧</span> Пользователи</a>
-        <a class="{'active' if section == 'cards' else ''}" href="/operator?tab=cards"><span class=nav-ico>♠</span> Игры и награды</a>
-        <a class="{'active' if section == 'service' else ''}" href="/operator?tab=service"><span class=nav-ico>▭</span> Подписки</a>
-        <a class="{'active' if section in ('release','features','branding') else ''}" href="/operator?tab=release"><span class=nav-ico>◇</span> Релизы</a>
-        <a class="{'active' if section == 'resources' else ''}" href="/operator?tab=resources"><span class=nav-ico>◈</span> Ресурсы и исправления</a>
-        <a class="{'active' if section in ('incidents','logs','reports') else ''}" href="/operator?tab=incidents"><span class=nav-ico>♧</span> События</a>
-        <a class="{'active' if section in ('audit','integrations','security','admins') else ''}" href="/operator?tab=audit"><span class=nav-ico>▤</span> Аудит</a>
-        <details class=nav-group><summary>Ещё</summary>
-          <a class="{'active' if section == 'ai' else ''}" href="/operator?tab=ai">ИИ‑советник</a><a href="/operator?tab=fleet">Центр флота</a><a href="/operator?tab=automation">Автопилот</a><a href="/operator?tab=devices">Устройства</a><a href="/operator?tab=features">Функции</a><a href="/operator?tab=branding">Оформление</a><a href="/operator?tab=donations">Пожертвования</a><a href="/operator?tab=reports">Отчёты</a><a href="/operator?tab=support">Поддержка</a><a href="/operator?tab=integrations">Интеграции</a><a href="/operator?tab=security">Безопасность</a><a href="/operator?tab=logs">Живые логи</a>
-          {('<a href="/operator?tab=admins">Администраторы</a>' if role_at_least(actor_role, 'owner') else '')}
-        </details>
-        <a href="/operator/logout">Выход</a>
-      </nav>
+      <div class=sidebar-brand>Quantum Control<span>AURORA · 2.0</span></div>
+      {navigation}
+      <a class=aurora-logout href="/operator/logout">Выход из панели</a>
       </aside>
       <section class=panel-content>
     <section class=hero>
       <div class=hero-top><form class=control-search method=get action=/operator><input type=hidden name=tab value=users><input name=q aria-label="Поиск пользователей" placeholder="Поиск по пользователям…" value="{html.escape(q)}"><button>Найти</button></form><span id=system-pill class=system-pill>{'● Есть открытые инциденты' if report['open_incidents'] else '● Открытых инцидентов нет'}</span><span class=top-date>{time.strftime('%d.%m.%Y %H:%M', time.gmtime(time.time()+10800))}<br><small>МСК · {html.escape(actor_role)}</small></span></div>
     </section>
     {flash_html}
-    <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>Quantum Control</small></header>
+    <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>Aurora 2.0</small></header>
+    {subnavigation}
     {quality_html}
     {resources_html}
 
@@ -3197,7 +3262,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <div class="card reference-kpi"><i>△</i><div><span>Открытые события</span><b>{report['open_incidents']}</b><small>Требуют внимания</small></div></div>
       </div>
       <div class=reference-top>
-        <section class=card><div class=section-head><h2>Карта нод и текущая нагрузка</h2><a href="/operator?tab=latency">Управлять нодами →</a></div>{reference_world_map(map_nodes)}<div class=reference-map-note>Показаны {len(map_nodes)} нод из реестра · CPU {status.get('cpu_load_pct', 0)}% · RAM {status.get('memory_used_pct', 0)}% · диск {status.get('disk_used_pct', 0)}%. Пинг измеряется с VDS; это не пинг телефона пользователя.</div><div class=reference-node-strip>{''.join(f"<span>{html.escape(node['label'])}<b class={'ok' if node['state'] == 'ok' else 'off'}>{html.escape(node['measurement'])}</b></span>" for node in map_nodes) or reference_targets}</div></section>
+        <section class=card><div class=section-head><h2>Карта нод и текущая нагрузка</h2><a href="/operator?tab=latency">Управлять нодами →</a></div>{reference_world_map(map_nodes) if section == 'dashboard' else ''}<div class=reference-map-note>Показаны {len(map_nodes)} нод из реестра · CPU {status.get('cpu_load_pct', 0)}% · RAM {status.get('memory_used_pct', 0)}% · диск {status.get('disk_used_pct', 0)}%. Пинг измеряется с VDS; это не пинг телефона пользователя.</div><div class=reference-node-strip>{''.join(f"<span>{html.escape(node['label'])}<b class={'ok' if node['state'] == 'ok' else 'off'}>{html.escape(node['measurement'])}</b></span>" for node in map_nodes) or reference_targets}</div></section>
         <section class=card><div class=section-head><h2>Последние события</h2><a href="/operator?tab=incidents">Все события →</a></div><div class=event-list>{event_timeline}</div></section>
       </div>
       <div class=reference-bottom>
@@ -3339,7 +3404,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     </section>
 
     <section {show('latency')}>
-      <div class=card><div class=section-head><h2>Карта нод</h2><span class=muted>Координаты из реестра нод</span></div>{reference_world_map(map_nodes)}<p class=reference-map-note>Зелёный — последний TCP-замер успешен; красный — нет ответа; жёлтый — замер ещё не выполнялся.</p></div>
+      <div class=card><div class=section-head><h2>Карта нод</h2><span class=muted>Координаты из реестра нод</span></div>{reference_world_map(map_nodes) if section == 'latency' else ''}<p class=reference-map-note>Зелёный — последний TCP-замер успешен; красный — нет ответа; жёлтый — замер ещё не выполнялся.</p></div>
       <div class=reference-node-grid>{node_drain_cards}</div>
     </section>
     <section class=grid {show('latency')}>
@@ -3377,7 +3442,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
 
     <section class="routing-page" {show('routing')}>
       <header class=routing-heading>
-        <div><div class=routing-kicker>ROUTING CONTROL · REVIEW FIRST</div><h1>Маршрутизация и DNS</h1><p class=muted>Проверяйте цели, редактируйте только нужные правила и публикуйте подписанную ревизию. Панель не меняет маршруты автоматически.</p></div>
+        <div><div class=routing-kicker>ПРОВЕРКА ПЕРЕД ПУБЛИКАЦИЕЙ</div><p class=muted>Редактируйте нужные правила и публикуйте подписанную ревизию. Маршруты не меняются автоматически.</p></div>
         <div class=routing-health><span class=system-pill>r{int(s.get('routing_revision','1') or 1)} · {html.escape(routing_signature_label)}</span></div>
       </header>
       <section class=routing-top-grid>
@@ -3694,8 +3759,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     </section>
 
     <section class=card {show('logs')}>
-      <div class=actions style="justify-content:space-between;align-items:center"><div><h2 style="margin-bottom:4px">Живые логи</h2><p class=muted style="margin:0">Поток событий панели в реальном времени. История не обновляет страницу и хранится по текущим правилам очистки.</p></div><span id=live-state class=pill>Подключение…</span></div>
-      <pre id=live-log class=live-log style="min-height:280px;max-height:560px;overflow:auto;background:#030812;border:1px solid #1d3546;border-radius:12px;padding:14px;margin-top:14px;white-space:pre-wrap">Ожидание событий…</pre>
+      <div class=actions style="justify-content:space-between;align-items:center"><div><h2 style="margin-bottom:4px">Живые логи</h2><p class=muted style="margin:0">Поток событий панели в реальном времени. История не обновляет страницу и хранится по текущим правилам очистки.</p></div></div>
+      <p class=muted>Журнал доступен в нижней панели на любой вкладке. Можно приостановить отображение или скачать события.</p><a class="button secondary" href="#aurora-terminal">Открыть журнал ↓</a>
     </section>
 
     <section class=card {show('audit')}>
@@ -3703,41 +3768,68 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <table><thead><tr><th>Время</th><th>Кто</th><th>IP</th><th>Действие</th><th>Diff</th></tr></thead><tbody>{audit_html}</tbody></table>
     </section>
 
+      <details id=aurora-terminal class=aurora-live-dock {'open' if section == 'logs' else ''}>
+        <summary class=aurora-live-toolbar><strong>Живой журнал</strong><span id=aurora-live-summary class=aurora-live-summary>Подключение к событиям панели…</span><span id=live-state class=pill>Подключение…</span></summary>
+        <div class=aurora-live-toolbar><button type=button id=aurora-live-pause class=secondary>Пауза</button><a class="button secondary" href="/operator/logs.txt">Скачать журнал</a><button type=button id=aurora-refresh class=secondary>Обновить данные</button></div>
+        <pre id=live-log class=aurora-live-output aria-label="Журнал событий">Ожидание событий…</pre>
+      </details>
       </section>
     </div>
 
     <script>
     const tab = new URLSearchParams(location.search).get('tab') || 'dashboard';
-    if (tab === 'dashboard') {{
-      // Keep the command centre current without forcing a manual refresh.
-      // The health worker samples services every minute; this reloads the compact
-      // projection after the next sample and leaves long-lived log streams alone.
-      const pill = document.getElementById('system-pill');
-      let left = 60;
-      const timer = window.setInterval(() => {{
-        left -= 1;
-        if (pill && left > 0) pill.setAttribute('title', `Следующее обновление через ${{left}} с`);
-        if (left <= 0) window.location.reload();
-      }}, 1000);
-      window.addEventListener('beforeunload', () => window.clearInterval(timer));
-    }}
-    if (tab === 'logs') {{
+    if (document.getElementById('live-log')) {{
       const output = document.getElementById('live-log');
       const state = document.getElementById('live-state');
-      const source = new EventSource('/operator/live');
-      source.onopen = () => {{ state.textContent = 'LIVE'; state.className = 'pill ok'; }};
+      const summary = document.getElementById('aurora-live-summary');
+      const pause = document.getElementById('aurora-live-pause');
+      const lines = [];
+      let paused = false, skipped = 0;
+      const source = new EventSource('/operator/live?since=' + (Math.floor(Date.now()/1000) - 60));
+      source.onopen = () => {{ state.textContent = paused ? 'Пауза' : 'LIVE'; state.className = 'pill ok'; }};
       source.onerror = () => {{ state.textContent = 'Переподключение…'; state.className = 'pill off'; }};
       source.onmessage = (event) => {{
         try {{
           const item = JSON.parse(event.data);
-          const stamp = new Date(item.ts * 1000).toLocaleString();
-          output.textContent = `[${{stamp}}] ${{item.kind}} · ${{item.device || 'system'}} · ${{item.ip || '—'}}\\n${{item.detail || ''}}\\n\\n` + output.textContent;
-          if (output.textContent.length > 24000) output.textContent = output.textContent.slice(0, 24000);
+          const stamp = new Date(item.ts * 1000).toLocaleString('ru-RU');
+          lines.unshift(`[${{stamp}}] ${{item.kind}} · ${{item.device || 'system'}} · ${{item.ip || '—'}}\\n${{item.detail || ''}}`);
+          lines.length = Math.min(lines.length, 60);
+          if (paused) {{ skipped += 1; state.textContent = 'Пауза · +' + skipped; return; }}
+          output.textContent = lines.join('\\n\\n').slice(0, 24000);
+          summary.textContent = item.kind + ' · ' + (item.detail || 'Событие получено').slice(0, 160);
         }} catch (_) {{}}
       }};
+      pause.addEventListener('click', () => {{
+        paused = !paused;
+        pause.textContent = paused ? 'Продолжить' : 'Пауза';
+        state.textContent = paused ? 'Пауза' : 'LIVE';
+        if (!paused) {{ skipped = 0; output.textContent = lines.join('\\n\\n').slice(0, 24000) || 'Событий пока нет'; }}
+      }});
+      window.addEventListener('pagehide', () => source.close(), {{once:true}});
+    }}
+    document.getElementById('aurora-refresh').addEventListener('click', () => location.reload());
+    if (tab === 'dashboard') {{
+      let refreshing = false;
+      const refreshDashboard = async () => {{
+        if (document.hidden || refreshing) return;
+        refreshing = true;
+        try {{
+          const response = await fetch('/operator?tab=dashboard', {{credentials:'same-origin',cache:'no-store'}});
+          if (!response.ok) return;
+          const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+          if (!doc.querySelector('[data-ui="Aurora2"]')) return;
+          const fresh = doc.querySelector('.dashboard'), current = document.querySelector('.dashboard');
+          if (fresh && current) {{
+            current.replaceChildren(...fresh.childNodes);
+            current.dispatchEvent(new Event('aurora:refresh', {{bubbles:true}}));
+          }}
+        }} catch (_) {{}} finally {{ refreshing = false; }}
+      }};
+      const timer = setInterval(refreshDashboard, 60000);
+      window.addEventListener('pagehide', () => clearInterval(timer), {{once:true}});
     }}
     </script>
-    </main>"""
+    {aurora_script()}</main></body></html>"""
 
 
 class App(BaseHTTPRequestHandler):
@@ -4700,7 +4792,21 @@ class App(BaseHTTPRequestHandler):
             adm = self.admin(require_login_page=False)
             if not adm:
                 return
-            last_ts = int(query.get("since", ["0"])[0] or 0)
+            # Event timestamps are second-granular. The rowid breaks ties, so a
+            # reconnect cannot drop/replay events written in the same second.
+            cursor = self.headers.get("Last-Event-ID", "").strip()
+            if cursor:
+                match = re.fullmatch(r"([0-9]{1,12}):([0-9]{1,19})", cursor)
+                if not match:
+                    return self.reply(400, "Invalid event cursor", "text/plain; charset=utf-8")
+                last_ts, last_rowid = map(int, match.groups())
+                if last_rowid > 9_223_372_036_854_775_807:
+                    return self.reply(400, "Invalid event cursor", "text/plain; charset=utf-8")
+            else:
+                raw_since = query.get("since", ["0"])[0] or "0"
+                if not re.fullmatch(r"[0-9]{1,12}", raw_since):
+                    return self.reply(400, "Invalid event timestamp", "text/plain; charset=utf-8")
+                last_ts, last_rowid = int(raw_since), 9_223_372_036_854_775_807
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -4711,13 +4817,13 @@ class App(BaseHTTPRequestHandler):
             try:
                 while time.monotonic() < deadline:
                     rows = db.execute(
-                        "select ts,kind,device,ip,detail from events where ts>? order by ts asc limit 80",
-                        (last_ts,),
+                        "select rowid,ts,kind,device,ip,detail from events where ts>? or (ts=? and rowid>?) order by ts asc,rowid asc limit 80",
+                        (last_ts, last_ts, last_rowid),
                     ).fetchall()
-                    for ts, kind, device, ip, detail in rows:
-                        last_ts = max(last_ts, int(ts))
+                    for rowid, ts, kind, device, ip, detail in rows:
+                        last_ts, last_rowid = int(ts), int(rowid)
                         payload = {"ts": int(ts), "kind": kind, "device": device, "ip": ip, "detail": detail[:1600]}
-                        self.wfile.write(("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
+                        self.wfile.write((f"id: {last_ts}:{last_rowid}\n" + "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8"))
                     if not rows:
                         self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()

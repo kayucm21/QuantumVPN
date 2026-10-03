@@ -23,7 +23,7 @@ class Aurora2026InstrumentedTest {
                     reduceMotion = true, onNotifications = {}, pingMeasured = true)
             }
         }
-        compose.onNodeWithText("Подключить").performClick()
+        compose.onNodeWithText("Подключиться").performClick()
         compose.runOnIdle { check(connect == 1) }
         compose.onNodeWithTag("home-games").performScrollTo().performClick()
         compose.runOnIdle { check(games == 1) }

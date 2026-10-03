@@ -29,8 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 /**
  * Shared dark aurora layer for the first screen a person sees in QuantumVPN.
  *
- * It intentionally uses Canvas rather than a video/image asset: the animation is small,
- * adapts to every display size and can be made still by the caller when motion is reduced.
+ * A bounded, shared wallpaper plus optional lightweight light ribbons. No video decoder.
  */
 @Composable
 internal fun AuroraGlassBackdrop(
@@ -67,15 +66,17 @@ internal fun AuroraGlassBackdrop(
         light = 0.58f
     }
 
-    Canvas(modifier = modifier.fillMaxSize()) {
+    Box(modifier = modifier.fillMaxSize()) {
+    Quantum2Wallpaper(Modifier.fillMaxSize())
+    Canvas(modifier = Modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
         drawRect(
             brush = Brush.verticalGradient(
                 colors = listOf(
-                    Color(0xFF050816),
-                    Color(0xFF08142A),
-                    Color(0xFF050714),
+                    Color(0x30050816),
+                    Color(0x5508142A),
+                    Color(0xC0050714),
                 ),
             ),
         )
@@ -149,22 +150,7 @@ internal fun AuroraGlassBackdrop(
                 drawCircle(Color(0xFF5EF8D1).copy(alpha = alpha * 0.34f), radius = 4.5f * density, center = center)
             }
         }
-        // Static mountain silhouettes: no video decoder, texture stream or timer.
-        repeat(2) { layer ->
-            val ridge = Path().apply {
-                moveTo(0f, h)
-                lineTo(0f, h * .76f)
-                lineTo(w * .12f, h * (.59f + layer * .09f))
-                lineTo(w * .25f, h * .78f)
-                lineTo(w * .40f, h * (.67f + layer * .07f))
-                lineTo(w * .57f, h * .83f)
-                lineTo(w * .78f, h * (.62f + layer * .1f))
-                lineTo(w, h * .75f)
-                lineTo(w, h)
-                close()
-            }
-            drawPath(ridge, if (layer == 0) Color(0xFF10223A) else Color(0xFF07101E))
-        }
+    }
     }
 }
 

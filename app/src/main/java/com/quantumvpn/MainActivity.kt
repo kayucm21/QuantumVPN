@@ -301,6 +301,8 @@ class MainActivity : FragmentActivity() {
                         availableServers = state.homeSelectorGroups.sumOf { it.items.size },
                         reduceMotion = state.settings.reduceMotion,
                         onFinished = { splashDone = true },
+                        routingEnabled = state.settings.panelRoutingEnabled,
+                        serverItems = state.homeSelectorGroups.flatMap { it.items }.distinctBy { it.tag },
                     )
                 } else {
                     QuantumVpnApp(

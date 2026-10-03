@@ -2069,44 +2069,113 @@ def latency_worker():
 
 
 def promote_scheduled_release(db, now=None):
-    """Promote a pre-uploaded release at its exact epoch without exposing it early."""
+    """Publish only a verified APK matrix, against its captured production CAS.
+
+    Legacy schedules without a pinned manifest/baseline are retained but fail
+    closed: an operator must re-stage them with the verified release utility.
+    """
     s = settings(db)
     if not enabled(s, "release_schedule_enabled", False):
         return False
-    publish_at = int(s.get("release_publish_at", "0") or 0)
-    version = (s.get("scheduled_app_version") or "").strip()
-    code = int(s.get("scheduled_app_version_code", "0") or 0)
     now = int(time.time()) if now is None else int(now)
+    version = (s.get("scheduled_app_version") or "").strip()
+
+    def deferred(reason, **extra):
+        detail = json.dumps({"version": version, "reason": reason, **extra},
+                            ensure_ascii=False, sort_keys=True)
+        if not db.execute(
+            "select 1 from events where kind=? and device=? and detail=? limit 1",
+            ("release_promotion_deferred", "operator", detail),
+        ).fetchone():
+            db.execute("insert into events values (?,?,?,?,?)",
+                       (now, "release_promotion_deferred", "operator", "", detail))
+            db.commit()
+        return False
+
+    try:
+        publish_at = int(s.get("release_publish_at", "0") or 0)
+        code = int(s.get("scheduled_app_version_code", "0") or 0)
+    except (ValueError, TypeError):
+        return deferred("invalid_schedule")
     if publish_at <= 0 or publish_at > now or not version or code <= 0:
         return False
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        return False
+        return deferred("invalid_version")
     missing_abis = scheduled_release_missing_abis(version)
     if missing_abis:
-        detail = json.dumps({
-            "version": version,
-            "version_code": code,
-            "publish_at": publish_at,
-            "missing_abis": missing_abis,
-        }, ensure_ascii=False, sort_keys=True)
-        # The worker runs every 20 seconds. Record this once per exact
-        # scheduled-release state instead of endlessly filling the event log
-        # while an APK upload is incomplete.
-        already_logged = db.execute(
-            "select 1 from events where kind=? and device=? and detail=? limit 1",
-            ("release_promotion_deferred", "operator", detail),
-        ).fetchone()
-        if not already_logged:
-            db.execute(
-                "insert into events values (?,?,?,?,?)",
-                (now, "release_promotion_deferred", "operator", "", detail),
-            )
-            db.commit()
-        return False
-    rollout = max(1, min(100, int(s.get("scheduled_rollout_percent", "100") or 100)))
+        return deferred("missing_abis", version_code=code, publish_at=publish_at,
+                        missing_abis=missing_abis)
+    expected_version = s.get("scheduled_expected_app_version", "")
+    expected_code = s.get("scheduled_expected_app_version_code", "")
+    manifest_digest = s.get("scheduled_release_metadata_sha256", "")
+    if (not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", expected_version)
+            or not expected_code.isdigit() or not re.fullmatch(r"[0-9a-f]{64}", manifest_digest)):
+        return deferred("unverified_schedule")
+    if (s.get("app_version") != expected_version or s.get("app_version_code") != expected_code
+            or code <= int(expected_code) or version == expected_version or code >= 2147483647):
+        return deferred("production_cas_or_monotonicity_failed")
+
+    def safe_file(version_name, file_name):
+        root = os.path.realpath(DOWNLOAD_ROOT)
+        path = os.path.join(DOWNLOAD_ROOT, version_name, file_name)
+        if (os.path.islink(path) or os.path.islink(os.path.dirname(path))
+                or os.path.commonpath((root, os.path.realpath(path))) != root
+                or not os.path.isfile(path)):
+            raise ValueError("release_path")
+        return path
+
+    def sha256_file(path):
+        result = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                result.update(chunk)
+        return result.hexdigest()
+
+    try:
+        manifest_path = safe_file(version, "release-metadata.json")
+        if os.path.getsize(manifest_path) > 65536 or sha256_file(manifest_path) != manifest_digest:
+            raise ValueError("metadata_digest")
+        with open(manifest_path, encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        previous_path = safe_file(expected_version, "release-metadata.json")
+        if os.path.getsize(previous_path) > 65536:
+            raise ValueError("production_metadata_size")
+        with open(previous_path, encoding="utf-8") as stream:
+            previous = json.load(stream)
+        signer = metadata.get("signer_sha256", "")
+        if (metadata.get("schema") != 2 or metadata.get("version_name") != version
+                or metadata.get("version_code") != code or metadata.get("application_id") != "com.quantumvpn.debug"
+                or not re.fullmatch(r"[0-9a-f]{64}", signer)
+                or previous.get("signer_sha256") != signer
+                or previous.get("application_id") != metadata["application_id"]
+                or previous.get("version_name") != expected_version or previous.get("version_code") != int(expected_code)):
+            raise ValueError("release_identity")
+        artifacts = metadata.get("artifacts", [])
+        if (not isinstance(artifacts, list) or len(artifacts) != len(REQUIRED_RELEASE_ABIS)
+                or {row.get("abi") for row in artifacts} != set(REQUIRED_RELEASE_ABIS)):
+            raise ValueError("release_abi_matrix")
+        for artifact in artifacts:
+            name = f"QuantumVPN-{version}-operator-debug-{artifact['abi']}.apk"
+            path = safe_file(version, name)
+            expected_digest = artifact.get("apk_sha256", "")
+            if (artifact.get("apk_file") != name or type(artifact.get("apk_size")) is not int
+                    or artifact["apk_size"] <= 0 or os.path.getsize(path) != artifact["apk_size"]
+                    or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+                    or sha256_file(path) != expected_digest):
+                raise ValueError("release_artifact")
+            checksum_path = safe_file(version, name + ".sha256")
+            if os.path.getsize(checksum_path) > 4096:
+                raise ValueError("release_checksum_size")
+            with open(checksum_path, encoding="ascii") as stream:
+                if stream.read().strip() != expected_digest + "  " + name:
+                    raise ValueError("release_checksum")
+        rollout = max(1, min(100, int(s.get("scheduled_rollout_percent", "100") or 100)))
+        min_code = max(0, int(s.get("scheduled_min_version_code", "0") or 0))
+        revision = int(s.get("config_revision", "1") or 1) + 1
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+        return deferred("artifact_integrity_or_identity_failed")
     note = s.get("scheduled_app_changelog") or DEFAULT_NOTE
-    min_code = max(0, int(s.get("scheduled_min_version_code", "0") or 0))
-    set_settings(db, {
+    values = {
         "app_version": version,
         "app_version_code": str(code),
         "rollout_percent": str(rollout),
@@ -2116,37 +2185,52 @@ def promote_scheduled_release(db, now=None):
         "announce": f"Доступен QuantumVPN {version}. Откройте уведомление, чтобы обновить приложение.",
         "announce_en": f"QuantumVPN {version} is available. Open the notification to update the app.",
         "force_update_message": f"Доступно обновление QuantumVPN {version}.",
-        "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
+        "announce_until": "0",
+        "config_revision": str(revision),
         "release_schedule_enabled": "0",
-    })
+    }
     banner = f"Доступно обновление QuantumVPN {version}. Откройте уведомление, чтобы установить новую версию."
-    # Known devices receive a persistent banner; create the flag row even when
-    # the device has never used another operator action before.
-    devices = db.execute(
-        "select distinct device from events where kind='policy' and ts>? and device!='' limit 5000",
-        (now - 365 * 86400,),
-    ).fetchall()
-    for (device,) in devices:
-        wait_seconds = max(5, min(120, int(s.get("card_game_wait_minutes") or 20))) * 60
+    # File hashing happens before the write lock. Recheck every publication
+    # field once locked so a reschedule or another publisher cannot race it.
+    snapshot_keys = tuple(key for key in s if key.startswith("scheduled_")) + (
+        "app_version", "app_version_code", "release_schedule_enabled", "release_publish_at", "config_revision",
+        "scheduled_app_version", "scheduled_app_version_code", "scheduled_app_changelog",
+        "scheduled_rollout_percent", "scheduled_min_version_code", "scheduled_expected_app_version",
+        "scheduled_expected_app_version_code", "scheduled_release_metadata_sha256",
+    )
+    try:
+        db.execute("begin immediate")
+        latest = settings(db)
+        if any(latest.get(key) != s.get(key) for key in snapshot_keys):
+            db.rollback()
+            return False
+        set_settings(db, values)
+        devices = db.execute(
+            "select distinct device from events where kind='policy' and ts>? and device!='' limit 5000",
+            (now - 365 * 86400,),
+        ).fetchall()
+        for (device,) in devices:
+            db.execute(
+                "insert into device_flags(device,force_banner,request_diagnostic,note,updated_at) values (?,?,?,?,?) "
+                "on conflict(device) do update set force_banner=excluded.force_banner, updated_at=excluded.updated_at",
+                (device, banner[:500], 0, f"{version}-release", now),
+            )
         db.execute(
-            "insert into device_flags(device,force_banner,request_diagnostic,note,updated_at) values (?,?,?,?,?) "
-            "on conflict(device) do update set force_banner=excluded.force_banner, updated_at=excluded.updated_at",
-            (device, banner[:500], 0, f"{version}-release", now),
+            "insert into events values (?,?,?,?,?)",
+            (now, "release_promoted", "operator", "", json.dumps({"version": version, "version_code": code}, ensure_ascii=False)),
         )
-    db.execute(
-        "insert into events values (?,?,?,?,?)",
-        (now, "release_promoted", "operator", "", json.dumps({"version": version, "version_code": code}, ensure_ascii=False)),
-    )
-    db.commit()
-    # Devices receive the in-app update banner on their next policy refresh.
-    # The owner chat receives one operational confirmation too; it is not a
-    # substitute for a mobile push because a bot cannot notify every APK.
-    telegram_send(
-        settings(db),
-        f"[Quantum Control] Выпуск {version} опубликован. Охват: {rollout}% · versionCode: {code}.",
-    )
-    webhook_emit(settings(db), "release.promoted", {"version": version, "version_code": code, "rollout_percent": rollout})
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     release_info.cache_clear()
+    # This is the update signal, not evidence of push delivery. APKs receive
+    # their persistent banners on the next policy refresh.
+    try:
+        telegram_send(settings(db), f"[Quantum Control] Выпуск {version} опубликован. Охват: {rollout}% · versionCode: {code}.")
+        webhook_emit(settings(db), "release.promoted", {"version": version, "version_code": code, "rollout_percent": rollout})
+    except Exception:
+        pass
     return True
 
 
@@ -4943,7 +5027,15 @@ class App(BaseHTTPRequestHandler):
         # verified, but its predictable download path must not make it public
         # before the configured publication time.
         relative = path.removeprefix("/downloads/").lstrip("/")
-        scheduled_version = relative.split("/", 1)[0]
+        if any(part in (".", "..") for part in relative.split("/")):
+            return self.reply(404, "Not found", "text/plain")
+        root = os.path.realpath(DOWNLOAD_ROOT) + os.sep
+        target = os.path.realpath(os.path.join(DOWNLOAD_ROOT, relative))
+        if not target.startswith(root) or not os.path.isfile(target):
+            return self.reply(404, "Not found", "text/plain")
+        # Use the resolved version, including a possible in-root symlink. The
+        # raw first segment must not bypass the pending release embargo.
+        scheduled_version = os.path.relpath(target, root).split(os.sep, 1)[0]
         db = self.connection_db()
         s = settings(db)
         if effective_maintenance(s) or not enabled(s, "public_download_enabled", True):
@@ -4951,12 +5043,8 @@ class App(BaseHTTPRequestHandler):
         if (
             enabled(s, "release_schedule_enabled", False)
             and scheduled_version == (s.get("scheduled_app_version") or "").strip()
-            and int(s.get("release_publish_at", "0") or 0) > int(time.time())
+            and scheduled_version != s.get("app_version")
         ):
-            return self.reply(404, "Not found", "text/plain")
-        root = os.path.realpath(DOWNLOAD_ROOT) + os.sep
-        target = os.path.realpath(os.path.join(DOWNLOAD_ROOT, relative))
-        if not target.startswith(root) or not os.path.isfile(target):
             return self.reply(404, "Not found", "text/plain")
         size = os.path.getsize(target)
         range_header = self.headers.get("Range", "")

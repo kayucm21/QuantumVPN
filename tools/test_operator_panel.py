@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -285,7 +286,7 @@ class OperatorTests(unittest.TestCase):
 
     def test_scheduled_release_requires_both_nonempty_abis(self):
         version = "9.9.9"
-        version_code = 9999
+        version_code = 999999999
         now = int(time.time())
         setting_keys = (
             "app_version",
@@ -305,6 +306,9 @@ class OperatorTests(unittest.TestCase):
             "scheduled_rollout_percent",
             "scheduled_app_changelog",
             "scheduled_min_version_code",
+            "scheduled_expected_app_version",
+            "scheduled_expected_app_version_code",
+            "scheduled_release_metadata_sha256",
         )
         with closing(self.panel.conn()) as db:
             original = {key: self.panel.settings(db).get(key, "") for key in setting_keys}
@@ -334,6 +338,32 @@ class OperatorTests(unittest.TestCase):
                 self.assertEqual(json.loads(row[0])["missing_abis"], ["armeabi-v7a"])
 
                 (folder / f"QuantumVPN-{version}-operator-debug-armeabi-v7a.apk").write_bytes(b"armv7")
+                signer = "4" * 64
+                metadata = {
+                    "schema": 2, "version_name": version, "version_code": version_code,
+                    "application_id": "com.quantumvpn.debug", "signer_sha256": signer, "artifacts": [],
+                }
+                for abi in self.panel.REQUIRED_RELEASE_ABIS:
+                    name = f"QuantumVPN-{version}-operator-debug-{abi}.apk"
+                    artifact = folder / name
+                    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+                    metadata["artifacts"].append({"abi": abi, "apk_file": name,
+                                                  "apk_size": artifact.stat().st_size, "apk_sha256": digest})
+                    (folder / (name + ".sha256")).write_text(digest + "  " + name + "\n", encoding="ascii")
+                manifest = folder / "release-metadata.json"
+                manifest.write_text(json.dumps(metadata), encoding="utf-8")
+                production_manifest = Path(self.tmp.name) / original["app_version"] / "release-metadata.json"
+                production_manifest.parent.mkdir(exist_ok=True)
+                production_manifest.write_text(json.dumps({
+                    "application_id": "com.quantumvpn.debug", "signer_sha256": signer,
+                    "version_name": original["app_version"], "version_code": int(original["app_version_code"]),
+                }), encoding="utf-8")
+                self.panel.set_settings(db, {
+                    "scheduled_expected_app_version": original["app_version"],
+                    "scheduled_expected_app_version_code": original["app_version_code"],
+                    "scheduled_release_metadata_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                })
+                db.commit()
                 self.assertTrue(self.panel.promote_scheduled_release(db, now=now))
                 promoted = self.panel.settings(db)
                 self.assertEqual(promoted["app_version"], version)

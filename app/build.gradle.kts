@@ -87,6 +87,18 @@ val requestedApkAbi = providers.gradleProperty("zapretAbi")
     .orNull
     ?.also { require(it in supportedApkAbis) { "Unsupported APK ABI: $it" } }
 
+// Focused UI fixture bundle for a disposable review AVD. The default and CI
+// source sets remain complete; this opt-in never modifies the application APK.
+val quantumUiReviewOnly = providers.gradleProperty("quantumUiReviewOnly")
+    .map(String::toBoolean).orElse(false).get()
+val prepareQuantumUiReview by tasks.registering(Sync::class) {
+    from("src/androidTest/java") {
+        include("com/quantumvpn/ui/Quantum2InstrumentedTest.kt")
+        include("com/quantumvpn/ui/Aurora2026InstrumentedTest.kt")
+    }
+    into(layout.buildDirectory.dir("quantum2-ui-review-sources"))
+}
+
 val localSigningProperties = Properties().apply {
     val file = rootProject.file("keystore.properties")
     if (file.isFile) file.inputStream().use(::load)
@@ -122,6 +134,15 @@ val releaseMinifyEnabled = providers.gradleProperty("zapretReleaseMinify")
 android {
     namespace = "com.quantumvpn"
     compileSdk = 37
+    if (quantumUiReviewOnly) {
+        sourceSets.getByName("androidTest").apply {
+            // Do not retain providers/services whose network-fixture classes
+            // are intentionally excluded from this UI-only source set.
+            manifest.srcFile("src/quantumUiReview/AndroidManifest.xml")
+            java.setSrcDirs(listOf(layout.buildDirectory.dir("quantum2-ui-review-sources")))
+            kotlin.setSrcDirs(listOf(layout.buildDirectory.dir("quantum2-ui-review-sources")))
+        }
+    }
     // Native core ships inside app/libs/libbox.aar; pin NDK only when present locally.
     val pinnedNdk = coreProperties.getProperty("ANDROID_NDK_VERSION")
     val sdkDir = System.getenv("ANDROID_HOME")
@@ -258,6 +279,14 @@ android {
         }
     }
 
+}
+
+if (quantumUiReviewOnly) {
+    tasks.configureEach {
+        if (name == "compileDebugAndroidTestKotlin" || name == "compileDebugAndroidTestJavaWithJavac") {
+            dependsOn(prepareQuantumUiReview)
+        }
+    }
 }
 
 val olcrtcStrippedAar = layout.buildDirectory.file("olcrtc-stripped/olcrtc.aar")

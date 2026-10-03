@@ -4,96 +4,119 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.quantumvpn.BuildConfig
 import com.quantumvpn.updates.UpdateState
 
-/** No simulated percentage: determinate progress belongs only to a known-size APK download. */
+/** Only measured APK bytes produce a percentage. Startup checks have no fake progress. */
 @Composable
-internal fun AuroraStartup2026(ready: Boolean, update: UpdateState, servers: Int, reduceMotion: Boolean, onFinished: () -> Unit) {
-    LaunchedEffect(ready) { if (ready) onFinished() }
-    val mint = Color(0xFF58F4CE)
-    val resources = LocalAppResources.current
+internal fun AuroraStartup2026(
+    ready: Boolean, update: UpdateState, servers: Int, reduceMotion: Boolean,
+    rulesReady: Boolean = true, rulesDetail: String = "Локальные правила",
+    serversChecked: Boolean = true, reachableServers: Int? = null,
+    onFinished: () -> Unit,
+) {
+    val canFinish = startupFinishAllowed(ready, update) && rulesReady && serversChecked
+    val latestOnFinished by rememberUpdatedState(onFinished)
+    var handedOff by remember { mutableStateOf(false) }
+    LaunchedEffect(canFinish) {
+        if (canFinish && !handedOff) {
+            handedOff = true
+            latestOnFinished()
+        }
+    }
+    val cyan = Color(0xFF2CEBF1)
     val muted = Color(0xFFABC0D4)
     val download = update as? UpdateState.Downloading
     val fraction = download?.let { startupDownloadProgress(it.downloadedBytes, it.totalBytes) }
-    val updateSettled = update is UpdateState.UpToDate || update is UpdateState.Failure
+    val updateSettled = startupFinishAllowed(true, update)
     val status = when (update) {
         is UpdateState.Downloading -> "Загружаем обновление ${update.candidate.metadata.versionName}"
         is UpdateState.Ready -> "Пакет проверен · подтвердите установку Android"
         is UpdateState.Available -> "Новая версия найдена · готовим загрузку"
         is UpdateState.Checking, is UpdateState.RetryingViaVpn -> "Проверяем обновления"
-        is UpdateState.Failure -> "Проверка обновления не завершена"
-        else -> if (servers > 0) "Подготавливаем приложение" else "Загружаем список серверов"
+        is UpdateState.Failure -> "Не удалось проверить обновление · повторим позже"
+        else -> if (!rulesReady) "Проверяем подписанные правила" else if (!serversChecked) "Проверяем доступность серверов" else "Приложение готово"
     }
-    Box(Modifier.fillMaxSize().background(Color(0xFF040B16))) {
-        AuroraGlassBackdrop(Modifier.fillMaxSize(), motionEnabled = false)
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF040B16))) {
+        Quantum2Wallpaper(Modifier.fillMaxSize(), earth = true)
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x55040B16), Color.Transparent, Color(0xF0040B16)))))
+        val compact = maxHeight < 650.dp
         Column(
-            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(24.dp),
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                .verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Spacer(Modifier.height(8.dp))
-            AuroraBrandMark(ready, Modifier.size(64.dp))
-            if (resources?.texts?.containsKey("brand_name") == true) {
-                Text(resources.text("brand_name", "QuantumVPN"), color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-            } else Row {
-                Text("Quantum", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-                Text("VPN", color = mint, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            Text("Добро пожаловать", color = Color.White, fontSize = if (compact) 25.sp else 28.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(if (compact) 18.dp else 38.dp))
+            AuroraBrandMark(false, Modifier.size(if (compact) 112.dp else 148.dp))
+            Text(LocalAppResources.current?.text("brand_name", "QuantumVPN") ?: "QuantumVPN",
+                color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            Text("2.0", color = cyan, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(if (compact) 44.dp else 74.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                StartupStage("Проверяем\nобновление", updateSettled, !updateSettled, cyan, Modifier.weight(1f))
+                StartupStage("Загружаем\nправила", rulesReady, updateSettled && !rulesReady, cyan, Modifier.weight(1f))
+                StartupStage("Проверяем\nсерверы", serversChecked, rulesReady && !serversChecked, cyan, Modifier.weight(1f))
             }
-            Text(resources?.text("welcome", "Больше свободы. Ближе к людям.") ?: "Больше свободы. Ближе к людям.", color = muted, fontSize = 14.sp)
+            Spacer(Modifier.height(20.dp))
+            Text(status, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, textAlign = TextAlign.Center)
             Spacer(Modifier.height(12.dp))
-            AuroraConnectButton(connected = ready, busy = !ready, enabled = false, reduceMotion = reduceMotion, actionLabel = "Подготовка", compact = true, onClick = {})
-            Text(status, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-            AuroraGlass(Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
-                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (download != null) {
-                        Text(
-                            if (download.totalBytes > 0) "${formatBytes(download.downloadedBytes)} / ${formatBytes(download.totalBytes)}" else "Загружено ${formatBytes(download.downloadedBytes)}",
-                            color = Color.White,
-                        )
-                        if (fraction != null) {
-                            LinearProgressIndicator(progress = { fraction }, color = mint, trackColor = Color(0xFF23415C), modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Загрузка ${(fraction * 100).toInt()} процентов" })
-                        } else if (!reduceMotion) {
-                            LinearProgressIndicator(color = mint, modifier = Modifier.fillMaxWidth())
-                        }
-                        Text(
-                            buildString {
-                                append(if (download.speedBytesPerSecond > 0) "${formatBytes(download.speedBytesPerSecond)}/с" else "Скорость уточняется")
-                                append(" · ")
-                                append(download.etaSeconds?.let { "осталось ${it.coerceAtLeast(1)} с" } ?: "время уточняется")
-                            }, color = muted, fontSize = 12.sp,
-                        )
-                    } else {
-                        StartupCheckRow("Обновление", if (update is UpdateState.Failure) "Недоступно · попробуем позже" else if (updateSettled) "Проверено" else "Проверяем", update is UpdateState.UpToDate)
-                        StartupCheckRow("Серверы", if (servers > 0) "Доступно профилей: $servers" else "Получаем подписку", servers > 0)
-                        StartupCheckRow("Приложение", if (ready) "Готово" else "Подготовка", ready)
+            if (download != null) {
+                if (fraction != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        LinearProgressIndicator(progress = { fraction }, color = cyan, trackColor = Color(0xFF23415C),
+                            modifier = Modifier.weight(1f).height(6.dp).semantics { contentDescription = "Загрузка ${(fraction * 100).toInt()} процентов" })
+                        Text("${(fraction * 100).toInt()}%", color = Color.White, fontWeight = FontWeight.SemiBold)
                     }
+                } else if (!reduceMotion) LinearProgressIndicator(color = cyan, trackColor = Color(0xFF23415C), modifier = Modifier.fillMaxWidth())
+                Text(if (download.totalBytes > 0) "${formatBytes(download.downloadedBytes)} / ${formatBytes(download.totalBytes)}" else "Загружено ${formatBytes(download.downloadedBytes)}",
+                    color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp))
+                Text(buildString {
+                    append(if (download.speedBytesPerSecond > 0) "${formatBytes(download.speedBytesPerSecond)}/с" else "Скорость уточняется")
+                    append(" · ")
+                    append(download.etaSeconds?.let { "осталось ${it.coerceAtLeast(1)} с" } ?: "время уточняется")
+                }, color = muted, fontSize = 12.sp)
+            } else {
+                if (!canFinish && !reduceMotion && update !is UpdateState.Ready) {
+                    LinearProgressIndicator(color = cyan, trackColor = Color(0xFF23415C), modifier = Modifier.fillMaxWidth())
                 }
+                Text(rulesDetail, color = muted, fontSize = 11.sp, modifier = Modifier.padding(top = 12.dp), textAlign = TextAlign.Center)
+                Text(if (servers == 0) "Нет серверов в подписке · повторите проверку на главной"
+                    else if (reachableServers != null) "Профилей: $servers · ответили на проверку: $reachableServers"
+                    else "Профилей в подписке: $servers", color = muted, fontSize = 11.sp, textAlign = TextAlign.Center)
             }
-            Text("Версия ${BuildConfig.VERSION_NAME} · Aurora 2026", color = muted, fontSize = 12.sp)
-            Text("Обновление устанавливается только после вашего подтверждения в Android.", color = muted, fontSize = 12.sp)
+            Spacer(Modifier.height(22.dp))
+            Text("Версия ${BuildConfig.VERSION_NAME} · Quantum 2.0", color = muted, fontSize = 11.sp)
+            if (download != null || update is UpdateState.Ready || update is UpdateState.Available) {
+                Text("Установка — после вашего подтверждения в Android.", color = muted, fontSize = 11.sp, textAlign = TextAlign.Center)
+            }
         }
     }
 }
 
 @Composable
-private fun StartupCheckRow(title: String, detail: String, complete: Boolean) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(if (complete) "✓" else "○", color = Color(0xFF58F4CE), fontSize = 20.sp)
-        Column(Modifier.padding(start = 12.dp)) {
-            Text(title, color = Color.White, fontWeight = FontWeight.SemiBold)
-            Text(detail, color = Color(0xFFABC0D4), fontSize = 12.sp)
+private fun StartupStage(title: String, complete: Boolean, active: Boolean, accent: Color, modifier: Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Surface(shape = CircleShape, color = if (active) accent.copy(alpha = .18f) else Color(0xFF081A2E),
+            border = androidx.compose.foundation.BorderStroke(2.dp, if (complete || active) accent else Color(0xFF536A85)), modifier = Modifier.size(25.dp)) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(if (complete) "✓" else if (active) "●" else "", color = accent, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            }
         }
+        Text(title, color = if (complete || active) Color.White else Color(0xFFABC0D4), fontSize = 11.sp,
+            textAlign = TextAlign.Center, modifier = Modifier.padding(top = 10.dp))
     }
 }

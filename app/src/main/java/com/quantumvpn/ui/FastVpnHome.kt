@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -728,39 +729,12 @@ internal fun AuroraBrandMark(
         )
         return
     }
-    val glow = if (connected) CosmicTokens.StatusGreen else CosmicTokens.Orbit
-    Canvas(modifier = modifier) {
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val radius = size.minDimension * 0.45f
-        drawCircle(
-            brush = Brush.radialGradient(
-                listOf(glow.copy(alpha = 0.55f), glow.copy(alpha = 0.12f), Color.Transparent),
-                center = center,
-                radius = radius * 1.3f,
-            ),
-            center = center,
-            radius = radius * 1.3f,
-        )
-        drawCircle(color = Color(0xFF0A1830), radius = radius, center = center)
-        drawCircle(color = glow, radius = radius, center = center, style = Stroke(width = 2.dp.toPx()))
-        val stroke = 3.dp.toPx()
-        drawArc(
-            color = Color.White.copy(alpha = 0.92f),
-            startAngle = -42f,
-            sweepAngle = 252f,
-            useCenter = false,
-            topLeft = Offset(center.x - radius * 0.46f, center.y - radius * 0.46f),
-            size = Size(radius * 0.92f, radius * 0.92f),
-            style = Stroke(width = stroke, cap = StrokeCap.Round),
-        )
-        drawLine(
-            color = Color.White.copy(alpha = 0.92f),
-            start = Offset(center.x, center.y - radius * 0.48f),
-            end = Offset(center.x, center.y - radius * 0.06f),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-    }
+    androidx.compose.foundation.Image(
+        painter = androidx.compose.ui.res.painterResource(com.quantumvpn.R.drawable.ic_launcher_mark),
+        contentDescription = null,
+        modifier = modifier,
+        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+    )
 }
 
 @Composable
@@ -833,10 +807,10 @@ internal fun AuroraConnectButton(
     val accent = when {
         connected -> CosmicTokens.StatusGreen
         busy -> CosmicTokens.Orbit
-        else -> Color(0xFF55EEC6)
+        else -> Color(0xFF2CEBF1)
     }
     val outerSize = if (compact) 176.dp else 214.dp
-    val coreSize = if (compact) 126.dp else 156.dp
+    val coreSize = if (compact) 150.dp else 184.dp
     val iconSize = if (compact) 42.dp else 48.dp
     Box(
         modifier = Modifier
@@ -857,7 +831,7 @@ internal fun AuroraConnectButton(
                 radius = outer * 1.28f,
             )
             drawCircle(
-                color = Color.White.copy(alpha = 0.13f),
+                color = accent.copy(alpha = 0.8f),
                 radius = outer,
                 center = center,
                 style = Stroke(width = 1.2.dp.toPx()),
@@ -880,14 +854,12 @@ internal fun AuroraConnectButton(
                 .clip(CircleShape)
                 .background(
                     Brush.radialGradient(
-                        colors = listOf(
-                            accent.copy(alpha = 0.62f),
-                            Color(0xFF0E2D3C),
-                            Color(0xFF071225),
-                        ),
+                        colors = if (connected) listOf(Color(0xFF28DDB5), Color(0xFF0A9F91), Color(0xFF096A73))
+                            else listOf(Color(0xFF2CEBF1), Color(0xFF08BAD3), Color(0xFF087FAE)),
                     ),
                 )
-                .border(1.dp, accent.copy(alpha = 0.78f), CircleShape)
+                .border(2.dp, accent, CircleShape)
+                .testTag("home-connect")
                 .clickable(enabled = enabled, onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {

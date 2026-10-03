@@ -1,30 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- QuantumVPN brand mark: mint shield + power glyph on transparent. -->
+<!-- Quantum 2.0: scalable Q / shield, shared by launcher and in-app branding. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Shield outline -->
     <path
-        android:fillColor="#00000000"
-        android:pathData="M54,20 L76,30 L76,52 C76,69 65,82 54,88 C43,82 32,69 32,52 L32,30 Z"
-        android:strokeWidth="6"
-        android:strokeColor="#2EE59D"
+        android:fillColor="#14283D"
+        android:pathData="M52,12 L84,24 L83,49 C82,71 69,87 52,95 C35,87 22,71 21,49 L20,24 Z"
+        android:strokeWidth="7"
+        android:strokeColor="#32E8F4"
         android:strokeLineJoin="round"
         android:strokeLineCap="round" />
-    <!-- Power stem -->
+    <path
+        android:fillColor="#34D6F0"
+        android:pathData="M52,35 A18,18 0 1,0 52,71 A18,18 0 1,0 52,35" />
     <path
         android:fillColor="#00000000"
-        android:pathData="M54,42 L54,58"
-        android:strokeWidth="6"
-        android:strokeColor="#2EE59D"
-        android:strokeLineCap="round" />
-    <!-- Power ring (open at top) -->
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M44,48 A12,12 0 1,0 64,48"
-        android:strokeWidth="6"
-        android:strokeColor="#2EE59D"
+        android:pathData="M54,60 L89,93"
+        android:strokeWidth="10"
+        android:strokeColor="#80A5FF"
         android:strokeLineCap="round" />
 </vector>

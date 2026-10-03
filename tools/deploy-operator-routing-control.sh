@@ -4,14 +4,20 @@
 set -euo pipefail
 
 source_file=/tmp/quantumvpn_operator_panel.py
+quality_source=/tmp/quantumvpn_control_quality.py
 target_file=/opt/quantumvpn-operator/app.py
-backup_file=/opt/quantumvpn-operator/app.py.before-5.10.8-control.1
+quality_target=/opt/quantumvpn-operator/quantumvpn_control_quality.py
+backup_file=/opt/quantumvpn-operator/app.py.before-5.10.12-control.1
 
-python3 -m py_compile "$source_file"
+python3 -m py_compile "$source_file" "$quality_source"
 test -f "$target_file"
 test -f "$backup_file" || cp -p "$target_file" "$backup_file"
+if test -f "$quality_target"; then
+  test -f "$quality_target.before-5.10.12-control.1" || cp -p "$quality_target" "$quality_target.before-5.10.12-control.1"
+fi
+install -m 640 "$quality_source" "$quality_target"
 install -m 750 "$source_file" "$target_file"
-python3 -m py_compile "$target_file"
+python3 -m py_compile "$target_file" "$quality_target"
 systemctl restart quantumvpn-operator
 systemctl is-active --quiet quantumvpn-operator
 

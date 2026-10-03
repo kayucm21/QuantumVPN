@@ -110,6 +110,110 @@ class OperatorTests(unittest.TestCase):
             self.assertNotIn("telegram_chat_id", payload)
             saved = self.panel.settings(db)
             self.assertEqual(saved["ai_last_status"], "готов")
+            row = db.execute("select advice,before_json from ai_observations order by id desc limit 1").fetchone()
+            self.assertIn("стабильно", row["advice"])
+            self.assertNotIn("secret-must-not-reach-model", row["before_json"])
+
+    def test_quality_route_action_preserves_tab_and_revision(self):
+        token = base64.b64encode(b"test:test").decode()
+        with closing(self.panel.conn()) as db:
+            before = self.panel.settings(db)["routing_revision"]
+        with urlopen(Request(self.base + "/operator/actions", data=b"action=explain_route&return_tab=quality&route_target=youtube.com", headers={"Authorization": "Basic " + token})) as response:
+            self.assertIn("tab=quality", response.url)
+            page = response.read().decode("utf-8")
+            self.assertIn("КОНТРОЛЬ КАЧЕСТВА", page)
+            self.assertIn("youtube.com", page)
+            self.assertIn("Запрос политики не доказывает", page)
+        with closing(self.panel.conn()) as db:
+            saved = self.panel.settings(db)
+            self.assertEqual(saved["routing_revision"], before)
+            self.assertEqual(json.loads(saved["quality_route"])["target"], "youtube.com")
+
+    def test_quality_records_only_identified_client_reports(self):
+        device = "quality-test-device"
+        for url in ("/api/client/policy", "/api/app/version?current_version_code=137"):
+            with urlopen(Request(self.base + url, headers={"X-HWID": device})) as response:
+                self.assertEqual(response.status, 200)
+        with urlopen(Request(self.base + "/api/client/policy", headers={"User-Agent": "not-a-device"})) as response:
+            self.assertEqual(response.status, 200)
+        with closing(self.panel.conn()) as db:
+            row = db.execute("select * from delivery_evidence where device=?", (self.panel.device_id(device),)).fetchone()
+            self.assertGreater(row["policy_at"], 0)
+            self.assertGreater(row["update_at"], 0)
+            self.assertEqual(row["version_code"], 137)
+            self.assertEqual(row["notification_permission"], "неизвестно")
+            self.assertEqual(row["download_at"], 0)
+            self.assertEqual(row["install_at"], 0)
+            self.assertIsNone(db.execute("select * from delivery_evidence where device=?", (self.panel.device_id("not-a-device"),)).fetchone())
+
+    def test_quality_backup_is_encrypted_and_checked_without_live_restore(self):
+        token = base64.b64encode(b"test:test").decode()
+        with mock.patch.object(self.panel, "latest_backup_info", wraps=self.panel.latest_backup_info):
+            with urlopen(Request(self.base + "/operator/actions", data=b"action=verify_backup&return_tab=quality", headers={"Authorization": "Basic " + token})) as response:
+                self.assertIn("tab=quality", response.url)
+        with closing(self.panel.conn()) as db:
+            result = json.loads(self.panel.settings(db)["quality_backup"])
+            self.assertTrue(result["ok"])
+            self.assertIn("operator.db", result["databases"])
+            self.assertEqual(db.execute("pragma integrity_check").fetchone()[0], "ok")
+        folder = Path(self.panel.ROOT) / "backups"
+        self.assertFalse(list(folder.glob("*.zip")))
+        self.assertFalse(list(folder.glob(".*.db")))
+        self.assertTrue(list(folder.glob("*.zip.enc")))
+
+    def test_backup_encryption_failure_leaves_no_plaintext(self):
+        with closing(self.panel.conn()):
+            pass
+        with mock.patch.object(self.panel, "encrypt_backup_archive", side_effect=RuntimeError("Encryption failed")):
+            with self.assertRaises(RuntimeError):
+                self.panel.create_backup_archive()
+        folder = Path(self.panel.ROOT) / "backups"
+        self.assertFalse(list(folder.glob("*.zip")))
+        self.assertFalse(list(folder.glob(".*.db")))
+
+    def test_quality_mutation_requires_operator_role(self):
+        with closing(self.panel.conn()) as db:
+            db.execute("insert or replace into admin_users values (?,?,?,?,?,?)", ("quality-viewer", self.panel.password_hash("viewer-password"), "viewer", 1, 0, 0))
+            db.commit()
+        token = base64.b64encode(b"quality-viewer:viewer-password").decode()
+        with self.assertRaises(HTTPError) as denied:
+            urlopen(Request(self.base + "/operator/actions", data=b"action=explain_route&return_tab=quality&route_target=example.com", headers={"Authorization": "Basic " + token}))
+        self.assertEqual(denied.exception.code, 403)
+        denied.exception.close()
+
+    def test_quality_failed_subscription_inspection_keeps_previous_report(self):
+        token = base64.b64encode(b"test:test").decode()
+        with closing(self.panel.conn()) as db:
+            self.panel.set_settings(db, {"quality_subscription": '{"protocols":{"vless":2},"checked_at":1}'})
+            db.commit()
+        with mock.patch.object(self.panel, "managed_subscription", side_effect=RuntimeError("SECRET-UPSTREAM-URL")):
+            with urlopen(Request(self.base + "/operator/actions", data=b"action=inspect_subscription&return_tab=quality", headers={"Authorization": "Basic " + token})) as response:
+                page = response.read().decode("utf-8")
+                self.assertNotIn("SECRET-UPSTREAM-URL", page)
+        with closing(self.panel.conn()) as db:
+            self.assertEqual(json.loads(self.panel.settings(db)["quality_subscription"])["protocols"], {"vless": 2})
+
+    def test_subscription_inspection_reuses_only_matching_existing_android(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as folder:
+            file = str(Path(folder) / "primary.db")
+            db = sqlite3.connect(file)
+            db.executescript("""
+                create table users(id,sub_token,enabled);
+                insert into users values(1,'sub',1),(2,'other-token',1);
+                create table devices(user_id,hwid,os,os_version,model,last_seen);
+                insert into devices values(1,'windows-hwid','windows','11','Desktop',300);
+                insert into devices values(1,'registered-android-hwid','android','14','Phone',100);
+                insert into devices values(2,'other-user-hwid','android','15','Other',400);
+            """)
+            db.commit(); db.close()
+            with mock.patch.object(self.panel, "ROSPANEL_DB", file):
+                headers, source = self.panel.subscription_inspection_headers()
+                self.assertEqual(headers["X-Hwid"], "registered-android-hwid")
+                self.assertIn("зарегистрированным", source)
+                with mock.patch.object(self.panel, "UPSTREAM", "https://example.invalid/sub/unknown"):
+                    headers, source = self.panel.subscription_inspection_headers()
+                    self.assertNotIn("X-Hwid", headers)
 
     def test_operator_download_buttons_use_current_version(self):
         token = base64.b64encode(b"test:test").decode()

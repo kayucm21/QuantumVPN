@@ -32,6 +32,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+try:  # Script deployment keeps both modules in the same directory.
+    from quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, subscription_evidence, validate_backup
+except ModuleNotFoundError:
+    from tools.quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, subscription_evidence, validate_backup
+
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -68,7 +73,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "5.10.12-control.0"
+PANEL_BUILD = "5.10.12-control.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -194,7 +199,8 @@ def backup_key() -> bytes:
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        key = open(path, "rb").read()
+        with open(path, "rb") as stream:
+            key = stream.read()
     else:
         key = secrets.token_bytes(32)
         with os.fdopen(fd, "wb") as stream:
@@ -213,7 +219,8 @@ def encrypt_backup_archive(archive: str) -> str:
     if AESGCM is None:
         raise RuntimeError("cryptography is required for encrypted backups")
     nonce = secrets.token_bytes(12)
-    plaintext = open(archive, "rb").read()
+    with open(archive, "rb") as stream:
+        plaintext = stream.read()
     ciphertext = AESGCM(backup_key()).encrypt(nonce, plaintext, b"QuantumControl backup v1")
     encrypted = archive + ".enc"
     temporary = encrypted + ".part"
@@ -419,6 +426,24 @@ def conn():
                 );
                 create table if not exists audit (
                     ts integer, actor text, ip text, action text, detail text
+                );
+                create table if not exists delivery_evidence (
+                    device text primary key,
+                    version_code integer not null default 0,
+                    policy_at integer not null default 0,
+                    update_at integer not null default 0,
+                    download_at integer not null default 0,
+                    install_at integer not null default 0,
+                    notification_permission text not null default 'неизвестно'
+                );
+                create table if not exists ai_observations (
+                    id integer primary key autoincrement,
+                    ts integer not null,
+                    trigger text not null,
+                    status text not null,
+                    advice text not null,
+                    telegram_sent integer not null default 0,
+                    before_json text not null default '{}'
                 );
                 create table if not exists donations (
                     id integer primary key autoincrement,
@@ -702,6 +727,8 @@ def conn():
             db.execute("delete from events where ts < ?", (now - 14 * 86400,))
             db.execute("delete from audit where ts < ?", (now - 90 * 86400,))
             db.execute("delete from server_health where ts < ?", (now - 7 * 86400,))
+            db.execute("delete from delivery_evidence where max(policy_at,update_at) < ?", (now - 90 * 86400,))
+            db.execute("delete from ai_observations where ts < ?", (now - 30 * 86400,))
             _LAST_EVENT_CLEANUP = now
         db.commit()
     return db
@@ -747,6 +774,41 @@ def reserve_profile_uri() -> str:
     ):
         return ""
     return value
+
+
+def subscription_inspection_headers() -> tuple[dict, str]:
+    """Reuse an existing Android binding for the exact configured subscription.
+
+    Never register a made-up HWID or choose a different subscriber. Hardware
+    identifiers stay on the VDS and are sent only to the configured upstream.
+    """
+    headers = {"User-Agent": "QuantumVPN-Android"}
+    token = urlsplit(UPSTREAM).path.rstrip("/").rsplit("/", 1)[-1]
+    source = "Ручная проверка без HWID"
+    if not token or not os.path.isfile(ROSPANEL_DB):
+        return headers, source
+    db = None
+    try:
+        db = sqlite3.connect(f"file:{ROSPANEL_DB}?mode=ro", uri=True, timeout=2)
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            "select d.hwid,d.os,d.os_version,d.model from devices d join users u on u.id=d.user_id "
+            "where u.sub_token=? and u.enabled=1 and lower(d.os)='android' and d.hwid!='' "
+            "order by d.last_seen desc limit 1", (token,),
+        ).fetchone()
+        if row:
+            for field, column in (("X-Hwid", "hwid"), ("X-Device-Os", "os"), ("X-Ver-Os", "os_version"), ("X-Device-Model", "model")):
+                value = str(row[column] or "")[:256]
+                if value and "\r" not in value and "\n" not in value:
+                    headers[field] = value
+            if "X-Hwid" in headers:
+                source = "Ручная проверка с зарегистрированным Android HWID"
+    except sqlite3.Error:
+        pass
+    finally:
+        if db is not None:
+            db.close()
+    return headers, source
 
 
 def managed_subscription(upstream_headers, s: dict) -> tuple[bytes, bool]:
@@ -2132,23 +2194,29 @@ def create_backup_archive():
     part of the archive. The RosPanel snapshot is optional so an operator
     backup still succeeds during a RosPanel repair.
     """
+    if AESGCM is None:
+        raise RuntimeError("cryptography is required for encrypted backups")
+    backup_key()  # Validate the encryption key before writing sensitive files.
     folder = os.path.join(ROOT, "backups")
     os.makedirs(folder, exist_ok=True)
-    stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     archive = os.path.join(folder, f"quantum-control-{stamp}.zip")
     temp_db = os.path.join(folder, f".operator-{stamp}.db")
     temp_rospanel_db = os.path.join(folder, f".rospanel-{stamp}.db")
-    source = sqlite3.connect(DB, timeout=30)
-    try:
-        target = sqlite3.connect(temp_db)
-        try:
-            source.backup(target)
-        finally:
-            target.close()
-    finally:
-        source.close()
+    for path in (temp_db, temp_rospanel_db, archive):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
     rospanel_included = False
     try:
+        source = sqlite3.connect(DB, timeout=30)
+        try:
+            target = sqlite3.connect(temp_db)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+        finally:
+            source.close()
         if os.path.isfile(ROSPANEL_DB):
             source = sqlite3.connect(f"file:{ROSPANEL_DB}?mode=ro", uri=True, timeout=30)
             try:
@@ -2164,13 +2232,26 @@ def create_backup_archive():
             bundle.write(temp_db, "operator.db")
             if rospanel_included:
                 bundle.write(temp_rospanel_db, "rospanel.db")
-            secret = os.path.join(ROOT, "session.secret")
-            if os.path.isfile(secret):
-                bundle.write(secret, "session.secret")
+            # Encryption covers these restoration-critical keys as well as
+            # the databases. Never embed the external AES decryption key.
+            restore_files = {
+                "session.secret": os.path.join(ROOT, "session.secret"),
+                "routing-ed25519.key": os.path.join(ROOT, "routing-ed25519.key"),
+                "rospanel/secrets.key": os.path.join(os.path.dirname(ROSPANEL_DB), "secrets.key"),
+                "rospanel/certs/cert.pem": os.path.join(os.path.dirname(ROSPANEL_DB), "certs", "cert.pem"),
+                "rospanel/certs/key.pem": os.path.join(os.path.dirname(ROSPANEL_DB), "certs", "key.pem"),
+            }
+            for name, source_file in restore_files.items():
+                if os.path.isfile(source_file):
+                    bundle.write(source_file, name)
             bundle.writestr(
                 "backup-info.json",
                 json.dumps({"created_at": int(time.time()), "panel_build": PANEL_BUILD, "rospanel_included": rospanel_included}, ensure_ascii=False),
             )
+    except Exception:
+        if os.path.isfile(archive):
+            os.remove(archive)
+        raise
     finally:
         try:
             os.remove(temp_db)
@@ -2180,7 +2261,13 @@ def create_backup_archive():
             os.remove(temp_rospanel_db)
         except OSError:
             pass
-    encrypted = encrypt_backup_archive(archive)
+    try:
+        encrypted = encrypt_backup_archive(archive)
+    except Exception:
+        # Fail closed: never retain a plaintext copy after encryption failure.
+        if os.path.isfile(archive):
+            os.remove(archive)
+        raise
     # Keep seven days locally; Telegram receives only encrypted .zip.enc files.
     cutoff = time.time() - 7 * 86400
     for name in os.listdir(folder):
@@ -2457,6 +2544,12 @@ def run_ai_analysis(db, s: dict, trigger: str = "scheduled") -> dict:
         if sent:
             values.update({"ai_last_notification_hash": digest, "ai_last_notification_at": str(now)})
     set_settings(db, values)
+    db.execute(
+        "insert into ai_observations(ts,trigger,status,advice,telegram_sent,before_json) values (?,?,?,?,?,?)",
+        (now, trigger[:64], values["ai_last_status"], advice, int(sent),
+         json.dumps(result.get("snapshot") or {}, ensure_ascii=False)),
+    )
+    db.execute("delete from ai_observations where ts<?", (now - 30 * 86400,))
     db.execute(
         "insert into events values (?,?,?,?,?)",
         (now, "ai_analysis", "qwen-local", "", json.dumps({"trigger": trigger, "ok": bool(result.get("ok")), "status": values["ai_last_status"], "telegram_sent": sent}, ensure_ascii=False)),
@@ -2850,6 +2943,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
             "select id,created_at,updated_at,closed_at,source,device,subject,body,admin_note "
             "from support_tickets order by closed_at asc, updated_at desc limit 120"
         ).fetchall()]
+        quality_html = render_quality(quality_snapshot(monitor_db, s, ROSPANEL_DB), s) if section == "quality" else ""
     finally:
         monitor_db.close()
     release_guard = release_guard_snapshot(s)
@@ -3052,6 +3146,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     ) or '<p class=muted>Записей пока нет</p>'
     page_titles = {'dashboard': ('КОМАНДНЫЙ ЦЕНТР', 'Обзор состояния VPN-инфраструктуры'), 'latency': ('Ноды', 'Доступность и задержка подключений'), 'users': ('Пользователи', 'Подписчики и активность'), 'service': ('Подписки', 'Доступ, протоколы и обслуживание сервиса'), 'release': ('Релизы', 'Сборки приложения и расписание публикации'), 'incidents': ('События', 'Состояние сервисов и инциденты'), 'audit': ('Аудит', 'Журнал действий администраторов'), 'cards': ('Игры и награды', 'Карточные столы и виртуальные Q-coins'), 'support': ('Поддержка', 'Обращения, заметки и диагностика'), 'ai': ('ИИ‑СОВЕТНИК', 'Локальный Qwen для анализа агрегированных метрик')}
     page_title, page_description = page_titles.get(section, ('Quantum Control', 'Управление сервисом'))
+    if section == 'quality':
+        page_title, page_description = 'КОНТРОЛЬ КАЧЕСТВА', 'Подписка, маршруты, измерения и доказательства восстановления'
     current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}</style><main><div class=panel-shell>
@@ -3061,6 +3157,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <a class="{'active' if section == 'dashboard' else ''}" href="/operator?tab=dashboard"><span class=nav-ico>▦</span> Командный центр</a>
         <a class="{'active' if section == 'latency' else ''}" href="/operator?tab=latency"><span class=nav-ico>▤</span> Ноды</a>
         <a class="{'active' if section == 'routing' else ''}" href="/operator?tab=routing"><span class=nav-ico>⇄</span> Маршрутизация</a>
+        <a class="{'active' if section == 'quality' else ''}" href="/operator?tab=quality"><span class=nav-ico>✓</span> Контроль качества</a>
         <a class="{'active' if section in ('users','devices','fleet') else ''}" href="/operator?tab=users"><span class=nav-ico>♧</span> Пользователи</a>
         <a class="{'active' if section == 'cards' else ''}" href="/operator?tab=cards"><span class=nav-ico>♠</span> Игры и награды</a>
         <a class="{'active' if section == 'service' else ''}" href="/operator?tab=service"><span class=nav-ico>▭</span> Подписки</a>
@@ -3080,6 +3177,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     </section>
     {flash_html}
     <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>Quantum Control</small></header>
+    {quality_html}
 
     <section class="dashboard" {show('dashboard')}>
       <div class=reference-kpis>
@@ -3656,6 +3754,24 @@ class App(BaseHTTPRequestHandler):
         ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
         raw = self.headers.get("X-Device-Id") or self.headers.get("X-HWID") or ""
         return device_id(raw) if raw else device_id(self.headers.get("User-Agent", "")[:120]), ip
+
+    def record_delivery_evidence(self, db, stage, version_code=0):
+        # A User-Agent or shared IP cannot identify a device. Old clients
+        # without this header remain unknown rather than fake confirmations.
+        raw = self.headers.get("X-Device-Id") or self.headers.get("X-HWID") or ""
+        if not raw or len(raw) > 512 or stage not in {"policy_at", "update_at"}:
+            return
+        try:
+            version_code = max(0, min(2_147_483_647, int(version_code or 0)))
+        except (TypeError, ValueError):
+            version_code = 0
+        db.execute(
+            f"insert into delivery_evidence(device,version_code,{stage}) values (?,?,?) "
+            f"on conflict(device) do update set {stage}=excluded.{stage}, "
+            "version_code=case when excluded.version_code>0 then excluded.version_code else delivery_evidence.version_code end",
+            (device_id(raw), version_code, int(time.time())),
+        )
+        db.commit()
 
     def same_origin_request(self):
         """Accept the panel's real public origin behind an HTTPS reverse proxy.
@@ -4249,6 +4365,7 @@ class App(BaseHTTPRequestHandler):
                 return self.reply(429, '{"error":"rate_limited"}')
 
         if path.startswith("/api/client/update") or path.startswith("/api/app/version"):
+            self.record_delivery_evidence(db, "update_at", query.get("current_version_code", ["0"])[0])
             channel = (query.get("channel", ["production"])[0] or "production").lower()
             version, version_code, rollout, note = self.current_release(s, channel)
             abi = query.get("abi", ["arm64-v8a"])[0]
@@ -4340,6 +4457,7 @@ class App(BaseHTTPRequestHandler):
         if path.startswith("/api/client/policy"):
             dev, ip = self.client()
             now = int(time.time())
+            self.record_delivery_evidence(db, "policy_at", query.get("version_code", [self.headers.get("X-App-Version-Code", "0")])[0])
             last = db.execute("select max(ts) from events where kind='policy' and device=?", (dev,)).fetchone()[0] or 0
             if now - last >= 600:
                 db.execute(
@@ -4452,6 +4570,10 @@ class App(BaseHTTPRequestHandler):
                 return self.reply(503, "Subscription temporarily unavailable", "text/plain; charset=utf-8")
             try:
                 body, appended = managed_subscription(self.headers, s)
+                # Persist only protocol counts/format, never links or keys.
+                report = subscription_evidence(body)
+                report["source"] = "Ответ на запрос клиента"
+                set_settings(db, {"quality_subscription": json.dumps(report, ensure_ascii=False)})
             except Exception:
                 # Do not leak the upstream address, HWID result or network error
                 # through a public endpoint.  The app can keep its last verified
@@ -5221,10 +5343,47 @@ class App(BaseHTTPRequestHandler):
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             action = form.get("action", [""])[0]
             return_tab = form.get("return_tab", ["dashboard"])[0]
-            if return_tab not in {"dashboard", "automation", "latency", "routing", "release", "service", "incidents", "security", "support", "ai"}:
+            if return_tab not in {"dashboard", "automation", "latency", "routing", "release", "service", "incidents", "security", "support", "ai", "quality"}:
                 return_tab = "dashboard"
             flash = "Готово"
-            if action == "bump_revision":
+            if action == "inspect_subscription":
+                try:
+                    inspection_headers, source = subscription_inspection_headers()
+                    body, _ = managed_subscription(inspection_headers, s)
+                    report = subscription_evidence(body)
+                    report["source"] = source
+                    set_settings(db, {"quality_subscription": json.dumps(report, ensure_ascii=False)})
+                    flash = "Выдача проверена; индивидуальная выдача APK обновит отчёт при следующем запросе"
+                except Exception:
+                    flash = "Не удалось получить подписку от основной панели. Последний успешный отчёт сохранён; обновите подписку в авторизованном APK"
+                audit(db, actor, ip, "quality:subscription", {"result": flash})
+            elif action == "explain_route":
+                try:
+                    result = explain_route(routing_payload(s), form.get("route_target", [""])[0])
+                    set_settings(db, {"quality_route": json.dumps(result, ensure_ascii=False)})
+                    flash = "Правило проверено; опубликованная политика не изменялась"
+                    audit(db, actor, ip, "quality:route", {"target": result["target"], "direction": result["direction"]})
+                except ValueError as exc:
+                    flash = str(exc)
+            elif action == "verify_backup":
+                try:
+                    info = latest_backup_info()
+                    if not info["exists"]:
+                        create_backup_archive()
+                        info = latest_backup_info()
+                    if not os.environ.get("QV_BACKUP_KEY") and not os.path.isfile(os.path.join(ROOT, "backup.key")):
+                        raise ValueError("Ключ расшифровки недоступен")
+                    path = os.path.join(ROOT, "backups", info["name"])
+                    with open(path, "rb") as stream:
+                        result = validate_backup(stream.read(128 * 1024 * 1024 + 1), backup_key(), AESGCM)
+                    result["name"] = info["name"]
+                    flash = "Копия восстановлена и проверена в изолированном каталоге; рабочие базы не изменялись"
+                except Exception as exc:
+                    result = {"checked_at": int(time.time()), "ok": False, "note": "Архив или ключ не прошёл проверку; рабочие базы не изменялись", "error_type": type(exc).__name__}
+                    flash = result["note"]
+                set_settings(db, {"quality_backup": json.dumps(result, ensure_ascii=False)})
+                audit(db, actor, ip, "quality:backup", {"ok": result["ok"], "missing": result.get("missing", [])})
+            elif action == "bump_revision":
                 rev = int(s.get("config_revision") or 1) + 1
                 set_settings(db, {"config_revision": rev})
                 flash = f"config_revision={rev}"

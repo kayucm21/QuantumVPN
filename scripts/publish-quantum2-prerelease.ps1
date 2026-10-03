@@ -37,7 +37,9 @@ function Get-OptionalProperty($Value, [string]$Name) {
 
 function Invoke-PrivateProcess {
     param([string]$File, [string[]]$Arguments, [string]$InputText = '', [int]$TimeoutSeconds = 90)
-    $command = Get-Command $File -CommandType Application -ErrorAction Stop
+    # Windows can expose installed and bundled runtimes under the same name.
+    # ProcessStartInfo needs one executable, never an array joined into a path.
+    $command = Get-Command $File -CommandType Application -ErrorAction Stop | Select-Object -First 1
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $command.Source
     $start.WorkingDirectory = $script:ProjectRoot

@@ -76,6 +76,16 @@ be published early. Notification signals are enabled at publication; delivery
 on each phone depends on policy refresh, permissions and Android restrictions.
 Do not equate a publication event with confirmed delivery to every device.
 
+Both ARM APKs were built from clean source commit
+`65528a509eb91e1b7917f1ad2bfd01ef457bbcee`. Their package, certificate, native ABI,
+manifest version, size and SHA-256 were rechecked before upload. VDS scheduling
+was confirmed with a private SQLite backup and unchanged production 5.11.1;
+the verified application channel is HTTPS on port 8443. Both pending APK HEAD
+requests on that channel return 404 before publication. The separate port 443
+TLS handshake fails from this Windows host and is not marked verified here.
+The GitHub draft's APK digests and all metadata/checksum contents match locally;
+the publication script returned `NotDue`, with no write, even with `-Publish`.
+
 ## Image assets and final prompt set
 
 Mode: built-in image generation, not the CLI/API fallback. Final assets live in

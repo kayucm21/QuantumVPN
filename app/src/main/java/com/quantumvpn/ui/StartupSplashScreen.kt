@@ -75,12 +75,14 @@ fun StartupSplashScreen(
     ready: Boolean,
     updateState: UpdateState,
     availableServers: Int,
+    reduceMotion: Boolean = false,
     onFinished: () -> Unit,
 ) {
-    V2StartupSplash(
+    AuroraStartup2026(
         ready = ready,
-        updateState = updateState,
-        availableServers = availableServers,
+        update = updateState,
+        servers = availableServers,
+        reduceMotion = reduceMotion,
         onFinished = onFinished,
     )
     return

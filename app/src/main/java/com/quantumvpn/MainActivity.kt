@@ -67,7 +67,8 @@ class MainActivity : FragmentActivity() {
     private var lastSubscriptionRefreshMs = 0L
     private val updateController
         get() = (application as QuantumVpnApplication).container.updateController
-    private val systemApkInstaller by lazy { SystemApkUpdateInstaller(this) }
+    private val systemApkInstaller
+        get() = (application as QuantumVpnApplication).container.systemApkInstaller
     private var systemInstallFile: File? = null
     private var systemDownloadActive = false
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -298,6 +299,7 @@ class MainActivity : FragmentActivity() {
                         ready = state.initialized && startupUpdateSettled,
                         updateState = updateState,
                         availableServers = state.homeSelectorGroups.sumOf { it.items.size },
+                        reduceMotion = state.settings.reduceMotion,
                         onFinished = { splashDone = true },
                     )
                 } else {
@@ -338,7 +340,11 @@ class MainActivity : FragmentActivity() {
                             if (candidate != null) startSystemApkDownload(candidate)
                         },
                         onInstallUpdate = ::requestUpdateInstall,
-                        onCancelUpdate = updateController::cancelAndDelete,
+                        onCancelUpdate = {
+                            systemApkInstaller.cancel()
+                            systemInstallFile = null
+                            updateController.cancelAndDelete()
+                        },
                         initialShortcut = pendingShortcut,
                         onShortcutConsumed = { pendingShortcut = null },
                     )

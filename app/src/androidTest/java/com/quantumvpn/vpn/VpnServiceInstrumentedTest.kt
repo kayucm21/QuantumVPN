@@ -1641,7 +1641,9 @@ class VpnServiceInstrumentedTest {
         nonRuDomain: String,
     ): List<GateProbe> {
         fun geo(ru: Boolean): GatePath = when (preset) {
-            RoutingPreset.AllThroughVpn, RoutingPreset.BypassLan -> GatePath.Proxy
+            RoutingPreset.AllThroughVpn, RoutingPreset.BypassLan,
+            RoutingPreset.BlockAds, RoutingPreset.FamilyProtect,
+            RoutingPreset.Streaming, RoutingPreset.Gaming, RoutingPreset.Work -> GatePath.Proxy
             RoutingPreset.OnlySelectedSites -> GatePath.Proxy
             RoutingPreset.RussiaDirect -> if (ru) GatePath.Direct else GatePath.Proxy
             RoutingPreset.RussiaVpn -> if (ru) GatePath.Proxy else GatePath.Direct
@@ -1659,7 +1661,9 @@ class VpnServiceInstrumentedTest {
             )
         }
         val privatePath = when (preset) {
-            RoutingPreset.AllThroughVpn -> GatePath.Proxy
+            RoutingPreset.AllThroughVpn,
+            RoutingPreset.BlockAds, RoutingPreset.FamilyProtect,
+            RoutingPreset.Streaming, RoutingPreset.Gaming, RoutingPreset.Work -> GatePath.Proxy
             RoutingPreset.BypassLan,
             RoutingPreset.RussiaDirect,
             RoutingPreset.RussiaVpn,

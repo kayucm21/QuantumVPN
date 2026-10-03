@@ -795,6 +795,10 @@ internal fun AuroraConnectButton(
     compact: Boolean = false,
     onClick: () -> Unit,
 ) {
+    val orbitValue: Float
+    val pulseValue: Float
+    // Steady connected/idle screens need no perpetual 60fps orbit/pulse.
+    if (busy && !reduceMotion) {
     val transition = rememberInfiniteTransition(label = "aurora-connect")
     val orbit by transition.animateFloat(
         initialValue = 0f,
@@ -808,7 +812,13 @@ internal fun AuroraConnectButton(
         animationSpec = infiniteRepeatable(tween(1_800, easing = LinearEasing), RepeatMode.Reverse),
         label = "aurora-pulse",
     )
-    val activePulse = if (connected && !busy && !reduceMotion) pulse else 1f
+    orbitValue = orbit
+    pulseValue = pulse
+    } else {
+        orbitValue = -88f
+        pulseValue = 1f
+    }
+    val activePulse = pulseValue
     val accent = when {
         connected -> CosmicTokens.StatusGreen
         busy -> CosmicTokens.Orbit
@@ -844,7 +854,7 @@ internal fun AuroraConnectButton(
             if (busy || connected) {
                 drawArc(
                     color = accent.copy(alpha = 0.88f),
-                    startAngle = if (reduceMotion) -88f else orbit - 90f,
+                    startAngle = orbitValue - 90f,
                     sweepAngle = if (busy) 124f else 198f,
                     useCenter = false,
                     topLeft = Offset(center.x - outer, center.y - outer),
@@ -870,7 +880,9 @@ internal fun AuroraConnectButton(
                 .clickable(enabled = enabled, onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
-            if (busy) {
+            if (busy && reduceMotion) {
+                Text("Подключение…", color = Color.White, fontSize = 12.sp)
+            } else if (busy) {
                 CircularProgressIndicator(
                     color = Color.White,
                     strokeWidth = 3.dp,

@@ -20,12 +20,12 @@ class UpdateControllerInstrumentedTest {
     private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
 
     @Test
-    fun retryableCheckUsesOneTemporaryVpnSessionAndRestoresIt() = runBlocking {
+    fun retryableCheckUsesUnderlyingNetworkWithoutStartingTemporaryVpn() = runBlocking {
         val bytes = "verified apk fixture".toByteArray()
         val candidate = candidate(bytes)
         var attempts = 0
         var connected = 0
-        var restored = 0
+        var bound = 0
         val controller = UpdateController(
             context = context,
             repository = "QuantumVPN/QuantumVPN",
@@ -38,9 +38,15 @@ class UpdateControllerInstrumentedTest {
                 }
                 candidate
             },
-            vpnFallback = UpdateVpnFallback {
-                connected++
-                UpdateVpnSession { restored++ }
+            vpnFallback = object : UpdateVpnFallback {
+                override suspend fun connect(): UpdateVpnSession {
+                    connected++
+                    error("A metadata check must not start a temporary VPN")
+                }
+                override suspend fun <T> withUnderlyingNetwork(block: () -> T): T {
+                    bound++
+                    return block()
+                }
             },
         )
 
@@ -48,8 +54,8 @@ class UpdateControllerInstrumentedTest {
         withTimeout(5_000) { controller.state.first { it is UpdateState.Available } }
 
         assertEquals(2, attempts)
-        assertEquals(1, connected)
-        assertEquals(1, restored)
+        assertEquals(0, connected)
+        assertEquals(1, bound)
         controller.cancelAndDelete()
     }
 
@@ -88,6 +94,7 @@ class UpdateControllerInstrumentedTest {
         val bytes = "verified apk fixture".toByteArray()
         val candidate = candidate(bytes)
         var verified = false
+        var downloads = 0
         val controller = controller(
             candidate = candidate,
             bytes = bytes,
@@ -96,6 +103,7 @@ class UpdateControllerInstrumentedTest {
                 assertEquals(candidate.metadata, metadata)
                 verified = true
             },
+            onDownload = { downloads++ },
         )
 
         controller.check(UpdateChannel.Beta)
@@ -104,6 +112,7 @@ class UpdateControllerInstrumentedTest {
         withTimeout(5_000) { controller.state.first { it is UpdateState.Ready } }
 
         assertTrue(verified)
+        assertEquals("Successful downloads must not be retried", 1, downloads)
         val intent = controller.createInstallIntent()
         assertEquals(Intent.ACTION_INSTALL_PACKAGE, intent.action)
         assertEquals("content", intent.data?.scheme)
@@ -222,6 +231,7 @@ class UpdateControllerInstrumentedTest {
         candidate: UpdateCandidate,
         bytes: ByteArray,
         verifier: ApkUpdateVerifier,
+        onDownload: () -> Unit = {},
     ) = UpdateController(
         context = context,
         repository = "QuantumVPN/QuantumVPN",
@@ -237,6 +247,7 @@ class UpdateControllerInstrumentedTest {
                 expectedBytes: Long,
                 onProgress: (Long) -> Unit,
             ) {
+                onDownload()
                 target.writeBytes(bytes)
                 onProgress(bytes.size.toLong())
             }

@@ -37,6 +37,10 @@ internal fun AuroraGlassBackdrop(
     modifier: Modifier = Modifier,
     motionEnabled: Boolean = true,
 ) {
+    // Do not even create a frame-clock observer for a static/reduced-motion page.
+    val phase: Float
+    val light: Float
+    if (motionEnabled) {
     val transition = rememberInfiniteTransition(label = "aurora-backdrop")
     val drift by transition.animateFloat(
         initialValue = 0f,
@@ -56,8 +60,12 @@ internal fun AuroraGlassBackdrop(
         ),
         label = "aurora-shimmer",
     )
-    val phase = if (motionEnabled) drift else 0.38f
-    val light = if (motionEnabled) shimmer else 0.58f
+    phase = drift
+    light = shimmer
+    } else {
+        phase = 0.38f
+        light = 0.58f
+    }
 
     Canvas(modifier = modifier.fillMaxSize()) {
         val w = size.width
@@ -140,6 +148,22 @@ internal fun AuroraGlassBackdrop(
             if (index % 3 == 0) {
                 drawCircle(Color(0xFF5EF8D1).copy(alpha = alpha * 0.34f), radius = 4.5f * density, center = center)
             }
+        }
+        // Static mountain silhouettes: no video decoder, texture stream or timer.
+        repeat(2) { layer ->
+            val ridge = Path().apply {
+                moveTo(0f, h)
+                lineTo(0f, h * .76f)
+                lineTo(w * .12f, h * (.59f + layer * .09f))
+                lineTo(w * .25f, h * .78f)
+                lineTo(w * .40f, h * (.67f + layer * .07f))
+                lineTo(w * .57f, h * .83f)
+                lineTo(w * .78f, h * (.62f + layer * .1f))
+                lineTo(w, h * .75f)
+                lineTo(w, h)
+                close()
+            }
+            drawPath(ridge, if (layer == 0) Color(0xFF10223A) else Color(0xFF07101E))
         }
     }
 }

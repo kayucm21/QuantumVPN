@@ -563,13 +563,15 @@ class RuntimeConfigBuilderTest {
 
     @Test
     fun `switching a runtime copy from secure to Android removes every generated DoH`() {
+        // Isolate DNS-mode behavior: the independent AdGuard overlay owns final
+        // DNS when advertising protection is enabled by the current defaults.
         val secure = RuntimeConfigBuilder.build(
             validConfig(),
-            options = RuntimeConfigOptions(dnsMode = DnsMode.Secure),
+            options = RuntimeConfigOptions(dnsMode = DnsMode.Secure, adBlockEnabled = false),
         ) as RuntimeConfigResult.Ready
         val android = RuntimeConfigBuilder.build(
             secure.json,
-            options = RuntimeConfigOptions(dnsMode = DnsMode.Android),
+            options = RuntimeConfigOptions(dnsMode = DnsMode.Android, adBlockEnabled = false),
         ) as RuntimeConfigResult.Ready
         val dns = (JsonConfig.parse(android.json) as JsonObject)["dns"] as JsonObject
         val tags = (dns["servers"] as JsonArray).map { (it as JsonObject).string("tag") }

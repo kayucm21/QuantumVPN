@@ -78,7 +78,9 @@ class ImportParserTest {
         )
         val automatic = RuntimeConfigBuilder.build(
             candidate.json,
-            options = RuntimeConfigOptions(dnsMode = DnsMode.Automatic),
+            // This assertion checks imported WireGuard DNS, not the separately
+            // tested AdGuard filter, which otherwise overrides final DNS.
+            options = RuntimeConfigOptions(dnsMode = DnsMode.Automatic, adBlockEnabled = false),
         ) as RuntimeConfigResult.Ready
         val automaticDns = (JsonConfig.parse(automatic.json) as JsonObject)["dns"] as JsonObject
         val automaticServers = (automaticDns["servers"] as JsonArray).map { it as JsonObject }

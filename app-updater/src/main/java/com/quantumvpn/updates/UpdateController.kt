@@ -238,7 +238,9 @@ class UpdateController(
                 }
             }
             var lastError: UpdateException? = null
+            var downloadedSuccessfully = false
             repeat(3) { attempt ->
+                if (downloadedSuccessfully) return@repeat
                 try {
                     if (vpnFallback != null) {
                         vpnFallback.withUnderlyingNetwork(runDownload)
@@ -246,6 +248,7 @@ class UpdateController(
                         runDownload()
                     }
                     lastError = null
+                    downloadedSuccessfully = true
                     return@repeat
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -274,14 +277,16 @@ class UpdateController(
             readyFile = complete
             mutableState.value = UpdateState.Ready(candidate)
         } catch (cancelled: CancellationException) {
-            // Keep .part so the next attempt can resume.
+            cleanupFiles()
             throw cancelled
         } catch (error: UpdateException) {
+            cleanupFiles()
             mutableState.value = UpdateState.Failure(
                 error.message ?: "Не удалось загрузить обновление.",
                 candidate,
             )
         } catch (_: Throwable) {
+            cleanupFiles()
             mutableState.value = UpdateState.Failure("Не удалось загрузить обновление.", candidate)
         }
     }
@@ -380,14 +385,13 @@ class UpdateController(
         root.delete()
     }
 
-    /** Drop finished leftovers but keep resumable `.part` across process restarts. */
+    /** A new process must not inherit APK or .part leftovers from a previous attempt. */
     private fun cleanupFinishedArtifacts() {
+        if (mutableState.value is UpdateState.Downloading) return
         readyFile = null
         if (!root.isDirectory) return
         root.listFiles()?.forEach { file ->
             if (!file.isFile) return@forEach
-            val name = file.name
-            if (name.endsWith(".part") || name.endsWith(".part.full")) return@forEach
             file.delete()
         }
     }

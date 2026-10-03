@@ -37,6 +37,12 @@ class SystemApkUpdateInstaller(context: Context) {
     private var lastProgressAtNanos = 0L
     private var smoothedSpeed = 0L
     private var completedFile: File? = null
+    private var completedId = -1L
+
+    init {
+        // Only this application's APK downloads, never the public Downloads folder.
+        cleanupPreviousAttempts()
+    }
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -57,6 +63,8 @@ class SystemApkUpdateInstaller(context: Context) {
         this.onReady = onReady
         this.onFailed = onFailed
         this.pendingCandidate = candidate
+        if (completedId >= 0L) runCatching { downloadManager.remove(completedId) }
+        completedId = -1L
         this.completedFile?.delete()
         this.completedFile = null
         lastProgressBytes = 0L
@@ -125,6 +133,8 @@ class SystemApkUpdateInstaller(context: Context) {
 
     fun cancel() {
         cancelActive()
+        if (completedId >= 0L) runCatching { downloadManager.remove(completedId) }
+        completedId = -1L
         completedFile?.delete()
         completedFile = null
         pendingCandidate = null
@@ -132,6 +142,8 @@ class SystemApkUpdateInstaller(context: Context) {
 
     /** Called after Android's installer returns, regardless of install/cancel result. */
     fun finishInstallerHandoff() {
+        if (completedId >= 0L) runCatching { downloadManager.remove(completedId) }
+        completedId = -1L
         completedFile?.delete()
         completedFile = null
         pendingCandidate = null
@@ -154,6 +166,7 @@ class SystemApkUpdateInstaller(context: Context) {
             // Still hand off — installer/sha check can reject; DownloadManager sometimes omits size.
         }
         activeId.set(-1L)
+        completedId = id
         completedFile = file
         emitProgress(file.length(), file.length())
         onReady?.invoke(file)
@@ -186,9 +199,34 @@ class SystemApkUpdateInstaller(context: Context) {
     }
 
     private fun fail(message: String) {
-        activeId.set(-1L)
+        cancelActive()
+        completedFile?.delete()
+        completedFile = null
         onFailed?.invoke(message)
     }
+
+    private fun cleanupPreviousAttempts() {
+        val external = app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+        runCatching {
+            downloadManager.query(DownloadManager.Query())?.use { cursor ->
+                val ids = mutableListOf<Long>()
+                while (cursor.moveToNext()) {
+                    val uri = cursor.string(DownloadManager.COLUMN_LOCAL_URI)?.let(Uri::parse)
+                    val file = uri?.takeIf { it.scheme == "file" }?.path?.let(::File)
+                    if (file != null && external != null && file.canonicalFile.parentFile == external.canonicalFile && isUpdateArtifact(file.name)) {
+                        ids.add(cursor.long(DownloadManager.COLUMN_ID))
+                    }
+                }
+                ids.filter { it >= 0L }.forEach { downloadManager.remove(it) }
+            }
+        }
+        listOfNotNull(File(app.cacheDir, "updates-system"), external).forEach { directory ->
+            directory.listFiles()?.filter { it.isFile && isUpdateArtifact(it.name) }?.forEach { it.delete() }
+        }
+    }
+
+    private fun isUpdateArtifact(name: String): Boolean =
+        name.endsWith(".apk", true) || name.endsWith(".apk.part", true) || name.endsWith(".apk.part.full", true)
 
     private fun emitProgress(downloaded: Long, total: Long) {
         val now = System.nanoTime()

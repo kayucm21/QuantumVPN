@@ -38,9 +38,9 @@ private fun darkColors(primary: Color, onPrimary: Color, primaryContainer: Color
         secondary = Color(0xFF5BA0FF),
         secondaryContainer = Color(0xFF1A3A66),
         tertiary = Color(0xFFA8B4C4),
-        background = Color(0xFF06122A),
-        surface = Color(0xFF0A1A3A),
-        surfaceVariant = Color(0xFF13284F),
+        background = Color(0xFF040B16),
+        surface = Color(0xFF0B1E33),
+        surfaceVariant = Color(0xFF132D46),
         surfaceContainerHighest = Color(0xFF163056),
         outline = Color(0xFF5C6673),
         error = Color(0xFFFF6B7A),
@@ -58,7 +58,7 @@ private fun accentTriplet(accent: AccentColor): Triple<Color, Color, Color> = wh
 }
 
 private fun darkAccent(accent: AccentColor): Triple<Color, Color, Color> = when (accent) {
-    AccentColor.Green -> Triple(Color(0xFF2EE59D), Color(0xFF0F6B45), Color(0xFFB8FFDC))
+    AccentColor.Green -> Triple(Color(0xFF58F4CE), Color(0xFF10564B), Color(0xFFC3FFF1))
     AccentColor.Blue -> Triple(Color(0xFF7EB6FF), Color(0xFF1A3A66), Color(0xFFD6E6FF))
     AccentColor.Teal -> Triple(Color(0xFF4ADAD4), Color(0xFF0A524F), Color(0xFFB8FFFB))
     AccentColor.Amber -> Triple(Color(0xFFFFC44D), Color(0xFF6B4700), Color(0xFFFFE8B8))

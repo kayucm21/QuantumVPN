@@ -23,6 +23,7 @@ import subprocess
 import threading
 import time
 import zipfile
+import sys
 from collections import defaultdict, deque
 from email.parser import BytesParser
 from email.policy import default as email_default
@@ -31,6 +32,15 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
+
+# Optional, isolated WebAuthn wheels; never load code from uploaded resources.
+if os.path.isdir("/opt/quantumvpn-operator/deps"):
+    sys.path.insert(0, "/opt/quantumvpn-operator/deps")
+
+try:
+    import quantumvpn_community as community
+except ModuleNotFoundError:
+    from tools import quantumvpn_community as community
 
 try:  # Script deployment keeps both modules in the same directory.
     from quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, subscription_evidence, validate_backup
@@ -46,6 +56,16 @@ try:
     from quantumvpn_aurora import aurora_css, aurora_script
 except ModuleNotFoundError:
     from tools.quantumvpn_aurora import aurora_css, aurora_script
+
+try:
+    import quantumvpn_control_next as control_next
+except ModuleNotFoundError:
+    from tools import quantumvpn_control_next as control_next
+
+try:
+    import quantumvpn_durak as durak
+except ModuleNotFoundError:
+    from tools import quantumvpn_durak as durak
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -83,7 +103,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.0.0-aurora.1"
+PANEL_BUILD = "2.1.0-community.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -365,54 +385,16 @@ def card_game_name(value: str) -> str:
 
 
 def durak_new_game() -> dict:
-    """Create one compact, server-authoritative two-player Durak deal."""
-    deck = [rank + suit for suit in DURAK_SUITS for rank in DURAK_RANKS]
-    random.SystemRandom().shuffle(deck)
-    hands = {"host": [], "guest": []}
-    for _ in range(6):
-        hands["host"].append(deck.pop(0))
-        hands["guest"].append(deck.pop(0))
-    return {
-        "phase": "ready",
-        "ready": {"host": False, "guest": False},
-        "deck": deck,
-        "trump": deck[-1] if deck else "",
-        "hands": hands,
-        "attacker": "host",
-        "table": [],
-        "winner": "",
-    }
+    """Compatibility entry point; all rules live in the tested pure engine."""
+    return durak.new_game()
 
 
 def durak_rank(card: str) -> str:
-    return card[:-1] if len(card) >= 2 else ""
+    return durak.rank(card)
 
 
 def durak_beats(defense: str, attack: str, trump: str) -> bool:
-    if len(defense) < 2 or len(attack) < 2 or len(trump) < 2:
-        return False
-    defense_suit, attack_suit, trump_suit = defense[-1], attack[-1], trump[-1]
-    if defense_suit == attack_suit:
-        return _DURAK_RANK_VALUE.get(durak_rank(defense), -1) > _DURAK_RANK_VALUE.get(durak_rank(attack), -1)
-    return defense_suit == trump_suit and attack_suit != trump_suit
-
-
-def durak_draw(game: dict, seat: str) -> None:
-    hand = game["hands"][seat]
-    while len(hand) < 6 and game["deck"]:
-        hand.append(game["deck"].pop(0))
-
-
-def durak_finish_if_needed(game: dict) -> str:
-    if game["deck"]:
-        return ""
-    empty = [seat for seat in ("host", "guest") if not game["hands"].get(seat)]
-    if not empty:
-        return ""
-    winner = "guest" if empty[0] == "host" else "host"
-    game["phase"] = "finished"
-    game["winner"] = winner
-    return winner
+    return durak.beats(defense, attack, trump)
 
 
 def totp_secret_b32() -> str:
@@ -795,6 +777,8 @@ def conn():
                     "insert into admin_users(username,password_hash,role,enabled,created_at,updated_at) values (?,?,?,?,?,?)",
                     (USER, password_hash(PASSWORD), "owner", 1, now, now),
                 )
+            community.migrate(db)
+            control_next.migrate(db)
             _DB_READY = True
         if now - _LAST_EVENT_CLEANUP >= 3600:
             db.execute("delete from events where ts < ?", (now - 14 * 86400,))
@@ -802,6 +786,7 @@ def conn():
             db.execute("delete from server_health where ts < ?", (now - 7 * 86400,))
             db.execute("delete from delivery_evidence where max(policy_at,update_at) < ?", (now - 90 * 86400,))
             db.execute("delete from ai_observations where ts < ?", (now - 30 * 86400,))
+            community.cleanup(db, now)
             _LAST_EVENT_CLEANUP = now
         db.commit()
     return db
@@ -812,8 +797,22 @@ def settings(db):
 
 
 def set_settings(db, values: dict):
+    policy_change = bool(set(values) & {"maintenance", "maintenance_schedule_enabled", "maintenance_start", "maintenance_end", "app_version", "app_version_code"})
+    before = settings(db) if policy_change else None
     for k, v in values.items():
         db.execute("insert or replace into settings values (?,?)", (k, str(v)))
+    if before is not None:
+        after = dict(before, **{k: str(v) for k, v in values.items()})
+        if effective_maintenance(before) != effective_maintenance(after):
+            active = effective_maintenance(after)
+            kind = "maintenance" if active else "recovery"
+            community.append_event(db, kind, "Технические работы" if active else "Сервис восстановлен",
+                after.get("maintenance_message", "") if active else "Работы завершены. Можно снова подключаться к VPN.",
+                f"{kind}:{time.time_ns()}")
+        if after.get("app_version_code") != before.get("app_version_code"):
+            community.append_event(db, "release", "Обновление QuantumVPN " + after.get("app_version", ""),
+                after.get("app_changelog", "Доступна новая версия приложения."),
+                "release:" + after.get("app_version_code", ""))
 
 
 def enabled(s, key, default=True):
@@ -884,6 +883,51 @@ def subscription_inspection_headers() -> tuple[dict, str]:
     return headers, source
 
 
+def admitted_subscription_text(raw: bytes) -> str | None:
+    """Recognize whole profile bodies, never links embedded in an error page.
+
+    Upstream authorization remains authoritative. This format check prevents a
+    redirect/login HTML response from becoming a reserve-only subscription or
+    a credential issuer just because its text contains ``://``.
+    """
+    if not raw or len(raw) > 4 * 1024 * 1024:
+        return None
+    try:
+        text = raw.decode("utf-8").strip()
+        if not text.startswith(("{", "[")) and "://" not in text:
+            compact = re.sub(r"\s+", "", text)
+            text = base64.b64decode(compact + "=" * (-len(compact) % 4), validate=True).decode("utf-8").strip()
+    except (ValueError, UnicodeError):
+        return None
+    if not text or "<" in text or ">" in text:
+        return None
+    schemes = {"vless", "vmess", "trojan", "hysteria", "hysteria2", "hy2",
+               "ss", "ssr", "tuic", "wireguard", "wg", "amneziawg", "awg", "socks", "socks5"}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if lines and all(re.fullmatch(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+", line)
+                     and line.split(":", 1)[0].lower() in schemes for line in lines):
+        return text
+    # Native JSON/WireGuard subscriptions are preserved, not mixed with URIs.
+    if text.startswith(("{", "[")):
+        try:
+            value = json.loads(text)
+            configurations = value if isinstance(value, list) else [value]
+            for config in configurations:
+                if not isinstance(config, dict):
+                    continue
+                for outbound in config.get("outbounds", []) + config.get("endpoints", []):
+                    if isinstance(outbound, dict) and str(outbound.get("type", outbound.get("protocol", ""))).lower() in schemes | {"shadowsocks"}:
+                        return text
+        except (ValueError, TypeError):
+            pass
+    if (re.search(r"(?im)^\s*\[Interface\]\s*$", text)
+            and re.search(r"(?im)^\s*\[Peer\]\s*$", text)
+            and all(re.search(r"(?im)^\s*" + key + r"\s*=\s*\S+", text)
+                    for key in ("PrivateKey", "PublicKey", "Endpoint"))):
+        return text
+    return None
+
+
 def managed_subscription(upstream_headers, s: dict) -> tuple[bytes, bool]:
     """Fetch the authenticated upstream subscription and append verified reserve.
 
@@ -897,16 +941,10 @@ def managed_subscription(upstream_headers, s: dict) -> tuple[bytes, bool]:
         if value:
             forwarded[key] = value[:256]
     with urlopen(Request(UPSTREAM, headers=forwarded), timeout=20) as response:
-        raw = response.read(4 * 1024 * 1024)
-    text = raw.decode("utf-8", "replace").strip()
-    if "://" not in text:
-        compact = re.sub(r"\s+", "", text)
-        try:
-            text = base64.b64decode(compact + "=" * (-len(compact) % 4), validate=True).decode("utf-8", "replace").strip()
-        except Exception:
-            # Upstream changed format or returned an error page.  Return it as-is
-            # rather than manufacturing a partial subscription.
-            return raw, False
+        raw = response.read(4 * 1024 * 1024 + 1)
+    text = admitted_subscription_text(raw)
+    if text is None or text.startswith(("{", "[")):
+        return raw, False
 
     reserve = reserve_profile_uri() if enabled(s, "reserve_profile_enabled", True) else ""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -2242,6 +2280,15 @@ def scheduled_release_worker():
         try:
             db = conn()
             promote_scheduled_release(db)
+            current = settings(db)
+            # Opt-in only. A broad recent client sample may stop further APK
+            # issuance, never active VPN sessions or the publication schedule.
+            if enabled(current, "release_guard_enabled", False) and not enabled(current, "update_rollout_paused", False):
+                evidence = control_next.dashboard_snapshot(db, current)
+                if evidence["guard"]["pause_recommended"]:
+                    decision = control_next.pause_rollout(db, current, "release-guard", "owner")
+                    audit(db, "release-guard", "", "release:pause_evidence", {"devices": decision["devices"], "bad_devices": decision["bad_devices"]})
+                    db.commit()
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             moment = int(time.time())
@@ -2968,11 +3015,26 @@ def render_login(error=""):
       <label>Пароль<input type=password name=password autocomplete=current-password required></label>
       <label>Код 2FA (если включён)<input name=totp inputmode=numeric autocomplete=one-time-code placeholder=000000></label>
       <button>Войти</button>
-    </form></section></main>{aurora_script()}</body></html>"""
+      <button type=button class=secondary data-passkey=authenticate {'disabled' if not control_next.passkey_available() else ''}>Войти с passkey</button>
+      <p id=passkey-status class=muted>Пароль и код 2FA остаются доступны для восстановления входа.</p>
+    </form></section></main>{aurora_script()}{control_next.passkey_script()}</body></html>"""
 
 
-def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None):
+def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None, actor_user="", control_csrf=""):
     checked = lambda key: "checked" if s.get(key) == "1" else ""
+    next_quality_html = next_history_html = passkey_html = ""
+    if section in {"quality", "release", "security", "admins"}:
+        control_db = conn()
+        try:
+            if section in {"quality", "release"}:
+                next_quality_html = control_next.render_dashboard(control_next.dashboard_snapshot(control_db, s))
+                if role_at_least(actor_role, "operator"):
+                    next_history_html = control_next.render_history(control_next.config_history(control_db), control_csrf)
+            if section in {"security", "admins"}:
+                passkey_html = control_next.render_passkeys(control_next.passkey_list(control_db, actor_user), actor_user, control_csrf)
+        finally:
+            control_db.close()
+    next_guard_html = control_next.render_guard_form(s, control_csrf) if section == "release" and actor_role == "owner" else ""
     # Keep an operator draft local to the panel.  The client receives only a
     # signed production/staging revision, never this data.
     routing_form_state = dict(s)
@@ -3116,6 +3178,9 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
             "select id,created_at,updated_at,closed_at,source,device,subject,body,admin_note "
             "from support_tickets order by closed_at asc, updated_at desc limit 120"
         ).fetchall()]
+        community_support_html = control_next.render_support(
+            community.operator_threads(monitor_db)["threads"], can_write=role_at_least(actor_role, "operator"), csrf=control_csrf
+        ) if section == "support" else ""
         quality_html = render_quality(quality_snapshot(monitor_db, s, ROSPANEL_DB), s) if section == "quality" else ""
         resources_html = resources.render(monitor_db) if section == "resources" else ""
     finally:
@@ -3336,6 +3401,8 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>Aurora 2.0</small></header>
     {subnavigation}
     {quality_html}
+    <section {show('quality')}>{next_quality_html}{next_history_html}</section>
+    <section {show('release')}>{next_quality_html}{next_guard_html}{next_history_html}</section>
     {resources_html}
 
     <section class="dashboard" {show('dashboard')}>
@@ -3781,6 +3848,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <section class=card>
         <div class=section-head><h2>Очередь поддержки</h2><span class="badge {'warn' if support_open else 'ok'}">{support_open} открыто</span></div>
         <table><thead><tr><th>#</th><th>Статус</th><th>Тема</th><th>Источник</th><th>Изменено</th><th></th></tr></thead><tbody>{support_html}</tbody></table>
+        {community_support_html}
       </section>
     </section>
 
@@ -3803,6 +3871,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </section>
     </section>
 
+    <section {show('security')}>{passkey_html}</section>
     <section class=grid {show('security')}>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=security>
         <h2>Безопасность панели</h2>
@@ -3827,6 +3896,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </form>
     </section>
 
+    <section {show('admins')}>{passkey_html}</section>
     <section class=grid {show('admins')}>
       <form class=card method=post action=/operator/admins>
         <h2>Роли администраторов</h2>
@@ -3913,7 +3983,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       window.addEventListener('pagehide', () => clearInterval(timer), {{once:true}});
     }}
     </script>
-    {aurora_script()}</main></body></html>"""
+    {aurora_script()}{control_next.passkey_script()}</main></body></html>"""
 
 
 class App(BaseHTTPRequestHandler):
@@ -3958,6 +4028,151 @@ class App(BaseHTTPRequestHandler):
             (device_id(raw), version_code, int(time.time())),
         )
         db.commit()
+
+    def control_binding(self, adm=None):
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        morsel = cookie.get(SESSION_COOKIE)
+        if morsel and self.cookie_session():
+            return hashlib.sha256(morsel.value.encode()).hexdigest()
+        if adm and adm.get("basic"):
+            # Compatibility for authenticated owner/operator CLI usage; the
+            # confirmation still requires exact origin and its rendered CSRF.
+            return hashlib.sha256((self.headers.get("Authorization", "") + ":" + adm["user"]).encode()).hexdigest()
+        raise PermissionError("Нужна действующая сессия панели")
+
+    def control_csrf(self, adm):
+        return control_next.csrf_token(session_secret(), self.control_binding(adm))
+
+    def control_preview_page(self, preview, adm):
+        body = control_next.render_preview(preview, self.control_csrf(adm))
+        return self.reply(200, "<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Проверка изменений</title><style>" + css() + control_reference_css() + aurora_css() + "</style><body class=aurora-panel><main style='max-width:1000px;margin:24px auto;padding:16px'>" + body + "</main></body></html>", "text/html; charset=utf-8")
+
+    def control_apply_values(self, db, values, scope, actor, ip):
+        live = settings(db)
+        values = dict(values)
+        if scope == "routing":
+            candidate = dict(live)
+            candidate.update(values)
+            # Revalidate through the actual APK policy generator, not a raw
+            # native config. Keep revisions monotonically increasing on rollback.
+            validated = routing_settings_from_payload(routing_payload(candidate))
+            revision = max(1, int(live.get("routing_revision", "1") or 1))
+            if not db.execute("select 1 from routing_revisions where revision=? and state='production'", (revision,)).fetchone():
+                record_routing_revision(db, revision, "system", "production", routing_payload(live), "До подтверждённого изменения")
+            next_revision = revision + 1
+            values.update(validated)
+            values.update({"routing_revision": str(next_revision), "routing_staging_enabled": "0", "routing_staging_revision": "0",
+                           "routing_staging_payload": "{}", "routing_draft_payload": "{}", "routing_draft_updated_at": "0"})
+            record_routing_revision(db, next_revision, actor, "production", routing_payload(candidate, next_revision), "Подтверждено после просмотра")
+        values["config_revision"] = str(int(live.get("config_revision", "1") or 1) + 1)
+        set_settings(db, values)
+        audit(db, actor, ip, "control:apply:" + scope, {"fields": sorted(key for key in values if key in control_next.SCOPES[scope])})
+
+    def control_post(self, db, s, path, adm):
+        actor, ip = adm["user"], adm["ip"]
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 256 * 1024:
+                self.close_connection = True
+                return self.reply(413, "Запрос слишком большой", "text/plain; charset=utf-8")
+            form = parse_qs(self.rfile.read(length).decode("utf-8"))
+            expected_origin, _ = control_next.public_origin(PUBLIC_BASE)
+            if (self.headers.get("Origin", "") != expected_origin
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                    or not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0])):
+                return self.reply(403, "Неверное подтверждение запроса. Обновите страницу панели", "text/plain; charset=utf-8")
+            current = settings(db)
+            role = adm.get("role", "viewer")
+            if path == "/operator/control/preview":
+                scope = form.get("scope", [""])[0]
+                if scope not in control_next.SCOPES:
+                    raise ValueError("Неизвестный раздел")
+                candidate = {key: form[key][0] for key in control_next.SCOPES[scope] if key in form}
+                if scope == "release":
+                    for key in control_next.BOOL_KEYS & control_next.SCOPES[scope]:
+                        candidate[key] = "1" if key in form else "0"
+                preview = control_next.preview_settings(db, current, candidate, actor, scope, role)
+            elif path == "/operator/control/rollback":
+                preview = control_next.rollback_preview(db, int(form.get("snapshot_id", ["0"])[0]), current, actor, role)
+            elif path == "/operator/control/apply":
+                result = control_next.apply_preview(db, form.get("preview_id", [""])[0], form.get("digest", [""])[0], current, actor, role,
+                    lambda tx, values, scope: self.control_apply_values(tx, values, scope, actor, ip))
+                db.commit()
+                return self.redirect_operator({"routing": "routing", "nodes": "latency", "release": "release"}[result["scope"]], "Изменения подтверждены. Предыдущая конфигурация сохранена")
+            else:
+                return self.reply(404, "Not found", "text/plain")
+            db.commit()
+            return self.control_preview_page(preview, adm)
+        except PermissionError:
+            db.rollback()
+            return self.reply(403, "Недостаточно прав или сессия истекла", "text/plain; charset=utf-8")
+        except (ValueError, TypeError, UnicodeError) as error:
+            db.rollback()
+            return self.redirect_operator("quality", "Не применено: " + str(error)[:180])
+
+    def passkey_post(self, db, s, path):
+        ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
+        if not ip_allowed(ip, s) or rate_limited("passkey:" + ip, 10):
+            return self.reply(429, '{"message":"Вход временно недоступен"}')
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 66_000:
+                self.close_connection = True
+                return self.reply(413, '{"message":"Некорректный размер запроса"}')
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, dict) or not control_next.secure_json_request(self.headers, PUBLIC_BASE):
+                return self.reply(403, '{"message":"Неверный origin или формат запроса"}')
+            manager = control_next.WebAuthnManager(PUBLIC_BASE)
+            if not control_next.passkey_available():
+                return self.reply(503, '{"message":"Passkey временно недоступен. Используйте пароль и 2FA"}')
+            cookie_headers = {}
+            if path.startswith("/operator/passkey/authenticate/"):
+                cookie = SimpleCookie(self.headers.get("Cookie", ""))
+                preauth = cookie.get("qv_passkey_preauth")
+                data = verify_session(preauth.value) if preauth else None
+                if path.endswith("/begin"):
+                    binding = secrets.token_urlsafe(32)
+                    token = sign_session({"scope": "passkey-preauth", "n": binding, "exp": int(time.time()) + control_next.PASSKEY_TTL})
+                    cookie_headers["Set-Cookie"] = f"qv_passkey_preauth={token}; Path=/operator/passkey; Max-Age={control_next.PASSKEY_TTL}; HttpOnly; Secure; SameSite=Strict"
+                    result = manager.begin_authentication(db, str(payload.get("username") or "")[:64], binding)
+                elif path.endswith("/finish"):
+                    if not data or data.get("scope") != "passkey-preauth":
+                        raise PermissionError("Время входа истекло. Повторите попытку")
+                    identity = manager.finish_authentication(db, data.get("n", ""), payload.get("ceremony_id", ""), payload.get("credential"))
+                    token = sign_session({"u": identity["username"], "role": identity["role"], "exp": int(time.time()) + SESSION_TTL, "n": secrets.token_hex(16)})
+                    cookie_headers["Set-Cookie"] = f"{SESSION_COOKIE}={token}; Path=/; Max-Age={SESSION_TTL}; HttpOnly; Secure; SameSite=Strict"
+                    result = {"authenticated": True}
+                    audit(db, identity["username"], ip, "passkey:login", {"role": identity["role"]})
+                else:
+                    return self.reply(404, '{"message":"Not found"}')
+            else:
+                adm = self.admin(require_login_page=False)
+                if not adm:
+                    return
+                if not self.cookie_session() or not control_next.secure_json_request(self.headers, PUBLIC_BASE, self.control_csrf(adm)):
+                    return self.reply(403, '{"message":"Для ключей нужна браузерная сессия и подтверждение запроса"}')
+                username, binding = adm["user"], self.control_binding(adm)
+                if path.endswith("/begin") or path == "/operator/passkey/revoke":
+                    identity = authenticate_admin(db, username, str(payload.get("password") or ""))
+                    if (not identity or (enabled(s, "totp_enabled", False) and not totp_ok(s.get("totp_secret", ""), str(payload.get("totp") or "")))):
+                        raise PermissionError("Подтвердите текущий пароль и корректный код 2FA")
+                if path == "/operator/passkey/register/begin":
+                    result = manager.begin_registration(db, username, binding, reauthenticated=True)
+                elif path == "/operator/passkey/register/finish":
+                    result = manager.finish_registration(db, username, binding, payload.get("ceremony_id", ""), payload.get("credential"), payload.get("label", "Мой passkey"))
+                    audit(db, username, ip, "passkey:register", {"ok": True})
+                elif path == "/operator/passkey/revoke":
+                    result = control_next.revoke_passkey(db, username, payload.get("credential_id", ""), reauthenticated=True)
+                    audit(db, username, ip, "passkey:revoke", {"ok": True})
+                else:
+                    return self.reply(404, '{"message":"Not found"}')
+            db.commit()
+            return self.reply(200, json.dumps(result, ensure_ascii=False), headers=cookie_headers)
+        except (ValueError, PermissionError, TypeError, UnicodeError):
+            # Challenges remain one-use after a failed assertion. Never include
+            # raw credential JSON, clientData or the underlying crypto error.
+            db.commit()
+            return self.reply(400, '{"message":"Passkey не подтверждён или время истекло. Повторите попытку; пароль и 2FA доступны"}')
 
     def same_origin_request(self):
         """Accept the panel's real public origin behind an HTTPS reverse proxy.
@@ -4047,6 +4262,82 @@ class App(BaseHTTPRequestHandler):
         db.execute("create index if not exists idx_donations_ts on donations(ts)")
         db.execute("create index if not exists idx_donations_device on donations(device)")
 
+    def read_community_json(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise community.CommunityError("invalid_request_length")
+        if not 0 < length <= community.MAX_REQUEST_BYTES:
+            self.close_connection = True
+            raise community.CommunityError("request_too_large", 413)
+        if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
+            raise community.CommunityError("json_required", 415)
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeError):
+            raise community.CommunityError("invalid_json")
+        if not isinstance(payload, dict):
+            raise community.CommunityError("json_object_required")
+        return payload
+
+    def community_client(self, db):
+        # X-Device-Id is intentionally insufficient: only an admitted HWID and
+        # a privately issued credential can read or mutate client records.
+        return community.authenticate_client(
+            db, self.headers.get("X-HWID", ""),
+            self.headers.get(community.TOKEN_HEADER, ""),
+        )
+
+    def community_get(self, db, path, query):
+        try:
+            identity = self.community_client(db)
+            tail = path.removeprefix("/api/client/community")
+            if tail == "/support":
+                payload = community.list_threads(db, identity)
+            elif re.fullmatch(r"/support/[1-9][0-9]{0,18}", tail):
+                payload = community.get_thread(db, identity, int(tail.rsplit("/", 1)[1]))
+            elif tail == "/inbox":
+                after = int(query.get("after", ["0"])[0])
+                limit = int(query.get("limit", ["30"])[0])
+                if not 0 <= after < 2**63 or not 1 <= limit <= 50:
+                    raise community.CommunityError("invalid_cursor")
+                payload = community.inbox(db, identity, after, limit)
+            else:
+                return self.reply(404, '{"error":"not_found"}')
+            return self.reply(200, json.dumps(payload, ensure_ascii=False))
+        except community.CommunityError as exc:
+            return self.reply(exc.status, json.dumps({"error": exc.code}))
+        except ValueError:
+            return self.reply(400, '{"error":"invalid_request"}')
+
+    def community_post(self, db, path):
+        try:
+            identity = self.community_client(db)
+            payload = self.read_community_json()
+            tail = path.removeprefix("/api/client/community")
+            db.execute("begin immediate")
+            if tail == "/support":
+                result = community.create_thread(db, identity, payload)
+            elif re.fullmatch(r"/support/[1-9][0-9]{0,18}/messages", tail):
+                result = community.add_message(db, identity, int(tail.split("/")[2]), payload)
+            elif tail == "/inbox/read":
+                result = community.mark_read(db, identity, payload.get("event_id"))
+            elif tail == "/quality":
+                result = community.record_quality(db, identity, payload)
+            elif tail == "/delivery":
+                result = community.record_delivery(db, identity, payload)
+            else:
+                db.rollback()
+                return self.reply(404, '{"error":"not_found"}')
+            db.commit()
+            return self.reply(200, json.dumps(result, ensure_ascii=False))
+        except community.CommunityError as exc:
+            db.rollback()
+            return self.reply(exc.status, json.dumps({"error": exc.code}))
+        except ValueError:
+            db.rollback()
+            return self.reply(400, '{"error":"invalid_request"}')
+
     def card_game_payload(self, db, device: str, table_id: str):
         """Return only the caller's own state; the opponent hand never leaves the server."""
         row = db.execute(
@@ -4068,23 +4359,22 @@ class App(BaseHTTPRequestHandler):
             (device,),
         ).fetchone()
         try:
+            if len(row[9] or "") > 65_536:
+                raise ValueError("Oversized stored card state")
             game = json.loads(row[9] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             game = {}
-        phase = str(game.get("phase") or ("ready" if state == "ready" else "waiting"))
-        table_cards = game.get("table") if isinstance(game.get("table"), list) else []
-        hand = game.get("hands", {}).get(seat, []) if isinstance(game.get("hands"), dict) else []
-        if not isinstance(hand, list):
-            hand = []
-        attacker = str(game.get("attacker") or "host")
-        defender = "guest" if attacker == "host" else "host"
-        all_defended = bool(table_cards) and all(isinstance(item, dict) and item.get("defense") for item in table_cards)
-        ready_flags = game.get("ready") if isinstance(game.get("ready"), dict) else {}
+        if not isinstance(game, dict):
+            game = {}
+        # Only an actual waiting lobby may have no deal. A corrupt ready/playing
+        # row must not look like a new lobby; preserve its stored pot for review.
+        view = durak.public_view(game if game or state == "waiting" else {"phase": "unavailable"}, seat)
         try:
             stake = max(0, min(100_000, int(game.get("stake_q_coins") or 0)))
         except (TypeError, ValueError):
             stake = 0
-        winner_reward = stake * 2 if phase == "finished" and game.get("stake_settled") else 0
+        settled = view["game_phase"] == "finished" and game.get("stake_settled") is True
+        winner_reward = stake * 2 if settled and view["winner"] in durak.SEATS else 0
         return {
             "table_id": row[0],
             "state": state,
@@ -4098,28 +4388,8 @@ class App(BaseHTTPRequestHandler):
             "q_coins": max(0, int(wallet[0] or 0)) if wallet else 0,
             "stake_q_coins": stake,
             "winner_reward_q_coins": winner_reward,
-            "game_phase": phase,
-            "hand": [str(card) for card in hand if re.fullmatch(r"(?:10|[6-9JQKA])[SHDC]", str(card))],
-            "opponent_cards": len(game.get("hands", {}).get("guest" if seat == "host" else "host", [])) if isinstance(game.get("hands"), dict) else 0,
-            "table_cards": [
-                {"attack": str(item.get("attack") or ""), "defense": str(item.get("defense") or "")}
-                for item in table_cards if isinstance(item, dict)
-            ],
-            "trump": str(game.get("trump") or ""),
-            "deck_count": len(game.get("deck", [])) if isinstance(game.get("deck"), list) else 0,
-            "attacker": attacker,
-            "winner": str(game.get("winner") or ""),
-            "can_ready": phase == "ready" and not bool(ready_flags.get(seat)),
-            "can_attack": phase == "playing" and seat == attacker,
-            "can_defend": phase == "playing" and seat == defender and any(not item.get("defense") for item in table_cards if isinstance(item, dict)),
-            "can_take": phase == "playing" and seat == defender and bool(table_cards),
-            "can_pass": phase == "playing" and seat == attacker and all_defended,
-            "message": (
-                "Ожидаем второго игрока…" if state == "waiting"
-                else "Игрок подключился. Подтвердите готовность к раздаче." if phase == "ready"
-                else "Раздача началась." if phase == "playing"
-                else "Партия завершена."
-            ),
+            "stake_refund_q_coins": stake if settled and view["winner"] == "draw" else 0,
+            **view,
         }
 
     def join_card_game(self, db, s, device: str, ip: str, access_code: str, display_name: str):
@@ -4189,10 +4459,12 @@ class App(BaseHTTPRequestHandler):
         payload["ticket"] = card_game_ticket(device, table_id)
         return payload
 
-    def card_game_action(self, db, s: dict, device: str, table_id: str, action: str, card: str = ""):
-        """Apply one legal Durak action under a short SQLite write transaction."""
-        if action not in ("ready", "attack", "defend", "take", "pass"):
-            raise ValueError("Неизвестное действие игры")
+    def card_game_action(self, db, s: dict, device: str, table_id: str, action: str, card: str = "",
+                         target: int | None = None, expected_revision: int | None = None,
+                         action_id: str = ""):
+        """Persist cards and a virtual pot atomically; retries cannot replay either."""
+        if not enabled(s, "card_game_enabled", True):
+            raise PermissionError("Карточный стол временно отключён оператором")
         now = int(time.time())
         db.execute("begin immediate")
         try:
@@ -4204,112 +4476,53 @@ class App(BaseHTTPRequestHandler):
                 raise PermissionError("Стол недоступен")
             seat = "host" if device == row[1] else "guest"
             try:
+                if len(row[3] or "") > 65_536:
+                    raise ValueError("Oversized stored card state")
                 game = json.loads(row[3] or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
                 game = {}
-            if not game or not isinstance(game.get("hands"), dict):
-                raise ValueError("Раздача ещё не готова")
-            phase = str(game.get("phase") or "ready")
-            last_action = ""
-            if action == "ready":
-                if phase != "ready":
-                    raise ValueError("Готовность уже подтверждена")
-                ready = game.setdefault("ready", {"host": False, "guest": False})
-                ready[seat] = True
-                if ready.get("host") and ready.get("guest"):
-                    stake = max(0, min(100_000, int(s.get("card_game_stake_q_coins") or 25)))
-                    # Charge each player exactly once at the point a deal
-                    # begins.  The game JSON is transactional state, so a
-                    # retry or restart cannot create a duplicate pot.
-                    if not game.get("stake_settled") and "stake_q_coins" not in game:
-                        balances = {
-                            item[0]: max(0, int(item[1] or 0))
-                            for item in db.execute(
-                                "select device,q_coins from card_wallets where device in (?,?)",
-                                (row[1], row[2]),
-                            )
-                        }
-                        if balances.get(row[1], 0) < stake or balances.get(row[2], 0) < stake:
-                            raise ValueError("Для начала партии каждому игроку нужно достаточно виртуальных Q-coins")
-                        if stake:
-                            db.execute(
-                                "update card_wallets set q_coins=q_coins-?, updated_at=? where device in (?,?)",
-                                (stake, now, row[1], row[2]),
-                            )
-                        game["stake_q_coins"] = stake
-                        game["stake_settled"] = False
-                    game["phase"] = "playing"
-                    state = "playing"
-                    last_action = f"Раздача началась · банк {stake * 2} Q-coins"
+            result = durak.apply_action(game, seat, action, card, target, expected_revision, action_id)
+            game, last_action = result.game, result.message
+            if result.started and "stake_q_coins" not in game:
+                stake = max(0, min(100_000, int(s.get("card_game_stake_q_coins") or 25)))
+                balances = {
+                    item[0]: max(0, int(item[1] or 0))
+                    for item in db.execute("select device,q_coins from card_wallets where device in (?,?)",
+                                           (row[1], row[2]))
+                }
+                if balances.get(row[1], 0) < stake or balances.get(row[2], 0) < stake:
+                    raise ValueError("Для начала партии каждому игроку нужно достаточно виртуальных Q-coins")
+                if stake:
+                    charged = db.execute(
+                        "update card_wallets set q_coins=q_coins-?,updated_at=? "
+                        "where device in (?,?) and q_coins>=?",
+                        (stake, now, row[1], row[2], stake),
+                    )
+                    if charged.rowcount != 2:
+                        raise ValueError("Виртуальный банк изменился. Повторите готовность")
+                game["stake_q_coins"], game["stake_settled"] = stake, False
+                last_action = f"Раздача началась · банк {stake * 2} Q-coins"
+            # Settlement only follows a newly completed bout, never a retry,
+            # read, stale click or legacy finished state with an old outcome.
+            if result.bout_completed and result.finished and not game.get("stake_settled"):
+                stake = max(0, min(100_000, int(game.get("stake_q_coins") or 0)))
+                if game["winner"] == "draw":
+                    if stake:
+                        db.execute("update card_wallets set q_coins=q_coins+?,updated_at=? where device in (?,?)",
+                                   (stake, now, row[1], row[2]))
+                    last_action = "Ничья: виртуальные ставки возвращены обоим игрокам"
                 else:
-                    state = "ready"
-                    last_action = f"{seat} готов к раздаче"
-            elif phase != "playing":
-                raise ValueError("Сначала оба игрока должны подтвердить готовность")
-            else:
-                attacker = str(game.get("attacker") or "host")
-                defender = "guest" if attacker == "host" else "host"
-                table = game.setdefault("table", [])
-                hand = game["hands"].setdefault(seat, [])
-                if action in ("attack", "defend"):
-                    if not re.fullmatch(r"(?:10|[6-9JQKA])[SHDC]", card) or card not in hand:
-                        raise ValueError("Эта карта недоступна")
-                if action == "attack":
-                    if seat != attacker:
-                        raise ValueError("Сейчас ход атакующего")
-                    ranks = {durak_rank(str(item.get("attack") or "")) for item in table if isinstance(item, dict)}
-                    ranks.update(durak_rank(str(item.get("defense") or "")) for item in table if isinstance(item, dict) and item.get("defense"))
-                    if ranks and durak_rank(card) not in ranks:
-                        raise ValueError("Добавить можно только карту совпадающего достоинства")
-                    if len(table) >= min(6, len(game["hands"].get(defender, []))):
-                        raise ValueError("Больше атакующих карт добавить нельзя")
-                    hand.remove(card)
-                    table.append({"attack": card, "defense": ""})
-                    state, last_action = "playing", "Атака"
-                elif action == "defend":
-                    if seat != defender:
-                        raise ValueError("Сейчас ход защищающегося")
-                    target = next((item for item in table if isinstance(item, dict) and not item.get("defense")), None)
-                    if not target or not durak_beats(card, str(target.get("attack") or ""), str(game.get("trump") or "")):
-                        raise ValueError("Эта карта не бьёт атаку")
-                    hand.remove(card)
-                    target["defense"] = card
-                    state, last_action = "Карта отбита"
-                elif action == "take":
-                    if seat != defender or not table:
-                        raise ValueError("Взять карты может только защищающийся")
-                    for item in table:
-                        if isinstance(item, dict):
-                            hand.extend([value for value in (item.get("attack"), item.get("defense")) if value])
-                    game["table"] = []
-                    durak_draw(game, attacker)
-                    durak_draw(game, defender)
-                    state, last_action = "Защищающийся взял карты"
-                elif action == "pass":
-                    if seat != attacker or not table or not all(isinstance(item, dict) and item.get("defense") for item in table):
-                        raise ValueError("Передать ход можно только после полной защиты")
-                    game["table"] = []
-                    durak_draw(game, attacker)
-                    durak_draw(game, defender)
-                    game["attacker"] = defender
-                    state, last_action = "Ход передан"
-                winner = durak_finish_if_needed(game)
-                if winner:
-                    state = "finished"
-                    winner_device = row[1] if winner == "host" else row[2]
-                    stake = max(0, min(100_000, int(game.get("stake_q_coins") or 0)))
-                    if not game.get("stake_settled"):
-                        if stake:
-                            db.execute(
-                                "update card_wallets set q_coins=q_coins+?, updated_at=? where device=?",
-                                (stake * 2, now, winner_device),
-                            )
-                        game["stake_settled"] = True
+                    winner_device = row[1] if game["winner"] == "host" else row[2]
+                    if stake:
+                        db.execute("update card_wallets set q_coins=q_coins+?,updated_at=? where device=?",
+                                   (stake * 2, now, winner_device))
                     last_action = f"Партия завершена: банк {stake * 2} Q-coins переведён победителю"
-            db.execute(
-                "update card_tables set state=?,updated_at=?,last_action=?,game_json=? where id=?",
-                (state, now, last_action, json.dumps(game, separators=(",", ":")), table_id),
-            )
+                game["stake_settled"] = True
+            if result.changed:
+                db.execute(
+                    "update card_tables set state=?,updated_at=?,last_action=?,game_json=? where id=?",
+                    (result.state, now, last_action, json.dumps(game, separators=(",", ":")), table_id),
+                )
             db.commit()
         except Exception:
             db.rollback()
@@ -4550,6 +4763,9 @@ class App(BaseHTTPRequestHandler):
             if rate_limited(ip, limit):
                 return self.reply(429, '{"error":"rate_limited"}')
 
+        if path.startswith("/api/client/community/"):
+            return self.community_get(db, path, query)
+
         if path.startswith("/api/client/update") or path.startswith("/api/app/version"):
             self.record_delivery_evidence(db, "update_at", query.get("current_version_code", ["0"])[0])
             channel = (query.get("channel", ["production"])[0] or "production").lower()
@@ -4564,6 +4780,9 @@ class App(BaseHTTPRequestHandler):
             info = dict(release_info(version, version_code, note, abi, stat.st_size, stat.st_mtime_ns))
             bucket = client_bucket(query.get("bucket", [None])[0])
             eligible = bucket is None or bucket < max(1, min(100, rollout))
+            rollout_paused = channel != "staging" and enabled(s, "update_rollout_paused", False)
+            if rollout_paused:
+                eligible = False
             # If client already has this or newer build, echo current so splash can finish
             # without auto-downloading an incompatible APK.
             try:
@@ -4581,9 +4800,10 @@ class App(BaseHTTPRequestHandler):
                     info["version_code"] = max(1, int(query.get("current_version_code", [version_code])[0]))
                 except Exception:
                     info["version_code"] = version_code
-                info["note"] = f"Постепенный выпуск {rollout}%: устройство пока остаётся на текущей версии."
+                info["note"] = "Дальнейшая раздача обновления временно приостановлена для проверки качества." if rollout_paused else f"Постепенный выпуск {rollout}%: устройство пока остаётся на текущей версии."
             info["rollout_percent"] = rollout
             info["rollout_eligible"] = eligible
+            info["rollout_paused"] = rollout_paused
             info["channel"] = channel
             return self.reply(200, json.dumps(info))
 
@@ -4792,12 +5012,16 @@ class App(BaseHTTPRequestHandler):
                     "reserve_profile=appended" if appended else "reserve_profile=not_appended",
                 ),
             )
+            response_headers = {"Content-Disposition": 'attachment; filename="quantumvpn-subscription.txt"'}
+            admitted_hwid = self.headers.get("X-HWID", "")
+            if admitted_hwid and len(admitted_hwid) <= 256 and report.get("protocols") and admitted_subscription_text(body) is not None:
+                response_headers[community.TOKEN_HEADER] = community.issue_device_credential(db, admitted_hwid)
             db.commit()
             return self.reply(
                 200,
                 body,
                 "text/plain; charset=utf-8",
-                {"Content-Disposition": 'attachment; filename="quantumvpn-subscription.txt"'},
+                response_headers,
             )
 
         if path == "/operator/logout":
@@ -4950,6 +5174,8 @@ class App(BaseHTTPRequestHandler):
                         q=q,
                         device=device,
                         actor_role=adm.get("role", "viewer"),
+                        actor_user=adm["user"],
+                        control_csrf=self.control_csrf(adm),
                     ),
                     "text/html; charset=utf-8",
                 )
@@ -4983,6 +5209,8 @@ class App(BaseHTTPRequestHandler):
                         donation_rows=donation_rows,
                         donation_totals=donation_totals,
                         actor_role=adm.get("role", "viewer"),
+                        actor_user=adm["user"],
+                        control_csrf=self.control_csrf(adm),
                     ),
                     "text/html; charset=utf-8",
                 )
@@ -5014,6 +5242,8 @@ class App(BaseHTTPRequestHandler):
                     device=None,
                     admin_rows=admin_rows,
                     actor_role=adm.get("role", "viewer"),
+                    actor_user=adm["user"],
+                    control_csrf=self.control_csrf(adm),
                     card_rows=card_rows,
                     card_wallet_rows=card_wallet_rows,
                 ),
@@ -5131,6 +5361,12 @@ class App(BaseHTTPRequestHandler):
         db = self.connection_db()
         s = settings(db)
 
+        if path.startswith("/api/client/community/"):
+            ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
+            if rate_limited(ip, int(s.get("rate_limit_per_min") or 120)):
+                return self.reply(429, '{"error":"rate_limited"}')
+            return self.community_post(db, path)
+
         if path == "/api/client/diagnostic":
             limit = int(s.get("rate_limit_per_min") or 120)
             ip = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
@@ -5214,8 +5450,14 @@ class App(BaseHTTPRequestHandler):
             if rate_limited(f"card-game-action:{ip}", max(12, min(60, int(s.get("rate_limit_per_min") or 120)))):
                 return self.reply(429, '{"error":"rate_limited"}')
             try:
-                size = min(int(self.headers.get("Content-Length", "0")), 4096)
+                size = int(self.headers.get("Content-Length", "0"))
+                if size > 4096:
+                    return self.reply(413, '{"error":"card_action_too_large"}')
+                if size <= 0:
+                    raise ValueError("Пустое действие игры")
                 payload = json.loads(self.rfile.read(size).decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("Неверный формат действия игры")
                 ticket_data = card_game_ticket_data(str(payload.get("ticket") or "")[:2048])
                 if not ticket_data:
                     return self.reply(401, '{"error":"invalid_game_ticket"}')
@@ -5229,14 +5471,22 @@ class App(BaseHTTPRequestHandler):
                     str(ticket_data.get("table") or ""),
                     str(payload.get("action") or ""),
                     str(payload.get("card") or ""),
+                    payload.get("target"),
+                    payload.get("expected_revision"),
+                    payload.get("action_id", ""),
                 )
                 return self.reply(200, json.dumps(result, ensure_ascii=False))
             except PermissionError as exc:
                 return self.reply(403, json.dumps({"error": "access_denied", "message": str(exc)}, ensure_ascii=False))
+            except durak.StaleStateError as exc:
+                return self.reply(409, json.dumps({"error": "stale_game_state", "message": str(exc)}, ensure_ascii=False))
             except ValueError as exc:
                 return self.reply(400, json.dumps({"error": "invalid_action", "message": str(exc)}, ensure_ascii=False))
             except Exception:
                 return self.reply(400, '{"error":"card_game_unavailable"}')
+
+        if path.startswith("/operator/passkey/"):
+            return self.passkey_post(db, s, path)
 
         if path.startswith("/operator/") and not self.same_origin_request():
             # Keep a redacted diagnostic in the service journal so reverse-proxy
@@ -5291,6 +5541,36 @@ class App(BaseHTTPRequestHandler):
         if not adm:
             return
         actor, ip = adm["user"], adm["ip"]
+
+        if path.startswith("/operator/control/"):
+            return self.control_post(db, s, path, adm)
+
+        if path in ("/operator/community/reply", "/operator/community/state"):
+            if not self.require_role(adm, "operator"):
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= community.MAX_REQUEST_BYTES:
+                    self.close_connection = True
+                    return self.reply(413, "Сообщение слишком большое", "text/plain; charset=utf-8")
+                form = parse_qs(self.rfile.read(length).decode("utf-8"))
+                expected_origin, _ = control_next.public_origin(PUBLIC_BASE)
+                if (self.headers.get("Origin", "") != expected_origin
+                        or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                        or not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0])):
+                    return self.reply(403, "Неверное подтверждение запроса. Обновите страницу панели", "text/plain; charset=utf-8")
+                thread_id = int(form.get("thread_id", ["0"])[0])
+                db.execute("begin immediate")
+                if path.endswith("/reply"):
+                    community.operator_reply(db, thread_id, form.get("body", [""])[0], form.get("request_id", [""])[0])
+                else:
+                    community.set_thread_state(db, thread_id, form.get("state", [""])[0])
+                audit(db, actor, ip, "community:" + path.rsplit("/", 1)[1], {"thread_id": thread_id})
+                db.commit()
+                return self.redirect_operator("support", "Обращение обновлено")
+            except (community.CommunityError, ValueError, UnicodeError):
+                db.rollback()
+                return self.redirect_operator("support", "Обращение не изменено. Проверьте сообщение и статус.")
         if not self.require_role(adm, "operator"):
             return
 
@@ -5464,70 +5744,18 @@ class App(BaseHTTPRequestHandler):
                         db.commit()
                         return self.redirect_operator("routing", f"Тестовый канал r{staged_revision}: {rollout}% устройств")
 
-                    # Preserve the first stable state too, so a just-published
-                    # policy can always be rolled back even after a migration.
-                    has_current = db.execute(
-                        "select 1 from routing_revisions where revision=? and state='production' limit 1",
-                        (current_revision,),
-                    ).fetchone()
-                    if not has_current:
-                        record_routing_revision(db, current_revision, "system", "production", routing_payload(s), "Базовая ревизия")
-                    next_revision = current_revision + 1
-                    next_payload = routing_payload(candidate_state, next_revision)
-                    values = dict(candidate_values)
-                    values.update({
-                        "routing_revision": str(next_revision),
-                        "routing_staging_enabled": "0",
-                        "routing_staging_revision": "0",
-                        "routing_staging_payload": "{}",
-                        "routing_draft_payload": "{}",
-                        "routing_draft_updated_at": "0",
-                        "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
-                    })
-                    set_settings(db, values)
-                    record_routing_revision(db, next_revision, actor, "production", next_payload, "Опубликовано")
-                    audit(db, actor, ip, "routing:publish", {"revision": next_revision, "sha256": hashlib.sha256(canonical_json(next_payload)).hexdigest()})
-                    db.execute(
-                        "insert into events values (?,?,?,?,?)",
-                        (int(time.time()), "routing_published", actor, ip, json.dumps({"revision": next_revision}, ensure_ascii=False)),
-                    )
+                    preview = control_next.preview_settings(db, settings(db), candidate_values, actor, "routing", adm.get("role", "viewer"))
                     db.commit()
-                    webhook_emit(settings(db), "routing.published", {"revision": next_revision, "actor": actor})
-                    return self.redirect_operator("routing", f"Маршрутизация r{next_revision} опубликована")
+                    return self.control_preview_page(preview, adm)
 
                 if action == "promote":
                     if not enabled(s, "routing_staging_enabled", False):
                         return self.redirect_operator("routing", "Нет тестового канала для публикации")
                     staged = json.loads(s.get("routing_staging_payload") or "{}")
                     staged_values = routing_settings_from_payload(staged)
-                    current_revision = max(1, int(s.get("routing_revision", "1") or 1))
-                    staged_revision = max(1, int(s.get("routing_staging_revision", "0") or 0))
-                    next_revision = max(current_revision + 1, staged_revision)
-                    has_current = db.execute(
-                        "select 1 from routing_revisions where revision=? and state='production' limit 1",
-                        (current_revision,),
-                    ).fetchone()
-                    if not has_current:
-                        record_routing_revision(db, current_revision, "system", "production", routing_payload(s), "Базовая ревизия")
-                    promoted_state = dict(s)
-                    promoted_state.update(staged_values)
-                    promoted_payload = routing_payload(promoted_state, next_revision)
-                    values = dict(staged_values)
-                    values.update({
-                        "routing_revision": str(next_revision),
-                        "routing_staging_enabled": "0",
-                        "routing_staging_revision": "0",
-                        "routing_staging_payload": "{}",
-                        "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
-                    })
-                    set_settings(db, values)
-                    record_routing_revision(db, next_revision, actor, "production", promoted_payload, "Опубликовано из тестового канала")
-                    audit(db, actor, ip, "routing:promote", {"revision": next_revision})
-                    db.execute("insert into events values (?,?,?,?,?)", (int(time.time()), "routing_promoted", actor, ip, json.dumps({"revision": next_revision}, ensure_ascii=False)))
+                    preview = control_next.preview_settings(db, settings(db), staged_values, actor, "routing", adm.get("role", "viewer"))
                     db.commit()
-                    webhook_emit(settings(db), "routing.promoted", {"revision": next_revision, "actor": actor})
-                    return self.redirect_operator("routing", f"Тестовая r{staged_revision} опубликована как r{next_revision}")
-
+                    return self.control_preview_page(preview, adm)
                 if action == "discard_stage":
                     set_settings(db, {
                         "routing_staging_enabled": "0",
@@ -5547,26 +5775,9 @@ class App(BaseHTTPRequestHandler):
                     if not row:
                         return self.redirect_operator("routing", "Ревизия для отката не найдена")
                     rollback_values = routing_settings_from_payload(json.loads(row[0]))
-                    current_revision = max(1, int(s.get("routing_revision", "1") or 1))
-                    next_revision = current_revision + 1
-                    rollback_state = dict(s)
-                    rollback_state.update(rollback_values)
-                    rollback_payload = routing_payload(rollback_state, next_revision)
-                    values = dict(rollback_values)
-                    values.update({
-                        "routing_revision": str(next_revision),
-                        "routing_staging_enabled": "0",
-                        "routing_staging_revision": "0",
-                        "routing_staging_payload": "{}",
-                        "config_revision": str(int(s.get("config_revision", "1") or 1) + 1),
-                    })
-                    set_settings(db, values)
-                    record_routing_revision(db, next_revision, actor, "production", rollback_payload, f"Откат к r{target_revision}")
-                    audit(db, actor, ip, "routing:rollback", {"from": current_revision, "target": target_revision, "revision": next_revision})
-                    db.execute("insert into events values (?,?,?,?,?)", (int(time.time()), "routing_rollback", actor, ip, json.dumps({"from": current_revision, "target": target_revision, "revision": next_revision}, ensure_ascii=False)))
+                    preview = control_next.preview_settings(db, settings(db), rollback_values, actor, "routing", adm.get("role", "viewer"))
                     db.commit()
-                    webhook_emit(settings(db), "routing.rollback", {"revision": next_revision, "target": target_revision, "actor": actor})
-                    return self.redirect_operator("routing", f"Создана r{next_revision}: откат к r{target_revision}")
+                    return self.control_preview_page(preview, adm)
                 return self.redirect_operator("routing", "Неизвестное действие маршрутизации")
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 audit(db, actor, ip, "routing:rejected", {"action": action, "error": str(exc)[:160]})
@@ -6116,6 +6327,15 @@ class App(BaseHTTPRequestHandler):
             }
         else:
             return self.redirect_operator("dashboard", "Неизвестный раздел настроек")
+
+        if section in {"nodes", "latency", "latency_balancer"}:
+            try:
+                preview = control_next.preview_settings(db, current, values, actor, "nodes", adm.get("role", "viewer"))
+                db.commit()
+                return self.control_preview_page(preview, adm)
+            except (ValueError, PermissionError) as error:
+                db.rollback()
+                return self.redirect_operator("latency", "Не применено: " + str(error)[:180])
 
         if section in ("service", "subscription_text", "public_status", "features", "nodes", "ab", "branding", "latency", "release", "automation", "ai") and any(current.get(k) != v for k, v in values.items()):
             values["config_revision"] = str(int(current.get("config_revision", "1") or 1) + 1)

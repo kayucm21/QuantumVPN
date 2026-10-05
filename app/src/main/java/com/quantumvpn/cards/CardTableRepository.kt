@@ -40,12 +40,19 @@ data class CardTableSnapshot(
     val canDefend: Boolean = false,
     val canTake: Boolean = false,
     val canPass: Boolean = false,
+    val revision: Long = 0L,
+    val discardCount: Int = 0,
+    val boutLimit: Int = 6,
+    val legalAttackCards: List<String> = emptyList(),
+    val legalDefenses: List<CardDefense> = emptyList(),
+    val hasLegalActions: Boolean = false,
 ) {
     val waiting: Boolean get() = state == "waiting"
     val ready: Boolean get() = state in setOf("ready", "playing", "finished")
 }
 
 data class CardPair(val attack: String, val defense: String)
+data class CardDefense(val card: String, val target: Int)
 
 /**
  * Secure, deliberately small client for the card-table lobby.
@@ -69,12 +76,19 @@ class CardTableRepository(context: Context) {
         return request("/api/client/cards/state?ticket=${java.net.URLEncoder.encode(ticket, "UTF-8")}", "GET")
     }
 
-    suspend fun action(ticket: String, action: String, card: String = ""): Result<CardTableSnapshot> {
+    suspend fun action(
+        ticket: String, action: String, card: String = "", target: Int? = null,
+        expectedRevision: Long? = null, actionId: String = java.util.UUID.randomUUID().toString(),
+    ): Result<CardTableSnapshot> {
         require(ticket.isNotBlank()) { "Нет билета игрового стола" }
         return request(
             "/api/client/cards/action",
             "POST",
-            JSONObject().put("ticket", ticket).put("action", action).put("card", card).toString(),
+            JSONObject().put("ticket", ticket).put("action", action).put("card", card)
+                .put("action_id", actionId).apply {
+                    target?.let { put("target", it) }
+                    expectedRevision?.let { put("expected_revision", it) }
+                }.toString(),
         )
     }
 
@@ -85,6 +99,7 @@ class CardTableRepository(context: Context) {
                 check(base.isNotBlank()) { "Игровая панель не настроена" }
                 val connection = (URL(base + path).openConnection() as HttpURLConnection).apply {
                     requestMethod = method
+                    instanceFollowRedirects = false
                     connectTimeout = 10_000
                     readTimeout = 15_000
                     setRequestProperty("Accept", "application/json")
@@ -99,7 +114,17 @@ class CardTableRepository(context: Context) {
                 try {
                     if (body != null) connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
                     val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
-                    val raw = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    val raw = stream?.use { input ->
+                        val output = java.io.ByteArrayOutputStream()
+                        val buffer = ByteArray(4_096)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            check(output.size() + count <= 262_144) { "Ответ игрового стола слишком большой" }
+                            output.write(buffer, 0, count)
+                        }
+                        output.toString("UTF-8")
+                    }.orEmpty()
                     if (connection.responseCode !in 200..299) {
                         val message = runCatching { JSONObject(raw).optString("message") }.getOrDefault("")
                         error(message.ifBlank { "Не удалось открыть стол (HTTP ${connection.responseCode})" })
@@ -149,6 +174,25 @@ class CardTableRepository(context: Context) {
             canDefend = payload.optBoolean("can_defend", false),
             canTake = payload.optBoolean("can_take", false),
             canPass = payload.optBoolean("can_pass", false),
+            revision = payload.optLong("revision", 0L).coerceAtLeast(0L),
+            discardCount = payload.optInt("discard_count", 0).coerceIn(0, 36),
+            boutLimit = payload.optInt("bout_limit", 6).coerceIn(0, 6),
+            legalAttackCards = buildList {
+                val cards = payload.optJSONArray("legal_attack_cards")
+                for (index in 0 until minOf(cards?.length() ?: 0, 36)) {
+                    cards?.optString(index)?.takeIf { it.matches(Regex("(?:10|[6-9JQKA])[SHDC]")) }?.let(::add)
+                }
+            },
+            legalDefenses = buildList {
+                val choices = payload.optJSONArray("legal_defenses")
+                for (index in 0 until minOf(choices?.length() ?: 0, 216)) {
+                    val item = choices?.optJSONObject(index) ?: continue
+                    val card = item.optString("card")
+                    val target = item.optInt("target", -1)
+                    if (card.matches(Regex("(?:10|[6-9JQKA])[SHDC]")) && target in 0..5) add(CardDefense(card, target))
+                }
+            },
+            hasLegalActions = payload.has("legal_attack_cards") && payload.has("legal_defenses"),
         )
     }
 

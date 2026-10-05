@@ -30,6 +30,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import androidx.core.net.toUri
 import com.quantumvpn.profiles.ProfilesViewModel
+import com.quantumvpn.community.CommunityRepository
+import com.quantumvpn.community.ClientQualityReport
+import com.quantumvpn.community.DeliveryMilestone
+import com.quantumvpn.diagnostics.DiagnosticAttemptOutcome
 import com.quantumvpn.routing.RoutingViewModel
 import com.quantumvpn.ui.QuantumVpnApp
 import com.quantumvpn.ui.StartupSplashScreen
@@ -71,6 +75,7 @@ class MainActivity : FragmentActivity() {
         get() = (application as QuantumVpnApplication).container.systemApkInstaller
     private var systemInstallFile: File? = null
     private var systemDownloadActive = false
+    private val communityRepository by lazy { CommunityRepository(applicationContext) }
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -136,6 +141,53 @@ class MainActivity : FragmentActivity() {
             val routingState by routingViewModel.state.collectAsState()
             val vpnMessage by vpnController.message.collectAsState()
             val updateState by updateController.state.collectAsState()
+            LaunchedEffect(Unit) {
+                // Evidence is best effort and does not block startup or updates.
+                communityRepository.reportDelivery(BuildConfig.VERSION_CODE.toLong(), DeliveryMilestone.AppStarted)
+            }
+            LaunchedEffect(clientPolicy.maintenance) {
+                communityRepository.recordMaintenance(clientPolicy.maintenance, clientPolicy.maintenanceMessage)
+            }
+            val releaseEvidence = when (val current = updateState) {
+                is UpdateState.Available -> current.candidate to DeliveryMilestone.NotificationReceived
+                is UpdateState.Ready -> current.candidate to DeliveryMilestone.DownloadComplete
+                else -> null
+            }
+            LaunchedEffect(releaseEvidence) {
+                releaseEvidence?.let { (candidate, milestone) ->
+                    communityRepository.recordRelease(candidate.metadata.versionName, candidate.metadata.versionCode)
+                    communityRepository.reportDelivery(candidate.metadata.versionCode, milestone)
+                }
+            }
+            val completedAttempt = diagnostics.connectionAttempt?.takeIf {
+                it.outcome == DiagnosticAttemptOutcome.Connected || it.outcome == DiagnosticAttemptOutcome.Failed
+            }
+            LaunchedEffect(completedAttempt?.generation, completedAttempt?.outcome) {
+                val attempt = completedAttempt ?: return@LaunchedEffect
+                if (!communityRepository.qualityConsent()) return@LaunchedEffect
+                val group = selectorGroups.firstOrNull { it.selectable }
+                val outbound = group?.items?.firstOrNull { it.tag == group.selected }
+                val name = outbound?.tag ?: (vpnState as? VpnConnectionState.Connected)?.profileName ?: "unavailable"
+                val opaqueNode = java.security.MessageDigest.getInstance("SHA-256").digest(name.toByteArray())
+                    .take(12).joinToString("") { "%02x".format(it) }
+                val protocol = outbound?.type?.lowercase()?.takeIf {
+                    it in setOf("vless", "trojan", "hysteria", "hysteria2", "tuic", "wireguard", "amneziawg", "shadowsocks")
+                } ?: "unknown"
+                val network = when (diagnostics.network?.transport?.lowercase()) {
+                    "wifi", "wi-fi" -> "wifi"
+                    "cellular", "mobile" -> "mobile"
+                    "ethernet" -> "ethernet"
+                    else -> "unknown"
+                }
+                communityRepository.reportQuality(ClientQualityReport(
+                    nodeKey = opaqueNode, protocol = protocol, network = network,
+                    connectMillis = (attempt.totalDurationMillis ?: 0).coerceIn(0, 300_000).toInt(),
+                    // Zero means not yet measured; never substitute a server-side ping.
+                    pingMillis = (sessionStats.pingMillis ?: 0).coerceIn(0, 60_000).toInt(),
+                    disconnects = if (attempt.outcome == DiagnosticAttemptOutcome.Failed) 1 else 0,
+                    success = attempt.outcome == DiagnosticAttemptOutcome.Connected,
+                ), eventId = "attempt_${attempt.startedAtEpochMillis}_${attempt.generation}")
+            }
             val systemDark = isSystemInDarkTheme()
             var previousMaintenance by remember { mutableStateOf<Boolean?>(null) }
             LaunchedEffect(clientPolicy.maintenance) {
@@ -529,6 +581,11 @@ class MainActivity : FragmentActivity() {
                 updateController.createInstallIntent()
             }
             updateInstallerLauncher.launch(intent)
+            (updateController.state.value as? UpdateState.Ready)?.candidate?.let { candidate ->
+                lifecycleScope.launch {
+                    communityRepository.reportDelivery(candidate.metadata.versionCode, DeliveryMilestone.InstallHandoff)
+                }
+            }
         } catch (_: ActivityNotFoundException) {
             failSystemInstall("Системный установщик APK не найден.")
         } catch (_: SecurityException) {

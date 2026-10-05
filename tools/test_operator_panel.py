@@ -1,9 +1,12 @@
 import base64
+import concurrent.futures
 import hashlib
 import importlib.util
 import json
 import os
+from html.parser import HTMLParser
 from pathlib import Path
+import random
 import tempfile
 import threading
 import time
@@ -12,6 +15,23 @@ from unittest import mock
 from contextlib import closing
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode
+
+
+def confirmed_control_fields(page):
+    class Inputs(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.fields = {}
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "input" and attrs.get("name") in {"preview_id", "digest", "csrf"}:
+                self.fields[attrs["name"]] = attrs.get("value", "")
+    parser = Inputs()
+    parser.feed(page)
+    if set(parser.fields) != {"preview_id", "digest", "csrf"}:
+        raise AssertionError("Expected a guarded control preview")
+    return parser.fields
 
 
 class OperatorTests(unittest.TestCase):
@@ -432,6 +452,7 @@ class OperatorTests(unittest.TestCase):
                 "card_game_enabled": "1",
                 "card_game_access_hash": self.panel.password_hash("durak-code-2026"),
                 "card_game_start_coins": "1200",
+                "card_game_stake_q_coins": "25",
             })
             db.commit()
 
@@ -469,11 +490,13 @@ class OperatorTests(unittest.TestCase):
         )
         with urlopen(host_state_request) as response:
             host_state = json.load(response)
-        attacked = request("durak-host-0001", "/api/client/cards/action", {
-            "ticket": host["ticket"], "action": "attack", "card": host_state["hand"][0],
+        attacking_state = host_state if host_state["attacker"] == "host" else guest_ready
+        attacking_device = "durak-host-0001" if attacking_state["seat"] == "host" else "durak-guest-002"
+        attacked = request(attacking_device, "/api/client/cards/action", {
+            "ticket": attacking_state["ticket"], "action": "attack", "card": attacking_state["hand"][0],
         })
         self.assertEqual(len(attacked["table_cards"]), 1)
-        self.assertNotIn(host_state["hand"][0], attacked["hand"])
+        self.assertNotIn(attacking_state["hand"][0], attacked["hand"])
 
         with closing(self.panel.conn()) as db:
             wallet = db.execute(
@@ -501,16 +524,223 @@ class OperatorTests(unittest.TestCase):
             handler.card_game_action(db, self.panel.settings(db), guest_device, guest["table_id"], "ready")
             row = db.execute("select game_json from card_tables where id=?", (host["table_id"],)).fetchone()
             game = json.loads(row[0])
-            game.update({"deck": [], "hands": {"host": ["6S"], "guest": ["7H"]}, "attacker": "guest", "table": []})
+            game.update({"deck": [], "hands": {"host": ["6S"], "guest": ["7H"]},
+                         "attacker": "guest", "table": [], "bout_limit": 1,
+                         "discard": sorted(self.panel.durak.CARDS.difference(["6S", "7H"]))})
             db.execute("update card_tables set state='playing',game_json=? where id=?", (json.dumps(game), host["table_id"]))
             db.commit()
-            result = handler.card_game_action(db, self.panel.settings(db), guest_device, host["table_id"], "attack", "7H")
+            attacked = handler.card_game_action(db, self.panel.settings(db), guest_device, host["table_id"], "attack", "7H")
+            self.assertEqual(attacked["game_phase"], "playing")
+            self.assertEqual(attacked["winner_reward_q_coins"], 0)
+            result = handler.card_game_action(db, self.panel.settings(db), host_device, host["table_id"], "take")
             self.assertEqual(result["game_phase"], "finished")
-            self.assertEqual(result["winner"], "host")
+            self.assertEqual(result["winner"], "guest")
             self.assertEqual(result["winner_reward_q_coins"], 80)
             host_wallet = db.execute("select q_coins from card_wallets where device=?", (host_device,)).fetchone()[0]
             guest_wallet = db.execute("select q_coins from card_wallets where device=?", (guest_device,)).fetchone()[0]
-            self.assertEqual((host_wallet, guest_wallet), (1240, 1160))
+            self.assertEqual((host_wallet, guest_wallet), (1160, 1240))
+
+    def _card_http(self, device, path, payload=None):
+        headers = {"X-Device-Id": device}
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        with urlopen(Request(self.base + path, headers=headers,
+                             data=json.dumps(payload).encode() if payload is not None else None)) as response:
+            return json.load(response)
+
+    def _card_pair(self, prefix, stake=40):
+        code = prefix + "-code-2026"
+        devices = {"host": prefix + "-host-device", "guest": prefix + "-guest-device"}
+        with closing(self.panel.conn()) as db:
+            self.panel.set_settings(db, {"card_game_enabled": "1", "card_game_access_hash": self.panel.password_hash(code),
+                                         "card_game_start_coins": "1200", "card_game_stake_q_coins": str(stake)})
+            db.commit()
+        snapshots = {seat: self._card_http(device, "/api/client/cards/join",
+                                         {"access_code": code, "display_name": "Игрок " + seat})
+                     for seat, device in devices.items()}
+        return devices, snapshots
+
+    def _card_state(self, device, ticket):
+        return self._card_http(device, "/api/client/cards/state?ticket=" + ticket)
+
+    def test_card_game_http_complete_match_and_payout_retry(self):
+        rng = random.Random(42)
+        deal = self.panel.durak.new_game(rng=rng)
+        with mock.patch.object(self.panel, "rate_limited", return_value=False), \
+                mock.patch.object(self.panel, "durak_new_game", return_value=deal):
+            devices, snapshots = self._card_pair("full-match")
+            self.assertEqual(snapshots["host"]["game_phase"], "waiting")
+            self.assertFalse(snapshots["host"]["can_take"])
+            self.assertFalse(snapshots["guest"]["can_pass"])
+            self.assertEqual(snapshots["guest"]["hand"], [])
+            ready = self._card_http(devices["host"], "/api/client/cards/action", {
+                "ticket": snapshots["host"]["ticket"], "action": "ready",
+                "expected_revision": 0, "action_id": "full-match-ready-host",
+            })
+            current = self._card_http(devices["guest"], "/api/client/cards/action", {
+                "ticket": snapshots["guest"]["ticket"], "action": "ready",
+                "expected_revision": ready["revision"], "action_id": "full-match-ready-guest",
+            })
+            self.assertEqual(current["q_coins"], 1160)
+            tickets = {seat: snapshot["ticket"] for seat, snapshot in snapshots.items()}
+            actions = set()
+            for sequence in range(1000):
+                if current["game_phase"] == "finished":
+                    break
+                attacker = current["attacker"]
+                defender = "guest" if attacker == "host" else "host"
+                if not current["table_cards"]:
+                    seat = attacker
+                    view = self._card_state(devices[seat], tickets[seat])
+                    payload = {"action": "attack", "card": rng.choice(view["legal_attack_cards"])}
+                elif any(not pair["defense"] for pair in current["table_cards"]):
+                    seat = defender
+                    view = self._card_state(devices[seat], tickets[seat])
+                    if view["legal_defenses"]:
+                        option = rng.choice(view["legal_defenses"])
+                        payload = {"action": "defend", **option}
+                    else:
+                        payload = {"action": "take"}
+                else:
+                    seat = attacker
+                    view = self._card_state(devices[seat], tickets[seat])
+                    payload = {"action": "pass"}
+                payload.update(ticket=tickets[seat], expected_revision=view["revision"],
+                               action_id=f"full-match-action-{sequence:04}")
+                actions.add(payload["action"])
+                current = self._card_http(devices[seat], "/api/client/cards/action", payload)
+                self.assertNotIn("hands", current)
+                self.assertNotIn("deck", current)
+                with closing(self.panel.conn()) as db:
+                    game = json.loads(db.execute("select game_json from card_tables where id=?",
+                                                 (current["table_id"],)).fetchone()[0])
+                self.panel.durak.validate_state(game)
+            else:
+                self.fail("HTTP match did not complete")
+            self.assertEqual(actions, {"attack", "defend", "take", "pass"})
+            self.assertEqual(current["table_cards"], [])
+            self.assertEqual(current["deck_count"], 0)
+            before_retry = {seat: self._card_state(device, tickets[seat])["q_coins"] for seat, device in devices.items()}
+            duplicate = self._card_http(devices[seat], "/api/client/cards/action", payload)
+            after_retry = {player: self._card_state(device, tickets[player])["q_coins"]
+                           for player, device in devices.items()}
+            self.assertEqual(duplicate["revision"], current["revision"])
+            self.assertEqual(before_retry, after_retry)
+            self.assertEqual(sum(after_retry.values()), 2400)
+            if current["winner"] == "draw":
+                self.assertEqual(set(after_retry.values()), {1200})
+            else:
+                self.assertEqual(after_retry[current["winner"]], 1240)
+                self.assertEqual(after_retry[self.panel.durak.other(current["winner"])], 1160)
+
+    def test_card_game_stale_http_action_is_409_and_non_mutating(self):
+        devices, snapshots = self._card_pair("stale-match")
+        ready = self._card_http(devices["host"], "/api/client/cards/action", {
+            "ticket": snapshots["host"]["ticket"], "action": "ready", "expected_revision": 0,
+            "action_id": "stale-ready-host",
+        })
+        request = {"ticket": snapshots["guest"]["ticket"], "action": "ready", "expected_revision": 0,
+                   "action_id": "stale-ready-guest"}
+        with self.assertRaises(HTTPError) as caught:
+            self._card_http(devices["guest"], "/api/client/cards/action", request)
+        self.assertEqual(caught.exception.code, 409)
+        self.assertEqual(json.load(caught.exception)["error"], "stale_game_state")
+        unchanged = self._card_state(devices["guest"], snapshots["guest"]["ticket"])
+        self.assertEqual(unchanged["revision"], ready["revision"])
+        self.assertEqual(unchanged["q_coins"], 1200)
+        self.assertTrue(unchanged["can_ready"])
+
+    def test_card_game_draw_refunds_each_stake_exactly_once(self):
+        devices, snapshots = self._card_pair("draw-match")
+        for seat in self.panel.durak.SEATS:
+            self._card_http(devices[seat], "/api/client/cards/action", {
+                "ticket": snapshots[seat]["ticket"], "action": "ready", "action_id": "draw-ready-" + seat,
+            })
+        with closing(self.panel.conn()) as db:
+            game = json.loads(db.execute("select game_json from card_tables where id=?",
+                                         (snapshots["host"]["table_id"],)).fetchone()[0])
+            game.update(deck=[], hands={"host": ["6H"], "guest": ["7H"]}, attacker="host", table=[],
+                        bout_limit=1, discard=sorted(self.panel.durak.CARDS.difference(["6H", "7H"])))
+            db.execute("update card_tables set game_json=? where id=?",
+                       (json.dumps(game), snapshots["host"]["table_id"]))
+            db.commit()
+        for seat, action, card in (("host", "attack", "6H"), ("guest", "defend", "7H"), ("host", "pass", "")):
+            payload = {"ticket": snapshots[seat]["ticket"], "action": action, "card": card,
+                       "action_id": "draw-action-" + action}
+            current = self._card_http(devices[seat], "/api/client/cards/action", payload)
+        self.assertEqual(current["winner"], "draw")
+        self.assertEqual(current["winner_reward_q_coins"], 0)
+        self.assertEqual(current["stake_refund_q_coins"], 40)
+        duplicate = self._card_http(devices["host"], "/api/client/cards/action", payload)
+        self.assertEqual(duplicate["revision"], current["revision"])
+        for seat in self.panel.durak.SEATS:
+            self.assertEqual(self._card_state(devices[seat], snapshots[seat]["ticket"])["q_coins"], 1200)
+
+    def test_card_game_insufficient_balance_rolls_back_ready_and_cards(self):
+        devices, snapshots = self._card_pair("poor-match")
+        self._card_http(devices["host"], "/api/client/cards/action", {
+            "ticket": snapshots["host"]["ticket"], "action": "ready",
+        })
+        with closing(self.panel.conn()) as db:
+            db.execute("update card_wallets set q_coins=0 where device=?", (self.panel.device_id(devices["guest"]),))
+            db.commit()
+        with self.assertRaises(HTTPError) as caught:
+            self._card_http(devices["guest"], "/api/client/cards/action", {
+                "ticket": snapshots["guest"]["ticket"], "action": "ready",
+            })
+        self.assertEqual(caught.exception.code, 400)
+        host = self._card_state(devices["host"], snapshots["host"]["ticket"])
+        guest = self._card_state(devices["guest"], snapshots["guest"]["ticket"])
+        self.assertEqual(host["game_phase"], "ready")
+        self.assertEqual(host["q_coins"], 1200)
+        self.assertTrue(guest["can_ready"])
+        self.assertEqual(host["revision"], guest["revision"])
+
+    def test_card_game_http_selects_the_correct_uncovered_attack(self):
+        devices, snapshots = self._card_pair("target-match")
+        for seat in self.panel.durak.SEATS:
+            self._card_http(devices[seat], "/api/client/cards/action", {
+                "ticket": snapshots[seat]["ticket"], "action": "ready",
+            })
+        with closing(self.panel.conn()) as db:
+            game = json.loads(db.execute("select game_json from card_tables where id=?",
+                                         (snapshots["host"]["table_id"],)).fetchone()[0])
+            game.update(deck=[], hands={"host": ["8C"], "guest": ["7S", "8H"]}, attacker="host",
+                        trump="AC", table=[{"attack": "6H", "defense": ""}, {"attack": "6S", "defense": ""}],
+                        bout_limit=2, discard=sorted(self.panel.durak.CARDS.difference(["8C", "7S", "8H", "6H", "6S"])))
+            db.execute("update card_tables set game_json=? where id=?",
+                       (json.dumps(game), snapshots["host"]["table_id"]))
+            db.commit()
+        payload = {"ticket": snapshots["guest"]["ticket"], "action": "defend", "card": "7S", "target": 0,
+                   "expected_revision": game["revision"], "action_id": "target-defense-01"}
+        with self.assertRaises(HTTPError) as caught:
+            self._card_http(devices["guest"], "/api/client/cards/action", payload)
+        self.assertEqual(caught.exception.code, 400)
+        payload["target"] = 1
+        defended = self._card_http(devices["guest"], "/api/client/cards/action", payload)
+        self.assertEqual(defended["table_cards"], [{"attack": "6H", "defense": ""}, {"attack": "6S", "defense": "7S"}])
+        self.assertEqual(defended["revision"], game["revision"] + 1)
+        self.assertTrue(defended["can_defend"])
+
+    def test_card_game_concurrent_double_click_replays_only_once(self):
+        with mock.patch.object(self.panel, "rate_limited", return_value=False):
+            devices, snapshots = self._card_pair("double-match")
+            for seat in self.panel.durak.SEATS:
+                current = self._card_http(devices[seat], "/api/client/cards/action", {
+                    "ticket": snapshots[seat]["ticket"], "action": "ready", "action_id": "double-ready-" + seat,
+                })
+            seat = current["attacker"]
+            view = self._card_state(devices[seat], snapshots[seat]["ticket"])
+            payload = {"ticket": snapshots[seat]["ticket"], "action": "attack", "card": view["legal_attack_cards"][0],
+                       "expected_revision": view["revision"], "action_id": "double-attack-same-id"}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                calls = [pool.submit(self._card_http, devices[seat], "/api/client/cards/action", payload) for _ in range(2)]
+                replies = [call.result(timeout=10) for call in calls]
+            for reply in replies:
+                self.assertEqual(reply["revision"], view["revision"] + 1)
+                self.assertEqual(len(reply["table_cards"]), 1)
+                self.assertEqual(len(reply["hand"]), 5)
+                self.assertEqual(reply["q_coins"], 1160)
 
     def test_routing_draft_saves_doh_without_publishing(self):
         token = base64.b64encode(b"test:test").decode()
@@ -665,7 +895,17 @@ class OperatorTests(unittest.TestCase):
             b"&routing_proxy_domains=video.example&routing_block_domains=ads.example"
             b"&routing_direct_cidrs=203.0.113.11&routing_proxy_cidrs=198.51.100.0%2F24"
         )
+        with closing(self.panel.conn()) as db:
+            before = self.panel.settings(db)
         with urlopen(Request(self.base + "/operator/routing", data=body, headers={"Authorization": "Basic " + token})) as response:
+            self.assertEqual(response.status, 200)
+            preview = confirmed_control_fields(response.read().decode("utf-8"))
+        with closing(self.panel.conn()) as db:
+            unchanged = self.panel.settings(db)
+        self.assertEqual(unchanged["routing_profile"], before["routing_profile"])
+        self.assertEqual(unchanged["routing_revision"], before["routing_revision"])
+        with urlopen(Request(self.base + "/operator/control/apply", data=urlencode(preview).encode(),
+                             headers={"Authorization": "Basic " + token, "Origin": self.panel.PUBLIC_BASE})) as response:
             self.assertEqual(response.status, 200)
         with urlopen(self.base + "/api/client/routing?bucket=99") as response:
             envelope = json.load(response)
@@ -711,6 +951,13 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(staged["payload"]["profile"], "proxy_all")
         self.assertEqual(stable["channel"], "production")
         with urlopen(Request(self.base + "/operator/routing", data=b"action=promote", headers={"Authorization": "Basic " + token})) as response:
+            self.assertEqual(response.status, 200)
+            preview = confirmed_control_fields(response.read().decode("utf-8"))
+        with urlopen(self.base + "/api/client/routing?bucket=99") as response:
+            not_yet_promoted = json.load(response)
+        self.assertEqual(not_yet_promoted["payload"], stable["payload"])
+        with urlopen(Request(self.base + "/operator/control/apply", data=urlencode(preview).encode(),
+                             headers={"Authorization": "Basic " + token, "Origin": self.panel.PUBLIC_BASE})) as response:
             self.assertEqual(response.status, 200)
         with urlopen(self.base + "/api/client/routing?bucket=99") as response:
             promoted = json.load(response)

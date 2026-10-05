@@ -121,6 +121,11 @@ import com.quantumvpn.donations.DonationRepository
 import com.quantumvpn.donations.DonationSummary
 import com.quantumvpn.cards.CardTableRepository
 import com.quantumvpn.cards.CardTableSnapshot
+import com.quantumvpn.community.CommunityRepository
+import com.quantumvpn.community.NotificationInboxScreen
+import com.quantumvpn.community.SupportCenterScreen
+import com.quantumvpn.diagnostics.DiagnosticReportRedactor
+import org.json.JSONObject
 import com.quantumvpn.profiles.ProfilesUiState
 import com.quantumvpn.profiles.ProfilesViewModel
 import com.quantumvpn.vpn.RuntimeSelectorGroup
@@ -1046,14 +1051,17 @@ internal fun V2Cards(
     BackHandler { onBack() }
     LaunchedEffect(snapshot?.ticket, snapshot?.gamePhase, visible) {
         if (!visible) return@LaunchedEffect
-        val ticket = snapshot?.ticket ?: return@LaunchedEffect
+        val ticket = snapshot?.ticket?.takeIf(String::isNotBlank) ?: return@LaunchedEffect
         if (snapshot?.gamePhase == "finished") return@LaunchedEffect
         while (true) {
             repository.state(ticket).onSuccess { refreshed ->
                 // Older panel builds omitted ticket from state polling.  Keep
                 // the current device-bound ticket as a compatibility guard so
                 // the coroutine cannot silently stop after a guest joins.
-                snapshot = refreshed.copy(ticket = refreshed.ticket.ifBlank { ticket })
+                val current = snapshot
+                if (current == null || refreshed.tableId != current.tableId || refreshed.revision >= current.revision) {
+                    snapshot = refreshed.copy(ticket = refreshed.ticket.ifBlank { ticket })
+                }
                 error = null
             }.onFailure { failure ->
                 error = failure.message ?: "Не удалось обновить состояние стола"
@@ -1152,14 +1160,23 @@ internal fun V2Cards(
                 }
             } else {
                 val table = snapshot!!
-                fun play(action: String, card: String = "") {
+                fun play(action: String, card: String = "", target: Int? = null) {
                     if (joining) return
                     joining = true
                     error = null
                     scope.launch {
-                        repository.action(table.ticket, action, card)
-                            .onSuccess { result -> snapshot = result.copy(ticket = result.ticket.ifBlank { table.ticket }) }
-                            .onFailure { error = it.message ?: "Не удалось выполнить ход" }
+                        repository.action(table.ticket, action, card, target, table.revision.takeIf { table.hasLegalActions })
+                            .onSuccess { result ->
+                                if (result.revision >= (snapshot?.revision ?: 0L)) {
+                                    snapshot = result.copy(ticket = result.ticket.ifBlank { table.ticket })
+                                }
+                            }
+                            .onFailure { failure ->
+                                error = failure.message ?: "Не удалось выполнить ход"
+                                repository.state(table.ticket).onSuccess { refreshed ->
+                                    if (refreshed.revision >= (snapshot?.revision ?: 0L)) snapshot = refreshed.copy(ticket = refreshed.ticket.ifBlank { table.ticket })
+                                }
+                            }
                         joining = false
                     }
                 }
@@ -1191,10 +1208,14 @@ internal fun V2Cards(
                                         colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
                                     ) { Text(if (table.canReady) "Готов к раздаче" else "Ждём второго игрока") }
                                 }
-                                "playing" -> V2DurakTablePreview(table = table, busy = joining, onAction = ::play)
+                                "playing" -> V2DurakTablePreview(table = table, busy = joining,
+                                    onAction = { action, card -> play(action, card) },
+                                    onDefendTarget = { card, target -> play("defend", card, target) })
                                 "finished" -> {
                                     Text(
-                                        if (table.winner == table.seat) "Вы выиграли: +${table.winnerRewardQCoins} Q-coins" else "Партия завершена. Победил ${table.opponentName}. Ставка ${table.stakeQCoins} Q-coins переведена победителю.",
+                                        if (table.winner == "draw") "Ничья. Виртуальная ставка возвращена каждому игроку."
+                                        else if (table.winner == table.seat) "Вы выиграли: +${table.winnerRewardQCoins} Q-coins"
+                                        else "Партия завершена. Победил ${table.opponentName}. Ставка ${table.stakeQCoins} Q-coins переведена победителю.",
                                         color = if (table.winner == table.seat) Aurora.Mint else Aurora.Muted,
                                         textAlign = TextAlign.Center,
                                         fontWeight = FontWeight.SemiBold,
@@ -1226,7 +1247,11 @@ internal fun V2Cards(
 
 /** Compact visual table backed by server-authoritative cards and turn checks. */
 @Composable
-internal fun V2DurakTablePreview(table: CardTableSnapshot, busy: Boolean, onAction: (String, String) -> Unit) {
+internal fun V2DurakTablePreview(
+    table: CardTableSnapshot, busy: Boolean, onAction: (String, String) -> Unit,
+    onDefendTarget: (String, Int) -> Unit = { card, _ -> onAction("defend", card) },
+) {
+    var selectedTarget by remember(table.tableId, table.revision) { mutableStateOf<Int?>(null) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Text("Дурак с друзьями", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
         Text(if (table.canAttack) "Ваш ход: атакуйте" else if (table.canDefend) "Ваш ход: отбейте карту" else "Ход соперника",
@@ -1244,6 +1269,8 @@ internal fun V2DurakTablePreview(table: CardTableSnapshot, busy: Boolean, onActi
                         Surface(color = Color(0xFF15334A), shape = RoundedCornerShape(8.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF93B6CB)),
                             modifier = Modifier.size(40.dp, 55.dp)) { Box(contentAlignment = Alignment.Center) { Text("Q", color = Aurora.Mint, fontSize = 23.sp, fontWeight = FontWeight.Bold) } }
                         Text("Колода ${table.deckCount}", color = Color(0xFFB6D8D6), fontSize = 9.sp, modifier = Modifier.padding(top = 4.dp))
+                        Text("♠ Отбой ${table.discardCount}", color = Aurora.Muted, fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 5.dp).testTag("cards-discard"))
                     }
                     if (table.trump.isNotBlank()) Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         V2DurakCard(table.trump, false) {}
@@ -1252,9 +1279,10 @@ internal fun V2DurakTablePreview(table: CardTableSnapshot, busy: Boolean, onActi
                 }
                 if (table.tableCards.isEmpty()) Text("Стол свободен", color = Color(0xFFB6D8D6), fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp))
                 else Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    table.tableCards.forEach { pair ->
+                    table.tableCards.forEachIndexed { index, pair ->
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            V2DurakCard(pair.attack, false) {}
+                            V2DurakCard(pair.attack, !busy && table.canDefend && pair.defense.isBlank()) { selectedTarget = index }
+                            if (selectedTarget == index) Text("Отбить эту", color = Aurora.Mint, fontSize = 9.sp)
                             if (pair.defense.isNotBlank()) V2DurakCard(pair.defense, false) {}
                         }
                     }
@@ -1264,8 +1292,13 @@ internal fun V2DurakTablePreview(table: CardTableSnapshot, busy: Boolean, onActi
         V2PlayerBadge(table.name, "Вы · ${table.hand.size} карт")
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             table.hand.forEach { card ->
-                V2DurakCard(card, !busy && (table.canAttack || table.canDefend)) {
-                    onAction(if (table.canAttack) "attack" else "defend", card)
+                val defense = table.legalDefenses.firstOrNull { it.card == card && (selectedTarget == null || it.target == selectedTarget) }
+                val legal = if (!table.hasLegalActions) table.canAttack || table.canDefend
+                    else (table.canAttack && card in table.legalAttackCards) || (table.canDefend && defense != null)
+                V2DurakCard(card, !busy && legal) {
+                    if (table.canAttack) onAction("attack", card)
+                    else if (defense != null) onDefendTarget(card, defense.target)
+                    else onAction("defend", card)
                 }
             }
         }
@@ -1275,9 +1308,10 @@ internal fun V2DurakTablePreview(table: CardTableSnapshot, busy: Boolean, onActi
                 modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Беру", fontWeight = FontWeight.Bold) }
             Button(onClick = { onAction("pass", "") }, enabled = !busy && table.canPass, shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Aurora.Violet, contentColor = Color.White),
-                modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Пас", fontWeight = FontWeight.Bold) }
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("cards-pass")) { Text("Отбой", fontWeight = FontWeight.Bold) }
         }
-        Text("Нажмите карту, чтобы атаковать или отбить. Ходы проверяются сервером.", color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 10.sp, modifier = Modifier.padding(top = 8.dp))
+        Text(if (table.canTake && table.hasLegalActions && table.legalDefenses.isEmpty()) "Нет карты для защиты — нажмите «Беру»."
+            else "Нажмите доступную карту. Для защиты можно сначала выбрать атаку на столе.", color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 10.sp, modifier = Modifier.padding(top = 8.dp))
     }
 }
 
@@ -1600,10 +1634,14 @@ internal fun V2Settings(
     onNotifyExitIpChange: (Boolean) -> Unit = {},
     onConnectSound: (Boolean) -> Unit = {},
     initialNotificationsOpen: Boolean = false,
+    communityNetworkEnabled: Boolean = true,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var logStatus by remember { mutableStateOf("") }
+    val communityRepository = remember(context) { CommunityRepository(context) }
+    var qualityConsent by remember { mutableStateOf(communityRepository.qualityConsent()) }
+    var supportOpen by rememberSaveable { mutableStateOf(false) }
     var logConsentOpen by rememberSaveable { mutableStateOf(false) }
     var privacyOpen by rememberSaveable { mutableStateOf(false) }
     var notificationsOpen by rememberSaveable(initialNotificationsOpen) { mutableStateOf(initialNotificationsOpen) }
@@ -1620,9 +1658,10 @@ internal fun V2Settings(
         V2AccessibilityPage(uiSettings, onLargeText, onHighContrast, onReduceMotion, onHaptics) { accessibilityOpen = false }
         return
     }
-    BackHandler(appearanceOpen || privacyOpen || notificationsOpen || aboutOpen || donateOpen || selectedGroup != null) {
-        if (!(appearanceOpen || privacyOpen || notificationsOpen || aboutOpen || donateOpen)) selectedGroup = null
+    BackHandler(appearanceOpen || privacyOpen || notificationsOpen || supportOpen || aboutOpen || donateOpen || selectedGroup != null) {
+        if (!(appearanceOpen || privacyOpen || notificationsOpen || supportOpen || aboutOpen || donateOpen)) selectedGroup = null
         appearanceOpen = false; privacyOpen = false; notificationsOpen = false
+        supportOpen = false
         aboutOpen = false; donateOpen = false
     }
     if (appearanceOpen) {
@@ -1655,17 +1694,23 @@ internal fun V2Settings(
         return
     }
     if (notificationsOpen) {
-        V2NotificationCenterPage(
-            policy = policy,
+        NotificationInboxScreen(
             onBack = { notificationsOpen = false },
-            onOpenSystemSettings = {
-                runCatching {
-                    context.startActivity(
-                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                        },
-                    )
-                }
+            onOpenSupport = { notificationsOpen = false; supportOpen = true },
+            networkEnabled = communityNetworkEnabled,
+        )
+        return
+    }
+    if (supportOpen) {
+        SupportCenterScreen(
+            onBack = { supportOpen = false },
+            onOpenInbox = { supportOpen = false; notificationsOpen = true },
+            networkEnabled = communityNetworkEnabled,
+            diagnosticProvider = {
+                JSONObject().put("app_version", BuildConfig.VERSION_NAME)
+                    .put("android_version", android.os.Build.VERSION.RELEASE)
+                    .put("last_error", DiagnosticReportRedactor.redact(diagnostics.lastFailure?.message.orEmpty()).take(600))
+                    .put("logs", DiagnosticReportRedactor.redact(diagnostics.logs.takeLast(20).joinToString("\n") { it.message }).take(3000))
             },
         )
         return
@@ -1756,6 +1801,11 @@ internal fun V2Settings(
                     }
                 }
                 "Помощь" -> {
+                    V2NavRow("Написать в поддержку", "Переписка с оператором и ответ в уведомлениях") { supportOpen = true }
+                    V2Toggle("Делиться качеством подключения", "Добровольно: время подключения, ping и ошибки. Без истории сайтов, IP и ключей.", qualityConsent) { consent ->
+                        qualityConsent = consent
+                        communityRepository.setQualityConsent(consent)
+                    }
                     V2NavRow("Проверить обновление", "Установка проверенного APK через системный Android") { onCheckUpdate() }
                     V2NavRow("Ресурсы и исправления", "Подписанные правила и ресурсы из Quantum Control") { resourcesOpen = true }
                     V2NavRow("Отправить диагностику", "Только после вашего согласия, без паролей и ключей") { logConsentOpen = true }

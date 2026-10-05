@@ -67,6 +67,7 @@ class ReleaseFixture(unittest.TestCase):
                 request_diagnostic integer not null default 0,note text not null default '',updated_at integer not null default 0);
             create table client_keys(device text primary key,key text);
         """)
+        PANEL.community.migrate(self.db)
         self.db.execute("insert into client_keys values ('preserved-client','fixture-key')")
         self.now = int(time.time())
         self.db.execute("insert into events values (?,?,?,?,?)", (self.now, "policy", "known-device", "", ""))
@@ -135,6 +136,7 @@ class GuardedPromotionTests(ReleaseFixture):
         self.assertFalse(PANEL.promote_scheduled_release(self.db, self.now))
         self.assertEqual(self.state()["app_version"], OLD_VERSION)
         self.telegram.assert_not_called()
+        self.assertEqual(self.db.execute("select count(*) from community_events where kind='release'").fetchone()[0], 0)
 
     def test_verified_matrix_promotes_atomically_once(self):
         self.assertTrue(PANEL.promote_scheduled_release(self.db, self.now))
@@ -147,6 +149,7 @@ class GuardedPromotionTests(ReleaseFixture):
         self.assertFalse(PANEL.promote_scheduled_release(self.db, self.now))
         self.assertEqual(self.telegram.call_count, 1)
         self.assertEqual(self.db.execute("select key from client_keys").fetchone()[0], "fixture-key")
+        self.assertEqual(self.db.execute("select count(*) from community_events where kind='release'").fetchone()[0], 1)
 
     def test_stale_baseline_and_downgrades_defer(self):
         for values in ({"app_version_code": str(OLD_CODE + 1)},
@@ -193,6 +196,7 @@ class GuardedPromotionTests(ReleaseFixture):
             PANEL.promote_scheduled_release(self.db, self.now)
         self.assertEqual(self.state(), original)
         self.assertEqual(self.db.execute("select count(*) from events where kind='release_promoted'").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("select count(*) from community_events where kind='release'").fetchone()[0], 0)
         self.telegram.assert_not_called()
 
     def test_schedule_changed_during_hashing_is_not_promoted(self):

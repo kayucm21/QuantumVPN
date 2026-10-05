@@ -1,26 +1,36 @@
 #requires -Version 7.2
 <#
 Read-only by default. -Publish is the only mutation and is forbidden before
-2026-10-04 00:00 Moscow (epoch 1791061200). It publishes only the existing,
-verified v5.11.2 draft after both production VDS update APIs agree with the APKs.
+the verified PublishAt midnight. The default preserves v5.11.2; later versions
+must carry an identical publish_at_epoch in their local build metadata.
+Only the existing verified draft is published after both production ABI APIs agree.
 Credentials are read in memory from the existing Git Credential Manager;
 no credential file, token argument, release upload/delete, tag or branch change.
 GitHub CLI flags: https://cli.github.com/manual/gh_release_edit
 #>
 [CmdletBinding()]
-param([switch]$Publish)
+param(
+    [switch]$Publish,
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '5.11.2',
+    [ValidateRange(1,2147483647)][long]$VersionCode = 501102099,
+    [DateTimeOffset]$PublishAt = '2026-10-04T00:00:00+03:00'
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:Repository = 'kayucm21/QuantumVPN'
 $script:QualifiedRepository = 'github.com/kayucm21/QuantumVPN'
-$script:Tag = 'v5.11.2'
-$script:Version = '5.11.2'
-$script:VersionCode = 501102099
-$script:Deadline = [long]1791061200
+$script:Tag = 'v' + $Version
+$script:Version = $Version
+$script:VersionCode = $VersionCode
+$script:Deadline = $PublishAt.ToUnixTimeSeconds()
+$script:PublishAt = $PublishAt.ToOffset([TimeSpan]::FromHours(3))
+if ($script:PublishAt.TimeOfDay.Ticks -ne 0) { throw 'Release must be at Moscow midnight' }
+if ($Version -ceq '5.11.2' -and ($VersionCode -ne 501102099 -or $script:Deadline -ne 1791061200)) { throw 'Legacy release identity and deadline are immutable' }
+if ($Version -cne '5.11.2' -and $VersionCode -le 501102099) { throw 'New release versionCode must exceed the published 5.11.2 versionCode' }
 $script:Signer = '4cb9e0871e8f54000da71d6e11ebb4b19c8dec4ea6737c8e266d4d000706851d'
 $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
-$script:ArtifactRoot = Join-Path $script:ProjectRoot 'artifacts/5.11.2'
+$script:ArtifactRoot = Join-Path $script:ProjectRoot ('artifacts/' + $Version)
 $script:VdsBase = 'https://pecaocek.ignorelist.com:8443'
 
 function Assert-ReleaseCondition([bool]$Condition, [string]$Label) {
@@ -110,6 +120,9 @@ function Get-VerifiedLocalRelease {
     }
     $metadata = Convert-PrivateJson ([IO.File]::ReadAllText($metadataPath)) 'local release metadata'
     $build = Convert-PrivateJson ([IO.File]::ReadAllText($buildPath)) 'local build metadata'
+    if ($script:Version -ne '5.11.2') {
+        Assert-ReleaseCondition ((Get-OptionalProperty $build 'publish_at_epoch') -eq $script:Deadline) 'Publication time differs from verified build schedule'
+    }
     Assert-ReleaseCondition ($metadata.schema -eq 2 -and $metadata.version_name -ceq $script:Version `
         -and $metadata.version_code -eq $script:VersionCode -and $metadata.application_id -ceq 'com.quantumvpn.debug' `
         -and $metadata.signer_sha256 -ceq $script:Signer) 'Local APK release identity mismatch'
@@ -220,6 +233,17 @@ function Assert-VdsRelease($Local) {
     }
 }
 
+function Assert-VdsDownloads($Local) {
+    foreach ($artifact in $Local.Metadata.artifacts) {
+        $url = "$($script:VdsBase)/downloads/$($script:Version)/$($artifact.apk_file)"
+        $headers = Invoke-PrivateProcess -File 'curl.exe' -Arguments @(
+            '--head', '--fail', '--silent', '--show-error', '--proto', '=https', '--tlsv1.2',
+            '--connect-timeout', '15', '--max-time', '45', $url)
+        Assert-ReleaseCondition ($headers -match '(?im)^HTTP/\S+ 200' -and
+            $headers -match ('(?im)^Content-Length:\s*' + [long]$artifact.apk_size + '\s*$')) 'HTTPS APK download HEAD failed'
+    }
+}
+
 function Invoke-Quantum2Publication([switch]$Publish) {
     $local = Get-VerifiedLocalRelease
     $previousToken = [Environment]::GetEnvironmentVariable('GH_TOKEN', 'Process')
@@ -231,10 +255,13 @@ function Invoke-Quantum2Publication([switch]$Publish) {
         Assert-GitHubAssets $release $local
         $due = (Get-UtcEpoch) -ge $script:Deadline
         if (-not $release.draft) {
+            Assert-ReleaseCondition $due 'Release was published before authorized deadline'
+            Assert-VdsRelease $local
+            Assert-VdsDownloads $local
             return [pscustomobject]@{ Status = $(if ($due) { 'AlreadyPublished' } else { 'AlreadyPublishedBeforeDeadline' }); Changed = $false; Tag = $script:Tag }
         }
         if (-not $due) {
-            return [pscustomobject]@{ Status = 'NotDue'; Changed = $false; Tag = $script:Tag; PublishAt = '2026-10-04T00:00:00+03:00' }
+            return [pscustomobject]@{ Status = 'NotDue'; Changed = $false; Tag = $script:Tag; PublishAt = $script:PublishAt.ToString('o') }
         }
         Assert-VdsRelease $local
         if (-not $Publish) {
@@ -245,6 +272,8 @@ function Invoke-Quantum2Publication([switch]$Publish) {
         Assert-GitHubAssets $latest $local
         Assert-ReleaseCondition ((Get-UtcEpoch) -ge $script:Deadline) 'Publication is not due'
         if (-not $latest.draft) {
+            Assert-VdsRelease $local
+            Assert-VdsDownloads $local
             return [pscustomobject]@{ Status = 'AlreadyPublished'; Changed = $false; Tag = $script:Tag }
         }
         Assert-ReleaseCondition ($latest.id -eq $release.id) 'GitHub draft changed during preflight'
@@ -255,6 +284,8 @@ function Invoke-Quantum2Publication([switch]$Publish) {
         $published = Get-GitHubRelease
         Assert-ReleaseCondition (-not $published.draft -and $published.prerelease -and $published.id -eq $release.id) 'Publication confirmation failed'
         Assert-GitHubAssets $published $local
+        Assert-VdsRelease $local
+        Assert-VdsDownloads $local
         return [pscustomobject]@{ Status = 'Published'; Changed = $true; Tag = $script:Tag; Url = "https://github.com/$($script:Repository)/releases/tag/$($script:Tag)" }
     } finally {
         [Environment]::SetEnvironmentVariable('GH_TOKEN', $previousToken, 'Process')

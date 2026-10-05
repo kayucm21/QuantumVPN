@@ -1,0 +1,4 @@
+# Optional passkey server implementation. Install into the operator virtualenv,
+# not OS Python; requires Python >=3.10. Keep password/TOTP recovery available.
+# Primary source: https://github.com/duo-labs/py_webauthn
+webauthn==3.0.1

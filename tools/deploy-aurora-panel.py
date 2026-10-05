@@ -22,6 +22,7 @@ import paramiko
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_ROOT = "/opt/quantumvpn-operator"
 COMPANIONS = ("quantumvpn_control_quality.py", "quantumvpn_resources.py")
+COMMUNITY_MODULES = ("quantumvpn_durak.py", "quantumvpn_community.py", "quantumvpn_control_next.py")
 
 # Keep the remote operation self-contained; importing app would run writable
 # initialization through helpers and is deliberately unnecessary for deployment.
@@ -34,6 +35,8 @@ import shutil, sqlite3, ssl, stat, subprocess, sys, time
 sys.dont_write_bytecode = True
 ROOT = Path('/opt/quantumvpn-operator')
 SERVICE = 'quantumvpn-operator'
+BASE_SOURCES = {'app.py', 'quantumvpn_aurora.py', 'assets/quantumvpn-world.svg'}
+COMMUNITY_SOURCES = {'quantumvpn_durak.py', 'quantumvpn_community.py', 'quantumvpn_control_next.py'}
 VOLATILE = {
     'node_quarantine', 'latency_state', 'latency_last_probe', 'latency_best_ms',
     'load_balancer_last_target', 'load_balancer_last_decision',
@@ -135,6 +138,9 @@ def preflight(config):
     data = Path(env.get('QV_DATA_DIR', '/var/lib/quantumvpn-operator'))
     require(data.is_absolute() and data.is_dir(), 'data_root')
     require(command(['systemctl', 'is-active', SERVICE]).strip() == b'active', 'service_inactive')
+    allowed = BASE_SOURCES | (COMMUNITY_SOURCES if config.get('with_community') else set())
+    require(set(config['files']) <= allowed and {'app.py', 'quantumvpn_aurora.py'} <= set(config['files']), 'source_allowlist')
+    require(not config.get('with_community') or COMMUNITY_SOURCES <= set(config['files']), 'community_sources_missing')
     for name, expected in config['companions'].items():
         path = safe_target(name)
         require(path.is_file() and digest(path) == expected, 'companion_hash_' + name)
@@ -159,7 +165,28 @@ def preflight(config):
         if assets.exists():
             require(assets.is_dir() and assets.stat().st_dev == ROOT.stat().st_dev,
                     'assets_filesystem')
-    # Import external dependencies only, with bytecode disabled; never import app.
+    if config.get('with_community'):
+        deps = ROOT / 'deps'
+        require(deps.is_dir() and not deps.is_symlink(), 'community_dependencies_missing')
+        require((deps / '.quantum-control-deps.json').is_file(), 'community_dependency_manifest_missing')
+        manifest = json.loads((deps / '.quantum-control-deps.json').read_bytes())
+        require(manifest.get('managed_by') == 'quantum-control-next', 'community_dependency_manifest_identity')
+        wheels = [wheel for wheel in manifest.get('wheels', []) if wheel.get('name', '').lower() == 'webauthn']
+        require(len(wheels) == 1 and wheels[0].get('version') == '3.0.1'
+                and wheels[0].get('sha256') == '9927b2f530773bd1d7f8194cd643a2e634a20995ea31f2d8f7a3e70b11c93e31', 'community_webauthn_checksum_manifest')
+        sys.path.insert(0, str(deps))
+        from importlib import metadata as package_metadata
+        require(package_metadata.version('webauthn') == '3.0.1', 'community_webauthn_version')
+        dependency = importlib.import_module('webauthn')
+        require(Path(dependency.__file__).resolve().is_relative_to(deps.resolve()), 'community_webauthn_origin')
+        for function in ('generate_registration_options', 'verify_registration_response',
+                         'generate_authentication_options', 'verify_authentication_response', 'options_to_json'):
+            require(callable(getattr(dependency, function, None)), 'community_webauthn_api')
+    # Select the verified isolated dependency chain before any external import.
+    # Importing an older global cryptography package first caches its __path__;
+    # prepending deps afterwards cannot expose newer modules needed by WebAuthn.
+    # With no community flag, the existing global dependency checks are unchanged.
+    # Bytecode remains disabled, and the application itself is never imported.
     for name in ('cryptography', 'PIL'):
         importlib.import_module(name)
     return env, data, states, db_snapshot(data), key_snapshot(data)
@@ -378,6 +405,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-old-world-sha256", type=sha256,
                         help="Required when the optional world SVG already exists remotely; otherwise expect absence")
     result.add_argument("--login-marker", default="Aurora2")
+    result.add_argument("--with-community", action="store_true",
+                        help="Also deploy the exact Durak/community/control-next module allowlist; verify isolated WebAuthn dependency first")
+    for name in ("durak", "community", "control-next"):
+        result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
+                            help="Existing module SHA-256; omitted means the module must be absent")
     result.add_argument("--apply", action="store_true", help="Upload, back up, replace and verify; default is read-only")
     return result
 
@@ -390,6 +422,12 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
         local["assets/quantumvpn-world.svg"] = world
     elif args.expected_old_world_sha256:
         raise ValueError("Expected old world hash was supplied, but the local SVG is missing")
+    with_community = getattr(args, "with_community", False)
+    if with_community:
+        for name in COMMUNITY_MODULES:
+            local[name] = ROOT / "tools" / name
+    elif any(getattr(args, key, None) for key in ("expected_old_durak_sha256", "expected_old_community_sha256", "expected_old_control_next_sha256")):
+        raise ValueError("Community old hashes require --with-community")
     payloads = {name: path.read_bytes() for name, path in local.items()}
     tree = ast.parse(payloads["app.py"])
     builds = [node.value.value for node in tree.body if isinstance(node, ast.Assign)
@@ -406,6 +444,10 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
     old = {"app.py": args.expected_old_app_sha256,
            "quantumvpn_aurora.py": args.expected_old_aurora_sha256,
            "assets/quantumvpn-world.svg": args.expected_old_world_sha256}
+    if with_community:
+        old.update({"quantumvpn_durak.py": getattr(args, "expected_old_durak_sha256", None),
+                    "quantumvpn_community.py": getattr(args, "expected_old_community_sha256", None),
+                    "quantumvpn_control_next.py": getattr(args, "expected_old_control_next_sha256", None)})
     files = {name: {"sha256": hashlib.sha256(payload).hexdigest(), "old_sha256": old[name],
                     "stage": ".aurora-upload-" + upload + "-" + Path(name).name}
              for name, payload in payloads.items()}
@@ -413,6 +455,7 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
                   for name in COMPANIONS}
     return {"apply": args.apply, "upload": upload, "files": files,
             "companions": companions, "panel_build": builds[0],
+            "with_community": with_community,
             "login_marker": args.login_marker}, payloads
 
 

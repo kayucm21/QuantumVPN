@@ -190,7 +190,8 @@ class Quantum2InstrumentedTest {
 
     @Test fun homeBellOpensNotificationCenterInsteadOfTheSettingsHub() {
         compose.setContent { QuantumVpnTheme { TestSettings(initialNotificationsOpen = true) } }
-        compose.onNodeWithText("Центр уведомлений").assertIsDisplayed()
+        compose.onNodeWithText("Уведомления").assertIsDisplayed()
+        compose.onNodeWithTag("notification-inbox").assertIsDisplayed()
         compose.onNodeWithTag("settings-connection").assertDoesNotExist()
         compose.onNodeWithTag("settings-help").assertDoesNotExist()
     }
@@ -302,6 +303,7 @@ class Quantum2InstrumentedTest {
         onCustomBackgroundUri = {}, onTouchBubbles = onTouchBubbles, onAdBlock = {}, onKillSwitch = {},
         onCheckUpdate = onCheckUpdate,
         initialNotificationsOpen = initialNotificationsOpen,
+        communityNetworkEnabled = false,
     )
 
     private fun candidate(): UpdateCandidate {

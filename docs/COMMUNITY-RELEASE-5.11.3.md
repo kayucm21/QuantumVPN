@@ -65,11 +65,14 @@ than inventing a winner or refund.
 
 ## Verification and operational boundaries
 
-- 205 Python unit/real loopback HTTP tests cover the final path-parser
+- 208 Python unit/real loopback HTTP tests cover the final path-parser
   regressions and a complete
   two-player HTTP match, draw/payout retry protection, wallet rollback,
   subscriber credential isolation, support CSRF, real P256/CBOR virtual
   authenticator cryptography, preview CAS/rollback and release embargo.
+  Scheduled staging also requires an integer publication epoch identical to
+  the verified build metadata; an earlier/later or malformed date fails
+  before credentials or SSH are used.
 - 56 offline PowerShell publication assertions passed, with no credentials,
   network requests or external mutations in these tests.
 - All four Android JVM test suites passed: 230 app, 17 updater, 3 bootstrap,
@@ -93,6 +96,20 @@ than inventing a winner or refund.
   game and two wallets remained in the database. HTTPS login GET and existing
   download HEAD checks passed. Deployment backup:
   `/var/lib/quantumvpn-operator/aurora-source-backups/aurora-76bc70c0795e4dcd9637c198b751b419`.
+- Both verified ARM APKs and their metadata/checksums were uploaded as a
+  closed GitHub prerelease `v5.11.3` (six assets), targeting build commit
+  `f340b309a975ec2d3d374331332ea66900b67bb7`. Read-only publication verification
+  returned `NotDue`; no early publication occurred.
+- The VDS schedule is enabled for epoch `1791234000`, exactly the authorized
+  Moscow midnight. Both production ABI APIs still return `5.11.2`, existing
+  APK download HEADs return 200, and both scheduled APK HEADs return 404.
+  Release database backup:
+  `/var/lib/quantumvpn-operator/release-backups/operator-before-5.11.3-12e52f7190ac4b64a740d19a983b0a96.db`.
+  Notifications are enabled for the scheduled release, not sent before it.
+- The previous one-time chat automation was updated in place to verify and
+  publish `5.11.3` on 6 October, with explicit date and UTC embargo. It stops
+  after success or a reported final failure. APKs were not rebuilt or changed
+  by the final deployment-helper schedule guard.
 - A scheduled VDS worker publishes only after the UTC deadline and rechecks
   both artifacts. A separate one-time chat check publishes the verified GitHub
   prerelease only after the same deadline and after both production ABI APIs

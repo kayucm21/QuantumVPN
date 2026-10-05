@@ -292,13 +292,18 @@ class GuardedPromotionTests(ReleaseFixture):
 
 
 class DeploymentTransactionTests(ReleaseFixture):
-    def test_local_verification_uses_decoded_sdk_path(self):
+    def local_bundle(self):
         (self.root / "artifacts").mkdir()
-        self.write_matrix(self.root / "artifacts" / VERSION)
+        folder = self.root / "artifacts" / VERSION
+        self.write_matrix(folder)
         sdk = self.root / "Андроид SDK"
         encoded = str(sdk).replace("\\", "\\\\").replace(":", "\\:")
         (self.root / "local.properties").write_text("sdk.dir=" + encoded + "\n", encoding="utf-8")
         (self.root / "core.properties").write_text("ANDROID_BUILD_TOOLS=36.0.0\n", encoding="utf-8")
+        return folder, sdk
+
+    def test_local_verification_uses_decoded_sdk_path(self):
+        _, sdk = self.local_bundle()
         checker = mock.Mock()
         original = self.state()
         folder, metadata, files = DEPLOY.verified_local_release(VERSION, SIGNER, root=self.root, checker=checker)
@@ -308,6 +313,47 @@ class DeploymentTransactionTests(ReleaseFixture):
         self.assertEqual(checker.call_count, 2)
         self.assertTrue(all(call.args[3] == sdk / "build-tools" / "36.0.0" for call in checker.call_args_list))
         self.assertEqual(self.state(), original)
+
+    def test_scheduled_local_bundle_requires_exact_verified_publication_epoch(self):
+        folder, _ = self.local_bundle()
+        path = folder / "build-info.json"
+        build = json.loads(path.read_text(encoding="utf-8"))
+        expected = int(datetime(2026, 10, 5, 21, tzinfo=timezone.utc).timestamp())
+        build["publish_at_epoch"] = expected
+        path.write_text(json.dumps(build), encoding="utf-8")
+        result = DEPLOY.verified_local_release(
+            VERSION, SIGNER, root=self.root, checker=mock.Mock(),
+            expected_publish_at=expected)
+        self.assertEqual(result[0], folder)
+        for different in (expected - 86400, expected + 86400):
+            with self.subTest(epoch=different), self.assertRaisesRegex(
+                    ValueError, "Publication time differs"):
+                DEPLOY.verified_local_release(
+                    VERSION, SIGNER, root=self.root, checker=mock.Mock(),
+                    expected_publish_at=different)
+
+    def test_scheduled_local_bundle_rejects_missing_or_non_integer_epoch(self):
+        folder, _ = self.local_bundle()
+        path = folder / "build-info.json"
+        build = json.loads(path.read_text(encoding="utf-8"))
+        expected = int(datetime(2026, 10, 5, 21, tzinfo=timezone.utc).timestamp())
+        for value in (None, str(expected), float(expected), True):
+            with self.subTest(epoch=value):
+                if value is None:
+                    build.pop("publish_at_epoch", None)
+                else:
+                    build["publish_at_epoch"] = value
+                path.write_text(json.dumps(build), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Publication time differs"):
+                    DEPLOY.verified_local_release(
+                        VERSION, SIGNER, root=self.root, checker=mock.Mock(),
+                        expected_publish_at=expected)
+
+    def test_unscheduled_legacy_local_bundle_does_not_require_publication_epoch(self):
+        folder, _ = self.local_bundle()
+        result = DEPLOY.verified_local_release(
+            VERSION, SIGNER, root=self.root, checker=mock.Mock())
+        self.assertEqual(result[0], folder)
 
     def test_default_staging_never_changes_version_or_public_files(self):
         self.config["mode"] = "stage"

@@ -136,7 +136,8 @@ def verify_apk(path, artifact, metadata, tool_dir, runner=subprocess.check_outpu
         require(f"lib/{artifact['abi']}/libbox.so" in names, "APK core library missing")
 
 
-def verified_local_release(version, expected_signer, *, root=ROOT, checker=verify_apk):
+def verified_local_release(version, expected_signer, *, root=ROOT, checker=verify_apk,
+                           expected_publish_at=None):
     require(bool(VERSION.fullmatch(version)), "Invalid version")
     require(bool(SHA256.fullmatch(expected_signer)), "Invalid expected signer SHA-256")
     folder = root / "artifacts" / version
@@ -174,6 +175,12 @@ def verified_local_release(version, expected_signer, *, root=ROOT, checker=verif
             and build.get("artifacts") == artifacts and build.get("local_build") is True,
             "Build metadata mismatch")
     require(bool(re.fullmatch(r"[0-9a-f]{40}", build.get("git_commit", ""))), "Build commit missing")
+    if expected_publish_at is not None:
+        require(type(expected_publish_at) is int and expected_publish_at > 0,
+                "Invalid verified publication epoch")
+        require(type(build.get("publish_at_epoch")) is int and
+                build["publish_at_epoch"] == expected_publish_at,
+                "Publication time differs from verified build schedule")
     for name in names:
         require((folder / name).is_file() and not (folder / name).is_symlink(), "Artifact symlink rejected")
     return folder, metadata, {name: digest(folder / name) for name in names}
@@ -444,7 +451,9 @@ def main():
     require(bool(VERSION.fullmatch(args.expected_current_version)), "Invalid expected current version")
     require(0 < args.expected_current_code < 2147483647, "Invalid expected current code")
     publish_at = parse_schedule(args.schedule_at) if args.schedule_at else 0
-    folder, metadata, files = verified_local_release(args.version, args.expected_signer_sha256)
+    folder, metadata, files = verified_local_release(
+        args.version, args.expected_signer_sha256,
+        expected_publish_at=publish_at if args.schedule_at else None)
     require(metadata["version_code"] > args.expected_current_code, "Release versionCode must strictly increase")
     require(args.version != args.expected_current_version, "Release versionName must change")
     require(args.known_hosts.is_file(), "Pinned known_hosts file required")

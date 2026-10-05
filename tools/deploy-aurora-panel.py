@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REMOTE_ROOT = "/opt/quantumvpn-operator"
 COMPANIONS = ("quantumvpn_control_quality.py", "quantumvpn_resources.py")
 COMMUNITY_MODULES = ("quantumvpn_durak.py", "quantumvpn_community.py", "quantumvpn_control_next.py")
+BOT_STATUS_MODULE = "quantumvpn_bot_status.py"
 
 # Keep the remote operation self-contained; importing app would run writable
 # initialization through helpers and is deliberately unnecessary for deployment.
@@ -37,6 +38,7 @@ ROOT = Path('/opt/quantumvpn-operator')
 SERVICE = 'quantumvpn-operator'
 BASE_SOURCES = {'app.py', 'quantumvpn_aurora.py', 'assets/quantumvpn-world.svg'}
 COMMUNITY_SOURCES = {'quantumvpn_durak.py', 'quantumvpn_community.py', 'quantumvpn_control_next.py'}
+BOT_STATUS_SOURCES = {'quantumvpn_bot_status.py'}
 VOLATILE = {
     'node_quarantine', 'latency_state', 'latency_last_probe', 'latency_best_ms',
     'load_balancer_last_target', 'load_balancer_last_decision',
@@ -138,9 +140,11 @@ def preflight(config):
     data = Path(env.get('QV_DATA_DIR', '/var/lib/quantumvpn-operator'))
     require(data.is_absolute() and data.is_dir(), 'data_root')
     require(command(['systemctl', 'is-active', SERVICE]).strip() == b'active', 'service_inactive')
-    allowed = BASE_SOURCES | (COMMUNITY_SOURCES if config.get('with_community') else set())
+    allowed = (BASE_SOURCES | (COMMUNITY_SOURCES if config.get('with_community') else set())
+               | (BOT_STATUS_SOURCES if config.get('with_bot_status') else set()))
     require(set(config['files']) <= allowed and {'app.py', 'quantumvpn_aurora.py'} <= set(config['files']), 'source_allowlist')
     require(not config.get('with_community') or COMMUNITY_SOURCES <= set(config['files']), 'community_sources_missing')
+    require(not config.get('with_bot_status') or BOT_STATUS_SOURCES <= set(config['files']), 'bot_status_source_missing')
     for name, expected in config['companions'].items():
         path = safe_target(name)
         require(path.is_file() and digest(path) == expected, 'companion_hash_' + name)
@@ -423,6 +427,10 @@ def parser() -> argparse.ArgumentParser:
     for name in ("durak", "community", "control-next"):
         result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
                             help="Existing module SHA-256; omitted means the module must be absent")
+    result.add_argument("--with-bot-status", action="store_true",
+                        help="Also deploy only quantumvpn_bot_status.py; no dependency changes")
+    result.add_argument("--expected-old-bot-status-sha256", type=sha256,
+                        help="Existing bot status module SHA-256; omitted means the module must be absent")
     result.add_argument("--apply", action="store_true", help="Upload, back up, replace and verify; default is read-only")
     return result
 
@@ -441,6 +449,11 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
             local[name] = ROOT / "tools" / name
     elif any(getattr(args, key, None) for key in ("expected_old_durak_sha256", "expected_old_community_sha256", "expected_old_control_next_sha256")):
         raise ValueError("Community old hashes require --with-community")
+    with_bot_status = getattr(args, "with_bot_status", False)
+    if with_bot_status:
+        local[BOT_STATUS_MODULE] = ROOT / "tools" / BOT_STATUS_MODULE
+    elif getattr(args, "expected_old_bot_status_sha256", None):
+        raise ValueError("Bot status old hash requires --with-bot-status")
     payloads = {name: path.read_bytes() for name, path in local.items()}
     tree = ast.parse(payloads["app.py"])
     builds = [node.value.value for node in tree.body if isinstance(node, ast.Assign)
@@ -461,6 +474,8 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
         old.update({"quantumvpn_durak.py": getattr(args, "expected_old_durak_sha256", None),
                     "quantumvpn_community.py": getattr(args, "expected_old_community_sha256", None),
                     "quantumvpn_control_next.py": getattr(args, "expected_old_control_next_sha256", None)})
+    if with_bot_status:
+        old[BOT_STATUS_MODULE] = getattr(args, "expected_old_bot_status_sha256", None)
     files = {name: {"sha256": hashlib.sha256(payload).hexdigest(), "old_sha256": old[name],
                     "stage": ".aurora-upload-" + upload + "-" + Path(name).name}
              for name, payload in payloads.items()}
@@ -469,6 +484,7 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
     return {"apply": args.apply, "upload": upload, "files": files,
             "companions": companions, "panel_build": builds[0],
             "with_community": with_community,
+            "with_bot_status": with_bot_status,
             "login_marker": args.login_marker}, payloads
 
 

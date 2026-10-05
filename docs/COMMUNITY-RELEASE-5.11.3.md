@@ -106,12 +106,14 @@ than inventing a winner or refund.
   Release database backup:
   `/var/lib/quantumvpn-operator/release-backups/operator-before-5.11.3-12e52f7190ac4b64a740d19a983b0a96.db`.
   Notifications are enabled for the scheduled release, not sent before it.
-- The previous one-time chat automation was updated in place to verify and
-  publish `5.11.3` on 6 October, with explicit date and UTC embargo. It stops
-  after success or a reported final failure. APKs were not rebuilt or changed
-  by the final deployment-helper schedule guard.
-- A scheduled VDS worker publishes only after the UTC deadline and rechecks
-  both artifacts. A separate one-time chat check publishes the verified GitHub
-  prerelease only after the same deadline and after both production ABI APIs
-  agree, then checks HTTPS download HEADs. Local scheduled verification requires
-  the PC and Codex app to remain running.
+- On 5 October the owner cancelled GitHub publication and the local one-time
+  chat automation. The automation `quantumvpn-5-11-2-00-00` was deleted;
+  no replacement local task was created. Existing GitHub drafts, tags and
+  assets were not deleted or published by this cancellation.
+- The scheduled VDS worker publishes the VDS release only after the same
+  authorized UTC deadline and rechecks both local server artifacts. Neither
+  the owner's PC nor Codex needs to remain running. Both ARM APKs, their build
+  metadata, signatures and version are unchanged by the bot update.
+- Quantum Control bot commands and live aggregate status were added separately;
+  see `VDS-BOT-STATUS.md`. The bot's `/get_stable` serves only the current public
+  VDS release and respects maintenance, download closure and the release embargo.

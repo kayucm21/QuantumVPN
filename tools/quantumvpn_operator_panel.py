@@ -31,7 +31,8 @@ from functools import lru_cache
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 # Optional, isolated WebAuthn wheels; never load code from uploaded resources.
 if os.path.isdir("/opt/quantumvpn-operator/deps"):
@@ -66,6 +67,11 @@ try:
     import quantumvpn_durak as durak
 except ModuleNotFoundError:
     from tools import quantumvpn_durak as durak
+
+try:
+    import quantumvpn_bot_status as bot_status
+except ModuleNotFoundError:
+    from tools import quantumvpn_bot_status as bot_status
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -103,7 +109,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.1.0-community.1"
+PANEL_BUILD = "2.1.1-bot.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -222,6 +228,9 @@ QWEN_LOCAL_ENDPOINT = "http://127.0.0.1:11434"
 QWEN_DEFAULT_MODEL = "qwen3:0.6b"
 AI_MIN_INTERVAL_SECONDS = 300
 AI_MAX_INTERVAL_SECONDS = 24 * 3600
+_AI_RUN_LOCK = threading.Lock()
+_BOT_STATE_LOCK = threading.Lock()
+_BOT_RUNTIME = {"polling": False, "webhook": None, "state": "starting"}
 
 
 def telegram_bot_token(s: dict) -> str:
@@ -472,6 +481,11 @@ def conn():
                 create table if not exists settings (key text primary key, value text not null);
                 create table if not exists events (ts integer, kind text, device text, ip text, detail text);
                 create table if not exists protocols (name text primary key, enabled integer not null default 1);
+                create table if not exists bot_receiver_state (
+                    scope text primary key,
+                    next_update integer not null default 0,
+                    updated_at integer not null default 0
+                );
                 create table if not exists device_flags (
                     device text primary key,
                     force_banner text not null default '',
@@ -2576,6 +2590,270 @@ def maybe_send_daily_digest(db, s, now=None):
     return True
 
 
+class TelegramRequestError(Exception):
+    def __init__(self, code=0):
+        self.code = int(code)
+        super().__init__(f"Telegram request failed ({self.code})")
+
+
+class _BotNoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def telegram_bot_api(s, method, payload=None):
+    """Bounded fixed-host API; errors never retain the token-bearing URL."""
+    if method not in {"getMe", "getUpdates", "getWebhookInfo", "setMyCommands"}:
+        raise TelegramRequestError()
+    token = telegram_bot_token(s)
+    if not re.fullmatch(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,128}", token):
+        raise TelegramRequestError()
+    body = json.dumps(payload or {}, separators=(",", ":")).encode()
+    if len(body) > 16384:
+        raise TelegramRequestError()
+    try:
+        request = Request(f"https://api.telegram.org/bot{token}/{method}", data=body,
+                          headers={"Content-Type": "application/json"}, method="POST")
+        with build_opener(_BotNoRedirect()).open(request, timeout=35) as response:
+            raw = response.read(256 * 1024 + 1)
+            if len(raw) > 256 * 1024:
+                raise TelegramRequestError()
+            result = json.loads(raw)
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            code = result.get("error_code", 0) if isinstance(result, dict) else 0
+            raise TelegramRequestError(code if type(code) is int else 0)
+        return result.get("result")
+    except HTTPError as error:
+        raise TelegramRequestError(error.code) from None
+    except TelegramRequestError:
+        raise
+    except Exception:
+        raise TelegramRequestError() from None
+
+
+def bot_runtime_state(state, webhook=None):
+    with _BOT_STATE_LOCK:
+        _BOT_RUNTIME.update(state=state, polling=state == "polling", webhook=webhook)
+
+
+def bot_runtime_snapshot():
+    """Actual host samples; CPU utilization is not load average or AI progress."""
+    with _BOT_STATE_LOCK:
+        runtime = dict(_BOT_RUNTIME)
+    runtime.update(active_ai_requests=int(_AI_RUN_LOCK.locked()),
+                   system_instruction=True, backup=latest_backup_info())
+    runtime.update(cpu_percent=None, memory_percent=None, disk_percent=None,
+                   memory_total_bytes=None)
+    def cpu_ticks():
+        with open("/proc/stat", encoding="ascii") as source:
+            parts = source.readline().split()
+        if parts[0] != "cpu" or len(parts) < 5:
+            raise ValueError("CPU sample unavailable")
+        values = [int(item) for item in parts[1:9]]
+        return sum(values), values[3] + (values[4] if len(values) > 4 else 0)
+    try:
+        first = cpu_ticks()
+        time.sleep(0.15)
+        second = cpu_ticks()
+        total, idle = second[0] - first[0], second[1] - first[1]
+        if total > 0 and 0 <= idle <= total:
+            runtime["cpu_percent"] = round(100 * (total - idle) / total, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        with open("/proc/meminfo", encoding="ascii") as source:
+            memory = {line.split(":", 1)[0]: int(line.split()[1]) * 1024 for line in source}
+        total, available = memory["MemTotal"], memory["MemAvailable"]
+        if total > 0 and 0 <= available <= total:
+            runtime.update(memory_total_bytes=total,
+                           memory_percent=round(100 * (total - available) / total, 1))
+    except (OSError, ValueError, KeyError, IndexError):
+        pass
+    try:
+        disk = shutil.disk_usage(ROOT)
+        if disk.total > 0:
+            runtime["disk_percent"] = round(100 * disk.used / disk.total, 1)
+    except OSError:
+        pass
+    try:
+        service = cached_service_status()
+        runtime["services"] = {name: service.get(name) for name in ("operator", "rospanel", "xray")}
+        runtime["services"]["xray"] = {"running": "active", "stopped": "inactive"}.get(service.get("xray"), service.get("xray"))
+    except Exception:
+        runtime["services"] = {}
+    try:
+        result = subprocess.run(["systemctl", "is-active", "ollama"], capture_output=True,
+                                text=True, timeout=3)
+        runtime["services"]["ollama"] = result.stdout.strip() or "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        runtime["services"]["ollama"] = "unknown"
+    return runtime
+
+
+def bot_local_model_snapshot(s):
+    model = s.get("ai_model") or QWEN_DEFAULT_MODEL
+    result = qwen_local_status(model)
+    if result.get("ok") is not True:
+        # An unavailable catalogue is unknown, not proof of an absent model.
+        result["ready"] = None
+    result.update(loaded=None, memory_bytes=None)
+    try:
+        request = Request(QWEN_LOCAL_ENDPOINT + "/api/ps", headers={"Accept": "application/json"})
+        with build_opener(_BotNoRedirect()).open(request, timeout=3) as response:
+            raw = response.read(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            raise ValueError("Oversize model response")
+        payload = json.loads(raw)
+        rows = payload.get("models")
+        if not isinstance(rows, list):
+            raise ValueError("Missing model inventory")
+        loaded = next((row for row in rows if isinstance(row, dict) and
+                       (row.get("name") == model or row.get("model") == model)), None)
+        result["loaded"] = loaded is not None
+        if loaded and type(loaded.get("size")) is int and loaded["size"] >= 0:
+            result["memory_bytes"] = loaded["size"]
+    except Exception:
+        pass
+    return result
+
+
+def bot_command_reply(db, s, command):
+    if command in {"/help", "/start"}:
+        return bot_status.command_help()
+    if command == "/get_dev":
+        return "Отдельного публичного Dev-выпуска нет. /get_stable — текущий опубликованный APK. Закрытый выпуск до срока не выдаётся."
+    if command == "/get_stable":
+        version = s.get("app_version", "")
+        if effective_maintenance(s) or not enabled(s, "public_download_enabled", True):
+            return "Скачивание APK закрыто оператором или на время технических работ. /check_updates — состояние выпуска."
+        if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            return "Нет проверенной публичной версии APK."
+        if (enabled(s, "release_schedule_enabled", False) and s.get("scheduled_app_version") == version
+                and int(s.get("release_publish_at", "0") or 0) > int(time.time())):
+            return "Запланированный выпуск ещё закрыт."
+        base = urlsplit(DOWNLOAD_BASE)
+        if base.scheme != "https" or base.netloc != urlsplit(PUBLIC_BASE).netloc or base.username or base.password or base.query or base.fragment:
+            return "Адрес скачивания не прошёл проверку."
+        lines = [f"📦 Публичная версия QuantumVPN: {version}", "Источник: ваш VDS, без GitHub."]
+        for abi in REQUIRED_RELEASE_ABIS:
+            name = f"QuantumVPN-{version}-operator-debug-{abi}.apk"
+            path = os.path.join(DOWNLOAD_ROOT, version, name)
+            if os.path.isfile(path) and not os.path.islink(path):
+                lines.append(f"{abi}: {DOWNLOAD_BASE}/downloads/{version}/{name}")
+        return "\n".join(lines) if len(lines) > 2 else "Опубликованный APK пока недоступен."
+    snapshot = bot_status.collect_status(db, s, runtime=bot_runtime_snapshot(),
+                                         local_model=bot_local_model_snapshot(s))
+    return bot_status.format_status(snapshot)
+
+
+def telegram_receive_batch(db, s, updates, scope, rate=None, now=None):
+    """Read-only commands, persisted cursor, no reply to another chat/user."""
+    if not isinstance(updates, list) or len(updates) > 20:
+        raise TelegramRequestError()
+    now = int(time.time()) if now is None else int(now)
+    rate = rate if rate is not None else {"last": 0, "window": now, "count": 0}
+    row = db.execute("select next_update from bot_receiver_state where scope=?", (scope,)).fetchone()
+    cursor = int(row[0]) if row else 0
+    replies = 0
+    for update in sorted((item for item in updates if isinstance(item, dict) and
+                          type(item.get("update_id")) is int and 0 <= item["update_id"] < 2**63),
+                         key=lambda item: item["update_id"]):
+        if update["update_id"] < cursor:
+            continue
+        cursor = update["update_id"] + 1
+        # Commit before replying. A lost response is retried by the user, not
+        # silently replayed after a process restart; commands never mutate VPN.
+        db.execute("insert into bot_receiver_state values (?,?,?) on conflict(scope) do update set next_update=max(next_update,excluded.next_update),updated_at=excluded.updated_at", (scope, cursor, now))
+        db.commit()
+        message = update.get("message")
+        with _BOT_STATE_LOCK:
+            username = _BOT_RUNTIME.get("username")
+        command = bot_status.authorized_command(message, s.get("telegram_chat_id"), bot_username=username)
+        if command is None:
+            continue
+        stamp = message.get("date")
+        if type(stamp) is not int or not now - 300 <= stamp <= now + 60:
+            continue
+        if now - rate.get("window", 0) >= 300:
+            rate.update(window=now, count=0)
+        if now - rate.get("last", 0) < 5 or rate.get("count", 0) >= 30:
+            continue
+        rate.update(last=now, count=rate.get("count", 0) + 1)
+        if telegram_send(s, bot_command_reply(db, s, command)):
+            replies += 1
+    # Empty successful polls are heartbeat evidence, not client notifications.
+    db.execute("insert into bot_receiver_state values (?,?,?) on conflict(scope) do update set next_update=max(next_update,excluded.next_update),updated_at=excluded.updated_at", (scope, cursor, now))
+    db.commit()
+    return {"next_update": cursor, "replies": replies}
+
+
+def telegram_command_worker():
+    """One server-side poller. Never deletes a webhook or uses a public chat."""
+    try:
+        import fcntl
+        descriptor = os.open(os.path.join(ROOT, "telegram-poller.lock"),
+                             os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ImportError, OSError):
+        bot_runtime_state("unavailable")
+        if 'descriptor' in locals():
+            os.close(descriptor)
+        return
+    registered = None
+    rate = {"last": 0, "window": int(time.time()), "count": 0}
+    try:
+        while True:
+            db = None
+            try:
+                db = conn()
+                s = settings(db)
+                token, chat = telegram_bot_token(s), (s.get("telegram_chat_id") or "").strip()
+                if not token or not re.fullmatch(r"[1-9]\d{0,18}", chat):
+                    bot_runtime_state("unconfigured")
+                    time.sleep(30)
+                    continue
+                scope = hashlib.sha256((token + "\n" + chat).encode()).hexdigest()
+                if scope != registered:
+                    info = telegram_bot_api(s, "getWebhookInfo")
+                    if not isinstance(info, dict):
+                        raise TelegramRequestError()
+                    if info.get("url"):
+                        bot_runtime_state("webhook", True)
+                        return
+                    identity = telegram_bot_api(s, "getMe")
+                    username = identity.get("username") if isinstance(identity, dict) else None
+                    if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+                        raise TelegramRequestError()
+                    with _BOT_STATE_LOCK:
+                        _BOT_RUNTIME["username"] = username
+                    bot_runtime_state("polling", False)
+                    try:
+                        telegram_bot_api(s, "setMyCommands", {"scope": {"type": "chat", "chat_id": int(chat)},
+                                                              "commands": bot_status.bot_commands()})
+                    except TelegramRequestError:
+                        pass
+                    registered = scope
+                row = db.execute("select next_update from bot_receiver_state where scope=?", (scope,)).fetchone()
+                offset = int(row[0]) if row else 0
+                updates = telegram_bot_api(s, "getUpdates", {"offset": offset, "limit": 20,
+                                                             "timeout": 20, "allowed_updates": ["message"]})
+                bot_runtime_state("polling", False)
+                telegram_receive_batch(db, s, updates, scope, rate=rate)
+            except TelegramRequestError as error:
+                bot_runtime_state("conflict" if error.code == 409 else "unavailable")
+                if error.code == 409:
+                    return  # Another receiver/webhook owns this bot. Do not displace it.
+                time.sleep(30)
+            except Exception:
+                bot_runtime_state("unavailable")
+                time.sleep(30)
+            finally:
+                if db is not None:
+                    db.close()
+    finally:
+        os.close(descriptor)
+
+
 def qwen_local_status(model: str = QWEN_DEFAULT_MODEL) -> dict:
     """Check only the local Ollama catalogue; never follow an operator URL."""
     try:
@@ -2681,6 +2959,15 @@ def clean_ai_advice(value) -> str:
 
 def run_ai_analysis(db, s: dict, trigger: str = "scheduled") -> dict:
     """Ask local Qwen for advice without giving it execution capabilities."""
+    if not _AI_RUN_LOCK.acquire(blocking=False):
+        return {"ok": False, "status": "занят", "advice": "Один анализ уже выполняется; повторный не запущен.", "telegram_sent": False}
+    try:
+        return _run_ai_analysis(db, s, trigger)
+    finally:
+        _AI_RUN_LOCK.release()
+
+
+def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
     now = int(time.time())
     model = (s.get("ai_model") or QWEN_DEFAULT_MODEL).strip()
     if not enabled(s, "ai_advisor_enabled", True):
@@ -3883,6 +4170,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </form>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=telegram>
         <h2>Telegram алерты</h2>
+        <p class=muted>Бот работает на VDS без включённого ПК. В настроенном личном чате: <code>/status</code>, <code>/ai_status</code>, <code>/check_updates</code>, <code>/get_stable</code>, <code>/backups</code>, <code>/help</code>. Показывает реальные замеры; команды не меняют VPN и настройки.</p>
         <label><input type=checkbox name=telegram_alerts_enabled {checked('telegram_alerts_enabled')}> Включить</label>
         <label><input type=checkbox name=telegram_backups_enabled {checked('telegram_backups_enabled')}> Резервная копия каждый час</label>
         <label>Bot token<input type=password name=telegram_bot_token value="{html.escape(telegram_token)}" autocomplete=off {'disabled' if telegram_env_managed else ''} placeholder="{html.escape(telegram_token_hint)}"></label>
@@ -6370,6 +6658,7 @@ def main():
     threading.Thread(target=health_worker, daemon=True).start()
     threading.Thread(target=ai_worker, daemon=True).start()
     threading.Thread(target=scheduled_release_worker, daemon=True).start()
+    threading.Thread(target=telegram_command_worker, daemon=True).start()
     try:
         OperatorHTTPServer.request_queue_size = int(os.environ.get("QV_BACKLOG", "512"))
     except Exception:

@@ -39,7 +39,9 @@ class DeploymentGuardsTests(unittest.TestCase):
         config, payloads = self.deployer.build_config(self.args())
         self.assertFalse(config["apply"])
         self.assertFalse(config["with_community"])
+        self.assertFalse(config["with_bot_status"])
         self.assertNotIn("quantumvpn_community.py", payloads)
+        self.assertNotIn("quantumvpn_bot_status.py", payloads)
         self.assertEqual(set(self.deployer.COMPANIONS), set(config["companions"]))
 
     def test_explicit_community_is_exact_fixed_allowlist(self):
@@ -60,6 +62,110 @@ class DeploymentGuardsTests(unittest.TestCase):
     def test_old_module_hash_cannot_silently_expand_default_scope(self):
         with self.assertRaises(ValueError):
             self.deployer.build_config(self.args("--expected-old-durak-sha256", "b" * 64))
+
+    def test_explicit_bot_status_is_exact_fixed_allowlist(self):
+        for community in (False, True):
+            with self.subTest(community=community), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                tools = root / "tools"
+                tools.mkdir()
+                for name in ("quantumvpn_operator_panel.py", "quantumvpn_aurora.py",
+                             *self.deployer.COMPANIONS, *self.deployer.COMMUNITY_MODULES,
+                             self.deployer.BOT_STATUS_MODULE, "unrequested.py"):
+                    (tools / name).write_text("PANEL_BUILD='2.0.0-aurora.test'\n" if name == "quantumvpn_operator_panel.py" else "# safe source\n")
+                options = ["--with-bot-status", "--expected-old-bot-status-sha256", "c" * 64]
+                if community:
+                    options.append("--with-community")
+                with mock.patch.object(self.deployer, "ROOT", root):
+                    config, payloads = self.deployer.build_config(self.args(*options))
+                expected = {"app.py", "quantumvpn_aurora.py", self.deployer.BOT_STATUS_MODULE}
+                if community:
+                    expected.update(self.deployer.COMMUNITY_MODULES)
+                self.assertEqual(expected, set(payloads))
+                self.assertTrue(config["with_bot_status"])
+                self.assertEqual(community, config["with_community"])
+                self.assertEqual("c" * 64, config["files"][self.deployer.BOT_STATUS_MODULE]["old_sha256"])
+                self.assertEqual(set(self.deployer.COMPANIONS), set(config["companions"]))
+
+    def test_bot_hash_cannot_expand_scope_without_flag(self):
+        with self.assertRaisesRegex(ValueError, "requires --with-bot-status"):
+            self.deployer.build_config(self.args("--expected-old-bot-status-sha256", "c" * 64))
+
+    def test_legacy_namespace_has_no_bot_status_scope(self):
+        args = self.args()
+        del args.with_bot_status
+        del args.expected_old_bot_status_sha256
+        config, payloads = self.deployer.build_config(args)
+        self.assertFalse(config["with_bot_status"])
+        self.assertNotIn(self.deployer.BOT_STATUS_MODULE, payloads)
+
+    def remote_scope(self, root):
+        namespace = {"__name__": "offline_deployment_fixture"}
+        exec(self.deployer.REMOTE_SOURCE, namespace)
+        namespace.update(ROOT=root, environment=lambda: {}, command=lambda *args, **kwargs: b"active",
+                         db_snapshot=lambda _: {}, key_snapshot=lambda _: ("key", "public"),
+                         importlib=types.SimpleNamespace(import_module=lambda _: None))
+        return namespace
+
+    def test_remote_bot_allowlist_presence_and_hash_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            scope = self.remote_scope(root)
+            config = {"files": {"app.py": {"old_sha256": None},
+                                "quantumvpn_aurora.py": {"old_sha256": None},
+                                "quantumvpn_bot_status.py": {"old_sha256": None}},
+                      "companions": {}, "with_bot_status": True}
+            scope["environment"] = lambda: {"QV_DATA_DIR": str(root)}
+            with mock.patch.object(scope["os"], "geteuid", return_value=0, create=True):
+                # A first install explicitly requires the module to be absent.
+                states = scope["preflight"](config)[2]
+                self.assertEqual({"exists": False}, states["quantumvpn_bot_status.py"])
+                (root / "quantumvpn_bot_status.py").write_text("# existing module\n")
+                with self.assertRaisesRegex(scope["CheckFailed"], "source_presence_quantumvpn_bot_status.py"):
+                    scope["preflight"](config)
+                config["files"]["quantumvpn_bot_status.py"]["old_sha256"] = "f" * 64
+                with self.assertRaisesRegex(scope["CheckFailed"], "source_hash_quantumvpn_bot_status.py"):
+                    scope["preflight"](config)
+                config["files"]["quantumvpn_bot_status.py"]["old_sha256"] = scope["digest"](root / "quantumvpn_bot_status.py")
+                states = scope["preflight"](config)[2]
+                self.assertTrue(states["quantumvpn_bot_status.py"]["exists"])
+                self.assertEqual(config["files"]["quantumvpn_bot_status.py"]["old_sha256"],
+                                 states["quantumvpn_bot_status.py"]["sha256"])
+                for flag, name, error in ((False, "quantumvpn_bot_status.py", "source_allowlist"),
+                                          (True, "unrequested.py", "source_allowlist")):
+                    with self.subTest(flag=flag, name=name):
+                        bad = {**config, "with_bot_status": flag,
+                               "files": {**config["files"], name: {"old_sha256": None}}}
+                        with self.assertRaisesRegex(scope["CheckFailed"], error):
+                            scope["preflight"](bad)
+                missing = {**config, "files": {name: info for name, info in config["files"].items()
+                                               if name != "quantumvpn_bot_status.py"}}
+                with self.assertRaisesRegex(scope["CheckFailed"], "bot_status_source_missing"):
+                    scope["preflight"](missing)
+
+    def test_bot_rollback_is_source_only_and_checks_exact_installed_hash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            backup = root / "source-backup"
+            backup.mkdir()
+            scope = self.remote_scope(root)
+            path = root / "quantumvpn_bot_status.py"
+            path.write_text("# newly installed\n")
+            installed = scope["digest"](path)
+            scope["CONFIG"] = {"files": {path.name: {"sha256": installed}}, "upload": "fixture"}
+            # Existing modules are copied back; an introduced module alone is
+            # removed. An unrelated live database never becomes a rollback target.
+            database = root / "operator.db"
+            database.write_bytes(b"wallet changes after deployment")
+            states = {path.name: {"exists": False}}
+            path.write_text("# concurrently changed\n")
+            with self.assertRaisesRegex(scope["CheckFailed"], "rollback_source_changed"):
+                scope["restore"](states, backup, [path.name])
+            self.assertTrue(path.exists())
+            path.write_text("# newly installed\n")
+            scope["restore"](states, backup, [path.name])
+            self.assertFalse(path.exists())
+            self.assertEqual(b"wallet changes after deployment", database.read_bytes())
 
     def test_remote_compiles_and_preserves_original_baseline_guards(self):
         compile(self.deployer.REMOTE_SOURCE, "remote-deployment", "exec")

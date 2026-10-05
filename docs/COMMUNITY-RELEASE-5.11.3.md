@@ -65,13 +65,15 @@ than inventing a winner or refund.
 
 ## Verification and operational boundaries
 
-- 199 Python unit/real loopback HTTP tests passed. Tests include a complete
+- 205 Python unit/real loopback HTTP tests cover the final path-parser
+  regressions and a complete
   two-player HTTP match, draw/payout retry protection, wallet rollback,
   subscriber credential isolation, support CSRF, real P256/CBOR virtual
   authenticator cryptography, preview CAS/rollback and release embargo.
 - 56 offline PowerShell publication assertions passed, with no credentials,
   network requests or external mutations in these tests.
-- All four Android JVM test suites passed before the final packaging pass.
+- All four Android JVM test suites passed: 230 app, 17 updater, 3 bootstrap,
+  4 WireGuard import tests (254 total, no failures).
   API 26 x86_64 emulator UI suite: **27/27**. Screenshots and ADB meminfo/crash
   evidence are under `artifacts/quantum2-review-26/capture-20261005-212121`;
   crash buffer was empty. The test fixtures disable community network requests.
@@ -85,6 +87,12 @@ than inventing a winner or refund.
 - Source deployment has private source/SQLite backups and source-only guarded
   rollback. It never restores a live game/wallet database, changes RosPanel
   credentials/subscriptions or restarts active VPN engines.
+- Panel `2.1.0-community.1` was deployed and verified on the VDS. Public release
+  APIs, configuration and signing identity stayed unchanged. Both production
+  ABI APIs continued to return `5.11.2 / 501102099` before scheduling; the active
+  game and two wallets remained in the database. HTTPS login GET and existing
+  download HEAD checks passed. Deployment backup:
+  `/var/lib/quantumvpn-operator/aurora-source-backups/aurora-76bc70c0795e4dcd9637c198b751b419`.
 - A scheduled VDS worker publishes only after the UTC deadline and rechecks
   both artifacts. A separate one-time chat check publishes the verified GitHub
   prerelease only after the same deadline and after both production ABI APIs

@@ -51,6 +51,45 @@ class ScheduleParsingTests(unittest.TestCase):
         self.assertNotIn("paramiko.AutoAddPolicy", source)
 
 
+class JavaPropertiesTests(unittest.TestCase):
+    def read(self, text):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "fixture.properties"
+            path.write_text(text, encoding="utf-8")
+            return DEPLOY.properties(path)
+
+    def test_escaped_windows_drive_sdk_path(self):
+        values = self.read(r"sdk.dir=C\:\\Users\\Admin\\Android\\Sdk" + "\n")
+        self.assertEqual(values["sdk.dir"], r"C:\Users\Admin\Android\Sdk")
+
+    def test_unc_sdk_path_and_unicode_are_not_double_decoded(self):
+        text = r"sdk.dir=\\\\host\\share\\\u0410\u043d\u0434\u0440\u043e\u0438\u0434" + "\n"
+        values = self.read(text + "literal=Андроид впн\n")
+        self.assertEqual(values["sdk.dir"], "\\\\host\\share\\Андроид")
+        self.assertEqual(values["literal"], "Андроид впн")
+
+    def test_comments_separators_continuations_and_escaped_keys(self):
+        text = ("  # ignored=value\n\t! ignored=also\n"
+                " ANDROID_BUILD_TOOLS : 36.0.0\n"
+                "plain value\nempty\n"
+                "sdk.dir=C\\:\\\\Android\\\n\t\\\\Sdk\n"
+                "escaped\\=key=value\\:suffix\n"
+                "duplicate=old\nduplicate=new\n")
+        values = self.read(text)
+        self.assertEqual(values["ANDROID_BUILD_TOOLS"], "36.0.0")
+        self.assertEqual(values["plain"], "value")
+        self.assertEqual(values["empty"], "")
+        self.assertEqual(values["sdk.dir"], r"C:\Android\Sdk")
+        self.assertEqual(values["escaped=key"], "value:suffix")
+        self.assertEqual(values["duplicate"], "new")
+        self.assertEqual(len(values), 6)
+
+    def test_malformed_unicode_escape_fails_closed(self):
+        for value in (r"sdk.dir=C\:\\SDK\u12", r"sdk.dir=C\:\\SDK\uXXXX"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "Malformed Java properties"):
+                self.read(value)
+
+
 class ReleaseFixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -253,6 +292,23 @@ class GuardedPromotionTests(ReleaseFixture):
 
 
 class DeploymentTransactionTests(ReleaseFixture):
+    def test_local_verification_uses_decoded_sdk_path(self):
+        (self.root / "artifacts").mkdir()
+        self.write_matrix(self.root / "artifacts" / VERSION)
+        sdk = self.root / "Андроид SDK"
+        encoded = str(sdk).replace("\\", "\\\\").replace(":", "\\:")
+        (self.root / "local.properties").write_text("sdk.dir=" + encoded + "\n", encoding="utf-8")
+        (self.root / "core.properties").write_text("ANDROID_BUILD_TOOLS=36.0.0\n", encoding="utf-8")
+        checker = mock.Mock()
+        original = self.state()
+        folder, metadata, files = DEPLOY.verified_local_release(VERSION, SIGNER, root=self.root, checker=checker)
+        self.assertEqual(folder, self.root / "artifacts" / VERSION)
+        self.assertEqual(metadata["version_code"], CODE)
+        self.assertEqual(len(files), 6)
+        self.assertEqual(checker.call_count, 2)
+        self.assertTrue(all(call.args[3] == sdk / "build-tools" / "36.0.0" for call in checker.call_args_list))
+        self.assertEqual(self.state(), original)
+
     def test_default_staging_never_changes_version_or_public_files(self):
         self.config["mode"] = "stage"
         original = self.state()

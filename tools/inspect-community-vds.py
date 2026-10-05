@@ -20,6 +20,7 @@ for service in ('quantumvpn-operator','rospanel','nginx','quantumvpn-reserve-tro
     p=subprocess.run(['systemctl','is-active',service],capture_output=True,text=True,timeout=5)
     out[service]=p.stdout.strip()
 try:
+    if (root/'deps').is_dir():sys.path.insert(0,str(root/'deps'))
     import webauthn
     out['webauthn_available']=True
 except ImportError:out['webauthn_available']=False

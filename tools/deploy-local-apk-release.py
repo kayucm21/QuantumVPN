@@ -49,8 +49,70 @@ def parse_schedule(value, *, now=None):
 
 
 def properties(path):
-    return dict(line.split("=", 1) for line in Path(path).read_text(encoding="utf-8").splitlines()
-                if "=" in line and not line.startswith("#"))
+    """Read Gradle Java properties without treating escaped SDK paths literally.
+
+    Java escaping is not Python ``unicode_escape``: existing Unicode must stay
+    intact, unknown escapes drop only the slash, and Windows backslashes must
+    be escaped. Support the usual separators, comments and continued lines.
+    """
+    def decode(value):
+        result, position = [], 0
+        escapes = {"t": "\t", "n": "\n", "r": "\r", "f": "\f"}
+        while position < len(value):
+            char = value[position]
+            position += 1
+            if char != "\\":
+                result.append(char)
+                continue
+            if position == len(value):
+                # A final continuation marker at EOF has no following line.
+                break
+            escaped = value[position]
+            position += 1
+            if escaped == "u":
+                digits = value[position:position + 4]
+                require(bool(re.fullmatch(r"[0-9a-fA-F]{4}", digits)),
+                        "Malformed Java properties Unicode escape")
+                result.append(chr(int(digits, 16)))
+                position += 4
+            else:
+                result.append(escapes.get(escaped, escaped))
+        return "".join(result)
+
+    logical_lines, pending = [], None
+    for raw in re.split(r"\r\n|\n|\r", Path(path).read_text(encoding="utf-8")):
+        line = raw.lstrip(" \t\f")
+        if pending is None and (not line or line.startswith(("#", "!"))):
+            continue
+        line = (pending or "") + line
+        trailing = len(line) - len(line.rstrip("\\"))
+        if trailing % 2:
+            pending = line[:-1]
+        else:
+            logical_lines.append(line)
+            pending = None
+    if pending is not None:
+        logical_lines.append(pending)
+
+    result = {}
+    for line in logical_lines:
+        end, escaped = 0, False
+        while end < len(line):
+            char = line[end]
+            if not escaped and char in "=: \t\f":
+                break
+            escaped = not escaped if char == "\\" else False
+            end += 1
+        start = end
+        if start < len(line) and line[start] in " \t\f":
+            while start < len(line) and line[start] in " \t\f":
+                start += 1
+        if start < len(line) and line[start] in "=:":
+            start += 1
+        while start < len(line) and line[start] in " \t\f":
+            start += 1
+        result[decode(line[:end])] = decode(line[start:])
+    return result
 
 
 def verify_apk(path, artifact, metadata, tool_dir, runner=subprocess.check_output):

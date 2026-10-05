@@ -12,9 +12,10 @@ import time
 import unittest
 from contextlib import closing
 from http.cookies import SimpleCookie
+from html.parser import HTMLParser
 from unittest import mock
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from tools import quantumvpn_control_next as controls
@@ -22,6 +23,32 @@ from tools import test_control_next as control_fixtures
 from tools.test_operator_panel import confirmed_control_fields
 
 ORIGIN = control_fixtures.ORIGIN
+
+
+def browser_form_origin(page, response_headers, document_url, action_url):
+    """Model Fetch's Origin serialization for a top-level form POST.
+
+    urllib does not apply the document's referrer policy. In browsers, the
+    response header initializes it and a referrer meta element overrides it;
+    a non-CORS POST under no-referrer then sends Origin: null.
+    https://fetch.spec.whatwg.org/#append-a-request-origin-header
+    """
+    class ReferrerMeta(HTMLParser):
+        policy = response_headers.get("Referrer-Policy", "strict-origin-when-cross-origin")
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "meta" and attrs.get("name", "").lower() == "referrer":
+                self.policy = attrs.get("content", "").lower()
+
+    metadata = ReferrerMeta()
+    metadata.feed(page)
+    source, target = urlsplit(document_url), urlsplit(action_url)
+    source_origin = (source.scheme, source.hostname, source.port or (443 if source.scheme == "https" else 80))
+    target_origin = (target.scheme, target.hostname, target.port or (443 if target.scheme == "https" else 80))
+    if metadata.policy == "no-referrer" or (metadata.policy == "same-origin" and source_origin != target_origin):
+        return "null"
+    return source.scheme + "://" + source.netloc
 
 
 class ControlHTTPTests(unittest.TestCase):
@@ -65,8 +92,8 @@ class ControlHTTPTests(unittest.TestCase):
         self.cookie = self.make_cookie("owner-test")
         self.csrf = controls.csrf_token(self.panel.session_secret(), hashlib.sha256(self.cookie.split("=", 1)[1].encode()).hexdigest())
 
-    def make_cookie(self, user):
-        value = self.panel.sign_session({"u": user, "exp": int(time.time()) + 3600, "n": "unit-test-browser-session-nonce"})
+    def make_cookie(self, user, nonce="unit-test-browser-session-nonce"):
+        value = self.panel.sign_session({"u": user, "exp": int(time.time()) + 3600, "n": nonce})
         return self.panel.SESSION_COOKIE + "=" + value
 
     def json_post(self, path, payload, headers=None):
@@ -78,6 +105,73 @@ class ControlHTTPTests(unittest.TestCase):
             response = error
         with response:
             return response.status, dict(response.headers), json.loads(response.read())
+
+    def routing_preview(self):
+        # The public HTTPS reverse proxy forwards to this isolated HTTP server.
+        headers = {"Cookie": self.cookie, "Host": urlsplit(ORIGIN).netloc}
+        with urlopen(Request(self.base + "/operator?tab=routing", headers=headers)) as response:
+            panel_headers = dict(response.headers)
+            panel_page = response.read().decode()
+        headers.update({"Origin": browser_form_origin(panel_page, panel_headers, ORIGIN + "/operator?tab=routing", ORIGIN + "/operator/routing"),
+                        "Sec-Fetch-Site": "same-origin", "Content-Type": "application/x-www-form-urlencoded"})
+        body = urlencode({"action": "publish", "routing_enabled": "on", "routing_profile": "whitelist", "routing_dns_mode": "vpn_only",
+                          "routing_dns_resolver": "https://dns.example/dns-query", "routing_proxy_domains": "video.example"}).encode()
+        with urlopen(Request(self.base + "/operator/routing", data=body, headers=headers)) as response:
+            preview_headers = dict(response.headers)
+            preview_page = response.read().decode()
+        return confirmed_control_fields(preview_page), browser_form_origin(
+            preview_page, preview_headers, ORIGIN + "/operator/routing", ORIGIN + "/operator/control/apply")
+
+    def test_routing_publish_browser_form_confirmation(self):
+        with closing(self.panel.conn()) as db:
+            before = self.panel.settings(db)
+        preview, origin = self.routing_preview()
+        self.assertEqual(origin, ORIGIN)
+        self.assertEqual(preview["csrf"], self.csrf)
+        with closing(self.panel.conn()) as db:
+            current = self.panel.settings(db)
+            self.assertEqual(current["routing_profile"], before["routing_profile"])
+            self.assertEqual(current["routing_revision"], before["routing_revision"])
+        with urlopen(Request(self.base + "/operator/control/apply", data=urlencode(preview).encode(),
+                             headers={"Cookie": self.cookie, "Origin": origin, "Sec-Fetch-Site": "same-origin"})) as response:
+            self.assertIn("tab=routing", response.url)
+            self.assertIn("Изменения подтверждены", response.read().decode())
+        with closing(self.panel.conn()) as db:
+            current = self.panel.settings(db)
+            self.assertEqual(current["routing_profile"], "whitelist")
+            self.assertEqual(int(current["routing_revision"]), int(before["routing_revision"]) + 1)
+
+    def test_routing_confirmation_retains_strict_origin_and_session_csrf(self):
+        preview, _ = self.routing_preview()
+        other_session = self.make_cookie("owner-test", "a-different-browser-session")
+        with closing(self.panel.conn()) as db:
+            before = self.panel.settings(db)
+        attempts = (
+            {"Origin": "null"}, {"Origin": ""}, {"Origin": "https://evil.example"},
+            {"Origin": "https://" + urlsplit(ORIGIN).hostname}, {"Sec-Fetch-Site": "cross-site"},
+            {"Cookie": other_session},
+        )
+        for override in attempts:
+            with self.subTest(override=override):
+                headers = {"Cookie": self.cookie, "Origin": ORIGIN, "Sec-Fetch-Site": "same-origin"}
+                headers.update(override)
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(Request(self.base + "/operator/control/apply", data=urlencode(preview).encode(), headers=headers))
+                self.assertEqual(caught.exception.code, 403)
+                caught.exception.close()
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(Request(self.base + "/operator/control/apply", data=urlencode({**preview, "csrf": "wrong"}).encode(),
+                            headers={"Cookie": self.cookie, "Origin": ORIGIN}))
+        self.assertEqual(caught.exception.code, 403)
+        caught.exception.close()
+        with closing(self.panel.conn()) as db:
+            current = self.panel.settings(db)
+            self.assertEqual(current["routing_revision"], before["routing_revision"])
+            self.assertEqual(current["routing_profile"], before["routing_profile"])
+        # Failed requests do not consume the legitimate confirmation.
+        with urlopen(Request(self.base + "/operator/control/apply", data=urlencode(preview).encode(),
+                             headers={"Cookie": self.cookie, "Origin": ORIGIN})) as response:
+            self.assertIn("tab=routing", response.url)
 
     def test_nodes_preview_and_confirmation_origin_csrf(self):
         with closing(self.panel.conn()) as db:

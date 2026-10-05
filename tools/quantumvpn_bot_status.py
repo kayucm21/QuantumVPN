@@ -20,7 +20,7 @@ COMMANDS = frozenset({
 })
 _COMMAND_DESCRIPTIONS = (
     ("status", "Статус VDS, ИИ, APK и доставки"),
-    ("ai_status", "Реальное состояние локальной модели"),
+    ("ai_status", "Модель, анализы и сетевые проверки"),
     ("check_updates", "Публичная версия и расписание выпуска"),
     ("get_stable", "Скачать опубликованный Android APK"),
     ("get_dev", "Проверить наличие отдельного dev APK"),
@@ -97,7 +97,7 @@ def command_help():
     lines.extend([
         "", "Бот работает на VDS: ПК и Codex не нужны.",
         "Запланированный APK недоступен до времени выпуска.",
-        "ИИ локальный, советник не исполняет произвольные команды.",
+        "ИИ-советник не исполняет произвольные команды.",
         "Резервные копии и настройки меняются в панели, не командами бота.",
         "Команды доступны только в настроенном личном чате администратора.",
     ])
@@ -154,6 +154,8 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
     health_ok = _integer(_scalar(db, "select count(*) from server_health where ts>=? and ts<=? and ok=1", (now - 86400, now)))
     latency = _number(_scalar(db, "select avg(latency_ms) from server_health where ts>=? and ts<=? and ok=1 and latency_ms>0", (now - 86400, now)), maximum=600000)
     services = runtime.get("services") if isinstance(runtime.get("services"), dict) else {}
+    guard = runtime.get("network_guard") if isinstance(runtime.get("network_guard"), dict) else {}
+    coverage = guard.get("coverage") if isinstance(guard.get("coverage"), dict) else {}
     backup = runtime.get("backup") if isinstance(runtime.get("backup"), dict) else {}
     delivered_at, delivered_ok = _latest_delivery(db)
     code = _integer(settings.get("app_version_code"))
@@ -168,6 +170,8 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
         "ai": {
             "enabled": _flag(settings.get("ai_advisor_enabled")),
             "model": _safe_name(settings.get("ai_model"), _MODEL_NAME),
+            "provider": "gemini" if local_model.get("provider") == "gemini" else "qwen",
+            "key_configured": _flag(local_model.get("key_configured")),
             "catalogue_available": _flag(local_model.get("ready")),
             "loaded": _flag(local_model.get("loaded")),
             "memory_bytes": _integer(local_model.get("memory_bytes")),
@@ -188,6 +192,8 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
             "health_checks_24h": health_count,
             "health_ok_percent_24h": round(health_ok * 100 / health_count, 1) if health_count and health_ok is not None else None,
             "mean_latency_ms": round(latency, 1) if latency is not None else None,
+            "network_status": _choice(guard.get("status"), {"healthy", "degraded", "insufficient_data"}),
+            "coverage": {stage: _integer(coverage.get(stage), maximum=24) for stage in ("dns", "tcp", "tls")},
         },
         "release": {
             "version": _safe_name(settings.get("app_version"), _VERSION),
@@ -282,17 +288,17 @@ def format_status(snapshot):
     lines = [
         "🤖 Статус Quantum Control Bot",
         f"Срез: {_stamp(snapshot.get('generated_at'))}", "",
-        "🧠 Локальный ИИ-советник",
+        "🧠 ИИ-советник",
         f"• Советник: {_state(ai.get('enabled'))}",
-        f"• Модель: {model} · не облачный API",
-        f"• Модель установлена: {_state(ai.get('catalogue_available'))}",
-        f"• В RAM: {_state(loaded)} · {memory}{share}",
+        f"• Модель: {model} · {'официальный Google API' if ai.get('provider') == 'gemini' else 'локально, не облачный API'}",
+        f"• {'Серверный API-ключ: ' + _state(ai.get('key_configured')) if ai.get('provider') == 'gemini' else 'Модель установлена: ' + _state(ai.get('catalogue_available'))}",
+        f"• {'Облачная модель; RAM VDS не используется для весов' if ai.get('provider') == 'gemini' else 'В RAM: ' + _state(loaded) + ' · ' + memory + share}",
         f"• Активных анализов: {_count(ai.get('active_requests'))}",
         f"• Анализов за 30 дней: {_count(ai.get('observations_30d'))}",
         f"• Успешных: {_count(ai.get('succeeded_30d'))} · {_percent(ai.get('success_percent'))}",
         f"• Последний анализ: {_stamp(ai.get('last_run'))} · {last_status}",
         f"• Системная инструкция: {_state(ai.get('instruction_present'))}",
-        "• Диалоги не ведутся; API-ключи не используются",
+        "• Диалоги не ведутся; " + ("ключ не выводится в статус" if ai.get('provider') == 'gemini' else "API-ключи не используются"),
         "• ИИ даёт рекомендации, не исполняет произвольные команды", "",
         "📊 Ресурсы VDS (реальный замер)",
         f"• CPU: {_bar(server.get('cpu_percent'))}",
@@ -304,6 +310,8 @@ def format_status(snapshot):
         f"• Успешных проверок за 24 ч: {_percent(server.get('health_ok_percent_24h'))} ({_count(server.get('health_checks_24h'))})",
         f"• Средняя задержка проверок: {_count(round(server['mean_latency_ms'])) if _number(server.get('mean_latency_ms'), 600000) is not None else 'нет данных'} мс",
         "• Это проверки VDS, не пинг пользователей", "",
+        f"• Сетевой монитор: { {'healthy': 'стабильные серверные проверки', 'degraded': 'повторное ухудшение', 'insufficient_data': 'недостаточно данных'}.get(server.get('network_status'), 'нет данных')}",
+        "• Причина ТСПУ не доказана; скорость VPN не измеряется", "",
         "📦 APK и выпуск (хранилище VDS)",
         f"• Публичная версия: {version} · код {_count(release.get('version_code'))}",
         f"• Охват: {_percent(release.get('rollout_percent'))}",

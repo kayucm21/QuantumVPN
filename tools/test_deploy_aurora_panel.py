@@ -40,8 +40,10 @@ class DeploymentGuardsTests(unittest.TestCase):
         self.assertFalse(config["apply"])
         self.assertFalse(config["with_community"])
         self.assertFalse(config["with_bot_status"])
+        self.assertFalse(config["with_network_ai"])
         self.assertNotIn("quantumvpn_community.py", payloads)
         self.assertNotIn("quantumvpn_bot_status.py", payloads)
+        self.assertTrue(set(self.deployer.NETWORK_AI_MODULES).isdisjoint(payloads))
         self.assertEqual(set(self.deployer.COMPANIONS), set(config["companions"]))
 
     def test_explicit_community_is_exact_fixed_allowlist(self):
@@ -98,6 +100,70 @@ class DeploymentGuardsTests(unittest.TestCase):
         config, payloads = self.deployer.build_config(args)
         self.assertFalse(config["with_bot_status"])
         self.assertNotIn(self.deployer.BOT_STATUS_MODULE, payloads)
+
+    def test_explicit_network_ai_is_exact_allowlist_and_combines_with_optional_scopes(self):
+        for community, bot in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(community=community, bot=bot), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                tools = root / "tools"
+                tools.mkdir()
+                names = ("quantumvpn_operator_panel.py", "quantumvpn_aurora.py", *self.deployer.COMPANIONS,
+                         *self.deployer.COMMUNITY_MODULES, self.deployer.BOT_STATUS_MODULE,
+                         *self.deployer.NETWORK_AI_MODULES, "unrequested.py")
+                for name in names:
+                    (tools / name).write_text("PANEL_BUILD='2.0.0-aurora.test'\n" if name == "quantumvpn_operator_panel.py" else "# safe source\n")
+                options = ["--with-network-ai", "--expected-old-gemini-sha256", "d" * 64]
+                if community:
+                    options.extend(("--with-community", "--expected-old-target-scan-sha256", "f" * 64))
+                if bot:
+                    options.extend(("--with-bot-status", "--expected-old-network-guard-sha256", "e" * 64))
+                with mock.patch.object(self.deployer, "ROOT", root):
+                    config, payloads = self.deployer.build_config(self.args(*options))
+                expected = {"app.py", "quantumvpn_aurora.py", *self.deployer.NETWORK_AI_MODULES}
+                if community:
+                    expected.update(self.deployer.COMMUNITY_MODULES)
+                if bot:
+                    expected.add(self.deployer.BOT_STATUS_MODULE)
+                self.assertEqual(expected, set(payloads))
+                self.assertEqual(expected, set(config["files"]))
+                self.assertTrue(config["with_network_ai"])
+                self.assertEqual(community, config["with_community"])
+                self.assertEqual(bot, config["with_bot_status"])
+                self.assertEqual("d" * 64, config["files"]["quantumvpn_gemini.py"]["old_sha256"])
+                self.assertEqual("e" * 64 if bot else None, config["files"]["quantumvpn_network_guard.py"]["old_sha256"])
+                self.assertEqual("f" * 64 if community else None, config["files"]["quantumvpn_target_scan.py"]["old_sha256"])
+                self.assertEqual(set(self.deployer.COMPANIONS), set(config["companions"]))
+                for name in self.deployer.NETWORK_AI_MODULES:
+                    self.assertEqual(hashlib.sha256(payloads[name]).hexdigest(), config["files"][name]["sha256"])
+                    self.assertTrue(config["files"][name]["stage"].startswith(".aurora-upload-"))
+
+    def test_network_ai_old_hashes_require_explicit_flag(self):
+        for option in ("--expected-old-gemini-sha256", "--expected-old-network-guard-sha256", "--expected-old-target-scan-sha256"):
+            with self.subTest(option=option), self.assertRaisesRegex(ValueError, "require --with-network-ai"):
+                self.deployer.build_config(self.args(option, "d" * 64))
+
+    def test_legacy_namespace_has_no_network_ai_scope(self):
+        args = self.args()
+        for attribute in ("with_network_ai", "expected_old_gemini_sha256", "expected_old_network_guard_sha256", "expected_old_target_scan_sha256"):
+            delattr(args, attribute)
+        config, payloads = self.deployer.build_config(args)
+        self.assertFalse(config["with_network_ai"])
+        self.assertTrue(set(self.deployer.NETWORK_AI_MODULES).isdisjoint(payloads))
+
+    def test_network_ai_compiles_both_requested_sources_locally(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tools = root / "tools"
+            tools.mkdir()
+            for name in ("quantumvpn_operator_panel.py", "quantumvpn_aurora.py", *self.deployer.COMPANIONS,
+                         *self.deployer.NETWORK_AI_MODULES):
+                (tools / name).write_text("PANEL_BUILD='2.0.0-aurora.test'\n" if name == "quantumvpn_operator_panel.py" else "# safe source\n")
+            for name in self.deployer.NETWORK_AI_MODULES:
+                with self.subTest(name=name), mock.patch.object(self.deployer, "ROOT", root):
+                    (tools / name).write_text("def broken(:\n")
+                    with self.assertRaises(SyntaxError):
+                        self.deployer.build_config(self.args("--with-network-ai"))
+                    (tools / name).write_text("# safe source\n")
 
     def remote_scope(self, root):
         namespace = {"__name__": "offline_deployment_fixture"}
@@ -165,6 +231,68 @@ class DeploymentGuardsTests(unittest.TestCase):
             path.write_text("# newly installed\n")
             scope["restore"](states, backup, [path.name])
             self.assertFalse(path.exists())
+            self.assertEqual(b"wallet changes after deployment", database.read_bytes())
+
+    def test_remote_network_ai_allowlist_presence_and_hash_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            scope = self.remote_scope(root)
+            names = ("app.py", "quantumvpn_aurora.py", *self.deployer.NETWORK_AI_MODULES, self.deployer.BOT_STATUS_MODULE)
+            config = {"files": {name: {"old_sha256": None} for name in names}, "companions": {},
+                      "with_network_ai": True, "with_bot_status": True}
+            scope["environment"] = lambda: {"QV_DATA_DIR": str(root)}
+            with mock.patch.object(scope["os"], "geteuid", return_value=0, create=True):
+                states = scope["preflight"](config)[2]
+                for name in self.deployer.NETWORK_AI_MODULES:
+                    with self.subTest(name=name):
+                        self.assertEqual({"exists": False}, states[name])
+                        missing = {**config, "files": {key: value for key, value in config["files"].items() if key != name}}
+                        with self.assertRaisesRegex(scope["CheckFailed"], "network_ai_sources_missing"):
+                            scope["preflight"](missing)
+                        path = root / name
+                        path.write_text("# existing module\n")
+                        with self.assertRaisesRegex(scope["CheckFailed"], "source_presence_" + name):
+                            scope["preflight"](config)
+                        config["files"][name]["old_sha256"] = "f" * 64
+                        with self.assertRaisesRegex(scope["CheckFailed"], "source_hash_" + name):
+                            scope["preflight"](config)
+                        config["files"][name]["old_sha256"] = scope["digest"](path)
+                        self.assertTrue(scope["preflight"](config)[2][name]["exists"])
+                for flag, name in ((False, "quantumvpn_gemini.py"), (True, "unrequested.py"),
+                                   (True, "../quantumvpn_gemini.py"), (True, "network_guard_setup.sh")):
+                    with self.subTest(flag=flag, name=name):
+                        bad = {**config, "with_network_ai": flag,
+                               "files": {**config["files"], name: {"old_sha256": None}}}
+                        with self.assertRaisesRegex(scope["CheckFailed"], "source_allowlist"):
+                            scope["preflight"](bad)
+
+    def test_network_ai_rollback_restores_only_exact_sources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            backup = root / "source-backup"
+            backup.mkdir()
+            scope = self.remote_scope(root)
+            existing, introduced = (root / name for name in ("quantumvpn_gemini.py", "quantumvpn_target_scan.py"))
+            old = b"# previously deployed gemini module\n"
+            (backup / existing.name).write_bytes(old)
+            for path in (existing, introduced):
+                path.write_text("# newly installed\n")
+            installed = {path.name: {"sha256": scope["digest"](path)} for path in (existing, introduced)}
+            scope["CONFIG"] = {"files": installed, "upload": "fixture-network-ai"}
+            states = {existing.name: {"exists": True, "sha256": hashlib.sha256(old).hexdigest(),
+                                     "uid": 0, "gid": 0, "mode": 0o640}, introduced.name: {"exists": False}}
+            database = root / "operator.db"
+            database.write_bytes(b"wallet changes after deployment")
+            introduced.write_text("# concurrently changed\n")
+            with self.assertRaisesRegex(scope["CheckFailed"], "rollback_source_changed"):
+                scope["restore"](states, backup, [existing.name, introduced.name])
+            self.assertEqual("# newly installed\n", existing.read_text())
+            self.assertTrue(introduced.exists())
+            introduced.write_text("# newly installed\n")
+            with mock.patch.object(scope["os"], "chown", create=True):
+                scope["restore"](states, backup, [existing.name, introduced.name])
+            self.assertEqual(old, existing.read_bytes())
+            self.assertFalse(introduced.exists())
             self.assertEqual(b"wallet changes after deployment", database.read_bytes())
 
     def test_remote_compiles_and_preserves_original_baseline_guards(self):

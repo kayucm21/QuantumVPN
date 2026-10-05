@@ -74,6 +74,18 @@ except ModuleNotFoundError:
     from tools import quantumvpn_bot_status as bot_status
 
 try:
+    import quantumvpn_gemini as gemini
+    import quantumvpn_network_guard as network_guard
+except ModuleNotFoundError:
+    from tools import quantumvpn_gemini as gemini
+    from tools import quantumvpn_network_guard as network_guard
+
+try:
+    from quantumvpn_target_scan import scan_dialog, scan_dialog_css, scan_dialog_script
+except ModuleNotFoundError:
+    from tools.quantumvpn_target_scan import scan_dialog, scan_dialog_css, scan_dialog_script
+
+try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
@@ -109,7 +121,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.1.1-bot.1"
+PANEL_BUILD = "2.1.2-network.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -219,6 +231,8 @@ MAX_ROUTING_SCAN_TARGETS = 24
 MAX_ROUTING_SCAN_ADDRESSES = 3
 ROUTING_SCAN_CONNECT_TIMEOUT_SECONDS = 1.2
 ROUTING_SCAN_WALL_TIMEOUT_SECONDS = 10.0
+ROUTING_SCAN_EVIDENCE_TTL = 10 * 60
+_ROUTING_SCAN_SLOTS = threading.BoundedSemaphore(2)
 
 # The assistant is intentionally local-only.  Keeping the endpoint fixed to
 # loopback makes it impossible for an operator setting to turn the panel into
@@ -485,6 +499,18 @@ def conn():
                     scope text primary key,
                     next_update integer not null default 0,
                     updated_at integer not null default 0
+                );
+                create table if not exists network_guard_state (
+                    id integer primary key check(id=1),
+                    state_json text not null,
+                    report_json text not null,
+                    updated_at integer not null,
+                    external_json text not null default '[]',
+                    external_ts integer not null default 0
+                );
+                create table if not exists ai_api_budget (
+                    day text primary key,
+                    requests integer not null
                 );
                 create table if not exists device_flags (
                     device text primary key,
@@ -1043,6 +1069,8 @@ def normalize_routing_scan_targets(raw: str) -> list[tuple[str, str]]:
     the resolver, keeping the feature useful for routing while preventing it
     from becoming an SSRF primitive.
     """
+    if not isinstance(raw, str) or len(raw) > 4096:
+        raise ValueError("Список целей: не более 4096 символов.")
     targets: list[tuple[str, str]] = []
     for value in re.split(r"[,;\r\n]+", raw or ""):
         value = value.strip().lower().rstrip(".")
@@ -1051,6 +1079,8 @@ def normalize_routing_scan_targets(raw: str) -> list[tuple[str, str]]:
         try:
             address = ipaddress.ip_address(value)
         except ValueError:
+            if "*" in value:
+                raise ValueError("Укажите конкретный домен или поддомен без wildcard.")
             domain = normalize_routing_domains(value)[0] if value else ""
             item = ("domain", domain)
         else:
@@ -1072,6 +1102,10 @@ def _routing_scan_addresses(kind: str, target: str) -> list[str]:
     try:
         rows = socket.getaddrinfo(target, 443, type=socket.SOCK_STREAM)
     except OSError:
+        return []
+    # Fail closed for mixed public/private DNS replies, including rebinding.
+    # Only literal IPs from this checked resolution reach create_connection.
+    if any(not _is_public_routing_address(str(row[4][0])) for row in rows):
         return []
     addresses: list[str] = []
     for _, _, _, _, sockaddr in rows:
@@ -1158,9 +1192,26 @@ def _scan_routing_target(payload: dict, kind: str, target: str) -> dict:
 def scan_routing_targets(raw: str, payload: dict) -> list[dict]:
     """Safely inspect up to 24 public targets in parallel with a hard budget."""
     targets = normalize_routing_scan_targets(raw)
+    scan_slots = _ROUTING_SCAN_SLOTS
+    if not scan_slots.acquire(blocking=False):
+        raise ValueError("Две проверки уже выполняются. Повторите после их завершения.")
     results: list[dict] = []
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(targets)))
     futures = [executor.submit(_scan_routing_target, payload, kind, target) for kind, target in targets]
+    # DNS lookups may outlive the response deadline. Keep the slot occupied
+    # until the workers really finish, preventing repeated scans from spawning
+    # an unlimited number of resolver threads.
+    remaining = [len(futures)]
+    completion_lock = threading.Lock()
+
+    def completed(_):
+        with completion_lock:
+            remaining[0] -= 1
+            if remaining[0] == 0:
+                scan_slots.release()
+
+    for future in futures:
+        future.add_done_callback(completed)
     try:
         for future in concurrent.futures.as_completed(futures, timeout=ROUTING_SCAN_WALL_TIMEOUT_SECONDS):
             try:
@@ -1176,7 +1227,102 @@ def scan_routing_targets(raw: str, payload: dict) -> list[dict]:
             future.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
     order = {target: index for index, (_, target) in enumerate(targets)}
+    checked_targets = {item["target"] for item in results}
+    for kind, target in targets:
+        if target not in checked_targets:
+            recommendation, reason = routing_recommendation(payload, kind, target)
+            results.append({"target": target, "kind": kind, "addresses": [], "latency_ms": None,
+                            "status": "budget", "recommendation": recommendation, "reason": reason,
+                            "checked_at": int(time.time())})
     return sorted(results, key=lambda item: order.get(item["target"], len(order)))
+
+
+def routing_scan_base(s: dict) -> dict:
+    """The reviewed draft, or live policy if no draft exists."""
+    state = dict(s)
+    draft = json.loads(s.get("routing_draft_payload") or "{}")
+    if draft:
+        state.update(routing_settings_from_payload(draft))
+    return routing_payload(state, max(1, int(s.get("routing_revision", "1") or 1)))
+
+
+def routing_scan_token(s: dict, findings: list[dict], actor: str, csrf: str) -> str:
+    return sign_session({
+        "scope": "routing-target-scan", "actor": actor, "binding": hashlib.sha256(csrf.encode()).hexdigest(),
+        "findings": hashlib.sha256(canonical_json(findings)).hexdigest(),
+        "base": hashlib.sha256(canonical_json(routing_scan_base(s))).hexdigest(),
+        "exp": int(time.time()) + ROUTING_SCAN_EVIDENCE_TTL, "nonce": secrets.token_hex(16),
+    })
+
+
+def reviewed_routing_scan(s: dict, actor: str, csrf: str, token: str | None = None) -> list[dict]:
+    """Trust only unchanged, recent server evidence belonging to this session."""
+    stored_token = s.get("routing_scan_token") or ""
+    token = stored_token if token is None else token
+    evidence = verify_session(token)
+    if not evidence or not stored_token or not hmac.compare_digest(token, stored_token):
+        raise ValueError("Проверка устарела или уже использована. Сканируйте цели заново.")
+    if (evidence.get("scope") != "routing-target-scan" or evidence.get("actor") != actor
+            or not hmac.compare_digest(str(evidence.get("binding") or ""), hashlib.sha256(csrf.encode()).hexdigest())):
+        raise ValueError("Эта проверка принадлежит другой сессии. Сканируйте цели заново.")
+    findings = json.loads(s.get("routing_last_scan") or "[]")
+    if (not isinstance(findings, list) or len(findings) > MAX_ROUTING_SCAN_TARGETS
+            or not hmac.compare_digest(str(evidence.get("findings") or ""), hashlib.sha256(canonical_json(findings)).hexdigest())
+            or not hmac.compare_digest(str(evidence.get("base") or ""), hashlib.sha256(canonical_json(routing_scan_base(s))).hexdigest())):
+        raise ValueError("Политика, черновик или результаты изменились. Сканируйте цели заново.")
+    return findings
+
+
+def routing_scan_draft(s: dict, findings: list[dict], form: dict) -> tuple[dict, int]:
+    """Merge only checked result indices, with explicit operator directions."""
+    selected = form.get("scan_selected") or []
+    if not selected or len(selected) > MAX_ROUTING_SCAN_TARGETS:
+        raise ValueError("Выберите хотя бы одну доступную цель.")
+    if len(set(selected)) != len(selected) or any(not re.fullmatch(r"0|[1-9][0-9]?", value) for value in selected):
+        raise ValueError("Некорректный выбор целей.")
+    payload = routing_scan_base(s)
+    rules = payload["rules"]
+    checked_selection = []
+    for raw_index in selected:
+        index = int(raw_index)
+        if index >= len(findings):
+            raise ValueError("Выбранная цель отсутствует в результатах.")
+        item = findings[index]
+        kind, target = item.get("kind"), item.get("target")
+        if normalize_routing_scan_targets(target) != [(kind, target)] or item.get("status") != "ok":
+            raise ValueError("Можно добавить только проверенную доступную цель.")
+        samples = item.get("addresses") or []
+        if not any(isinstance(sample, dict) and _is_public_routing_address(str(sample.get("address") or ""))
+                   and isinstance(sample.get("latency_ms"), int) and sample["latency_ms"] > 0 for sample in samples):
+            raise ValueError("Нет публичного TCP-замера для выбранной цели.")
+        directions = form.get(f"scan_direction_{index}") or []
+        if len(directions) != 1 or directions[0] not in ("proxy", "direct", "block"):
+            raise ValueError("Выберите направление для каждой цели.")
+        direction = directions[0]
+        if kind == "ip" and direction == "block":
+            raise ValueError("Блок-лист поддерживает только домены.")
+        checked_selection.append((kind, target, direction))
+    # Revalidate all selected targets under the same hard time/thread limits.
+    # A changed DNS reply never becomes an internal probe or an unchecked rule.
+    current_findings = scan_routing_targets("\n".join(target for _, target, _ in checked_selection), payload)
+    if (len(current_findings) != len(checked_selection)
+            or any(item.get("status") != "ok" for item in current_findings)):
+        raise ValueError("Выбранная цель больше не доступна на публичном TCP/443. Сканируйте заново.")
+    for kind, target, direction in checked_selection:
+        value = target if kind == "domain" else normalize_routing_cidrs(target)[0]
+        suffix = "domains" if kind == "domain" else "cidrs"
+        # Remove exact duplicates from other directions; inherited parent
+        # domain and wider CIDR rules remain visible for later draft review.
+        for current_direction in ("proxy", "direct", "block"):
+            key = current_direction + "_" + suffix
+            if key in rules:
+                rules[key] = [entry for entry in rules[key] if entry != value]
+        key = direction + "_" + suffix
+        rules[key].append(value)
+    # Round-trip through the same validator as manual drafts, enforcing limits.
+    state = dict(s)
+    state.update(routing_settings_from_payload(payload))
+    return routing_payload(state, payload["revision"]), len(selected)
 
 
 def routing_payload(s: dict, revision: int | None = None) -> dict:
@@ -1748,12 +1894,9 @@ def load_balancer_snapshot(db, s):
         for node in parse_node_map_config(s.get("node_map_config", ""))
         if str(node.get("target") or "").strip()
     }
-    # Older installations can omit the map entirely. In that case retain the
-    # former behaviour until the operator registers actual nodes instead of
-    # unexpectedly disabling balancing.
-    allowed = registered or {
-        f"{host}:{port}" for host, port in parse_latency_targets(s.get("latency_probe_targets", ""))
-    }
+    # Diagnostic DNS/public probes are never usable VPN nodes, even on an
+    # older installation with no explicit node registry.
+    allowed = registered
     candidates = []
     quarantined = active_quarantine(s)
     drained = manual_node_drains(s)
@@ -1763,19 +1906,32 @@ def load_balancer_snapshot(db, s):
             continue
         if short_target in quarantined or short_target in drained:
             continue
-        latency = int(row[3] or 0)
+        if int(time.time()) - int(row[0]) > 300:
+            continue
+        history = [sample for sample in rows if sample[1] == target and int(row[0]) - int(sample[0]) <= 3600][:12]
+        delays = sorted(int(sample[3]) for sample in history if sample[2] and int(sample[3] or 0) > 0)
+        latency = delays[len(delays) // 2] if delays else int(row[3] or 0)
+        failure_percent = round(100 * sum(not sample[2] for sample in history) / len(history), 1)
+        spread = max(delays) - min(delays) if delays else 0
         ok = bool(row[2])
-        score = 0 if not ok else max(1, min(100, round(100 - (latency / max_latency) * 70)))
+        score = 0 if not ok else max(1, min(100, round(100 - (latency / max_latency) * 45 - failure_percent * .5 - (spread / max_latency) * 20)))
         candidates.append({
             "target": target.removeprefix("latency:"),
             "ok": ok,
             "latency_ms": latency,
             "score": score,
+            "probe_failure_percent": failure_percent,
+            "latency_spread_ms": spread,
+            "sample_count": len(history),
             "last_check": int(row[0]),
             "detail": str(row[4] or "")[:160],
         })
     candidates.sort(key=lambda item: (-int(item["ok"]), -int(item["score"]), int(item["latency_ms"] or 999999)))
-    selected = candidates[0]["target"] if enabled_flag and candidates and candidates[0]["ok"] else ""
+    best = candidates[0] if candidates and candidates[0]["ok"] else None
+    previous = next((item for item in candidates if item["target"] == s.get("load_balancer_last_target") and item["ok"] and item["probe_failure_percent"] < 25), None)
+    # Hysteresis avoids flipping recommendations on tiny RTT fluctuations.
+    choice = previous if previous and best and previous["score"] >= best["score"] - 10 else best
+    selected = choice["target"] if enabled_flag and choice else ""
     return {
         "enabled": enabled_flag,
         "strategy": s.get("load_balancer_strategy") or "latency_health",
@@ -2052,7 +2208,7 @@ def run_latency_probe(db, s=None):
     }
     node_targets = [
         (host, port) for host, port in targets
-        if not registered or f"{host}:{port}" in registered
+        if f"{host}:{port}" in registered
     ]
     samples = []
     node_samples = []
@@ -2095,8 +2251,81 @@ def run_latency_probe(db, s=None):
                     json.dumps({"selected": selected, "previous": previous, "strategy": decision.get("strategy")}, ensure_ascii=False),
                 ),
             )
+    monitor_network_health(db, s)
     db.commit()
     return {"enabled": True, "samples": samples, "best_ms": best, "state": state, "balancer": decision}
+
+
+def network_guard_snapshot(db):
+    row = db.execute("select report_json from network_guard_state where id=1").fetchone()
+    try:
+        return json.loads(row[0]) if row else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def render_network_guard_report(report):
+    labels = {"healthy": "Серверные проверки стабильны", "degraded": "Повторная деградация", "insufficient_data": "Недостаточно данных"}
+    coverage = report.get("coverage", {})
+    rows = []
+    for node in report.get("nodes", [])[:12]:
+        delay = node.get("latency_ms")
+        baseline = node.get("baseline_ms")
+        rows.append(f"<tr><td>{html.escape(str(node.get('target') or ''))}</td><td>{html.escape(str(node.get('status') or 'unknown'))}</td><td>{delay if delay is not None else 'Нет замера'} / {baseline if baseline is not None else 'Нет базы'}</td></tr>")
+    return ("<section class=card><h2>Стабильность сети и резерв</h2><p><b>" +
+            labels.get(report.get("status"), "Мониторинг начинает сбор данных") +
+            "</b></p><p class=muted>Измеряемые цели: DNS " + str(coverage.get("dns", 0)) +
+            " · TCP " + str(coverage.get("tcp", 0)) + " · TLS " + str(coverage.get("tls", 0)) +
+            ". Таймаут сам по себе не доказывает ТСПУ. Скорость VPN и путь телефона здесь не измерялись.</p>" +
+            "<table><thead><tr><th>Настроенная нода</th><th>Состояние</th><th>Задержка / база, мс</th></tr></thead><tbody>" +
+            ("".join(rows) or "<tr><td colspan=3>Нет свежей серии проверок зарегистрированных нод</td></tr>") +
+            "</tbody></table><p class=muted>Уведомления об ухудшении и восстановлении — после повторных проверок. Активные VPN-сессии не перезапускаются. Поддержка мониторинга не гарантирует обход блокировок.</p></section>")
+
+
+def monitor_network_health(db, s):
+    """Series-based alerts, not an attribution engine or a VPN config writer."""
+    now = int(time.time())
+    rows = [dict(row) for row in db.execute(
+        "select ts,target,ok,latency_ms,detail from server_health where ts>=? and target like 'latency:%' order by ts desc limit 2048",
+        (now - 86400,)).fetchall()]
+    try:
+        scan = json.loads(s.get("routing_last_scan") or "[]")
+    except (ValueError, TypeError):
+        scan = []
+    rows.extend(network_guard.routing_scan_health_rows(scan))
+    saved = db.execute("select state_json,external_json,external_ts from network_guard_state where id=1").fetchone()
+    external, external_ts = [], int(saved[2]) if saved else 0
+    if saved:
+        try:
+            external = json.loads(saved[1])
+        except (ValueError, TypeError):
+            pass
+    if now - external_ts >= 240:
+        # Only the operator's explicit public targets, not Internet discovery.
+        # Keep the worker's evidence separate from the UI's session-bound scan.
+        try:
+            targets = normalize_routing_scan_targets(s.get("routing_scan_targets", ""))[:3]
+            raw = "\n".join(target for kind, target in targets)
+            external = scan_routing_targets(raw, routing_payload(s)) if raw else []
+        except (ValueError, TypeError):
+            external = []
+        external_ts = now
+    rows.extend(network_guard.routing_scan_health_rows(external))
+    result = network_guard.analyze_network_health(
+        rows, parse_node_map_config(s.get("node_map_config", "")), now=now,
+        state=saved[0] if saved else None,
+        blocked_nodes=set(active_quarantine(s)) | set(manual_node_drains(s)),
+        current_target=s.get("load_balancer_last_target", ""))
+    for alert in result["alerts"][:8]:
+        restored = alert["kind"] == "recovery"
+        message = "Доступность восстановлена" if restored else "Повторное ухудшение сети"
+        notice = f"[Quantum Control · сеть]\n{message}: {alert['target']} · {alert['stage'].upper()}\n{alert['message']}\nАктивные VPN-сессии не перезапускались."
+        sent = telegram_send(s, notice) if enabled(s, "telegram_alerts_enabled", False) else False
+        db.execute("insert into events values (?,?,?,?,?)", (now, "network_recovery" if restored else "network_deterioration", "network-guard", "", json.dumps({"target": alert["target"], "stage": alert["stage"], "cause": "unconfirmed", "telegram_sent": sent})))
+    state = result.pop("state")
+    db.execute("insert into network_guard_state (id,state_json,report_json,updated_at,external_json,external_ts) values (1,?,?,?,?,?) on conflict(id) do update set state_json=excluded.state_json,report_json=excluded.report_json,updated_at=excluded.updated_at,external_json=excluded.external_json,external_ts=excluded.external_ts",
+               (json.dumps(state, separators=(",", ":")), json.dumps(result, ensure_ascii=False, separators=(",", ":")), now, json.dumps(external, separators=(",", ":")), external_ts))
+    return result
 
 
 def latency_worker():
@@ -2692,6 +2921,9 @@ def bot_runtime_snapshot():
 
 def bot_local_model_snapshot(s):
     model = s.get("ai_model") or QWEN_DEFAULT_MODEL
+    if model == gemini.MODEL:
+        return {"provider": "gemini", "ready": None, "loaded": None,
+                "memory_bytes": None, "key_configured": gemini.configured()}
     result = qwen_local_status(model)
     if result.get("ok") is not True:
         # An unavailable catalogue is unknown, not proof of an absent model.
@@ -2741,7 +2973,9 @@ def bot_command_reply(db, s, command):
             if os.path.isfile(path) and not os.path.islink(path):
                 lines.append(f"{abi}: {DOWNLOAD_BASE}/downloads/{version}/{name}")
         return "\n".join(lines) if len(lines) > 2 else "Опубликованный APK пока недоступен."
-    snapshot = bot_status.collect_status(db, s, runtime=bot_runtime_snapshot(),
+    runtime = bot_runtime_snapshot()
+    runtime["network_guard"] = network_guard_snapshot(db)
+    snapshot = bot_status.collect_status(db, s, runtime=runtime,
                                          local_model=bot_local_model_snapshot(s))
     return bot_status.format_status(snapshot)
 
@@ -2888,6 +3122,7 @@ def ai_operations_snapshot(db, s: dict) -> dict:
     """
     report = report_snapshot(db)
     service = cached_service_status(ttl=0)
+    measured = bot_runtime_snapshot()
     balancer = load_balancer_snapshot(db, s)
     backup = latest_backup_info()
     latest = {}
@@ -2897,12 +3132,21 @@ def ai_operations_snapshot(db, s: dict) -> dict:
     ).fetchall():
         latest.setdefault(str(row[1]).removeprefix("latency:"), row)
     nodes = []
+    guard_report = network_guard_snapshot(db)
+    guard_nodes = {node["target"]: node for node in guard_report.get("nodes", [])}
+    registered = {node["target"] for node in parse_node_map_config(s.get("node_map_config", ""))}
     for target, row in sorted(latest.items())[:12]:
+        if target not in registered:
+            continue
         nodes.append({
             "target": target,
             "ok": bool(row[2]),
             "latency_ms": int(row[3] or 0),
             "checked_at": int(row[0]),
+            "baseline_ms": guard_nodes.get(target, {}).get("baseline_ms"),
+            "success_ratio": guard_nodes.get(target, {}).get("success_ratio"),
+            "latency_spread_ms": guard_nodes.get(target, {}).get("latency_spread_ms"),
+            "reserve_candidate": guard_nodes.get(target, {}).get("status") == "healthy" and int(time.time()) - int(row[0]) <= 300,
         })
     return {
         "generated_at": int(time.time()),
@@ -2910,9 +3154,9 @@ def ai_operations_snapshot(db, s: dict) -> dict:
             "rospanel": service.get("rospanel", "unknown"),
             "operator": service.get("operator", "unknown"),
             "xray": service.get("xray", "unknown"),
-            "cpu_load_pct": service.get("cpu_load_pct", 0),
-            "memory_used_pct": service.get("memory_used_pct", 0),
-            "disk_used_pct": service.get("disk_used_pct", 0),
+            "cpu_load_pct": measured.get("cpu_percent"),
+            "memory_used_pct": measured.get("memory_percent"),
+            "disk_used_pct": measured.get("disk_percent"),
         },
         "health": {
             "uptime_percent_24h": report.get("health_uptime_percent", 0),
@@ -2934,6 +3178,7 @@ def ai_operations_snapshot(db, s: dict) -> dict:
             "hourly_delivery_enabled": enabled(s, "telegram_backups_enabled", False),
         },
         "nodes": nodes,
+        "network_guard": network_guard.model_network_snapshot(network_guard_snapshot(db)),
     }
 
 
@@ -2945,6 +3190,11 @@ def ai_prompt(snapshot: dict) -> str:
         "автоматически, не запрашивай секреты и не упоминай персональные данные. "
         "Пинг зависит от физической дистанции: не обещай невозможных значений. "
         "Отдельно отметь, если резервная копия отсутствует или устарела. "
+        "Сравни доступность и устойчивость нод, перегрузку CPU/RAM и резерв. "
+        "Недостаток данных называй недостатком данных. Единичный таймаут "
+        "не доказывает ТСПУ; не утверждай причину блокировки без доказательств. "
+        "Любые изменения требуют предпросмотра, подтверждения и отката "
+        "при ухудшении. Не давай shell-команды и не меняй порты или подписки. "
         "Ответь по-русски, максимум 900 символов, в трёх коротких частях: "
         "«Статус», «Риски», «Следующий ручной шаг». Если всё в норме, так и скажи.\n\n"
         + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
@@ -2972,6 +3222,23 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
     model = (s.get("ai_model") or QWEN_DEFAULT_MODEL).strip()
     if not enabled(s, "ai_advisor_enabled", True):
         result = {"ok": False, "status": "выключен", "advice": "ИИ‑советник выключен оператором."}
+    elif model == gemini.MODEL:
+        try:
+            if not gemini.configured():
+                raise gemini.GeminiError("missing_key")
+            day = time.strftime("%Y-%m-%d", time.gmtime(now))
+            db.execute("insert or ignore into ai_api_budget values (?,0)", (day,))
+            budget = db.execute("update ai_api_budget set requests=requests+1 where day=? and requests<120", (day,))
+            db.commit()
+            if not budget.rowcount:
+                raise gemini.GeminiError("quota")
+            snapshot = ai_operations_snapshot(db, s)
+            analysis = gemini.analyze(snapshot)
+            result = {"ok": True, "status": "готов", **analysis}
+        except gemini.GeminiError as exc:
+            result = {"ok": False, "status": "ожидание модели" if exc.code == "missing_key" else "ошибка",
+                      "advice": "Для Gemini нужен защищённый серверный API-ключ." if exc.code == "missing_key" else "Gemini не ответил. Мониторинг и VPN продолжают работать независимо от ИИ.",
+                      "error": exc.code}
     elif model != QWEN_DEFAULT_MODEL:
         result = {"ok": False, "status": "ошибка", "advice": "Разрешена только локальная модель Qwen3 0.6B.", "error": "unsupported_model"}
     else:
@@ -3031,7 +3298,7 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
     )
     sent = False
     if should_notify:
-        sent = telegram_send(s, f"[Quantum Control · Qwen]\nСтатус: {values['ai_last_status']}\n{advice}")
+        sent = telegram_send(s, f"[Quantum Control · {'Gemini' if model == gemini.MODEL else 'Qwen'}]\nСтатус: {values['ai_last_status']}\n{advice}")
         if sent:
             values.update({"ai_last_notification_hash": digest, "ai_last_notification_at": str(now)})
     set_settings(db, values)
@@ -3043,7 +3310,7 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
     db.execute("delete from ai_observations where ts<?", (now - 30 * 86400,))
     db.execute(
         "insert into events values (?,?,?,?,?)",
-        (now, "ai_analysis", "qwen-local", "", json.dumps({"trigger": trigger, "ok": bool(result.get("ok")), "status": values["ai_last_status"], "telegram_sent": sent}, ensure_ascii=False)),
+        (now, "ai_analysis", "gemini-api" if model == gemini.MODEL else "qwen-local", "", json.dumps({"trigger": trigger, "ok": bool(result.get("ok")), "status": values["ai_last_status"], "telegram_sent": sent}, ensure_ascii=False)),
     )
     db.commit()
     return {**result, "telegram_sent": sent}
@@ -3309,6 +3576,13 @@ def render_login(error=""):
 
 def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None, actor_user="", control_csrf=""):
     checked = lambda key: "checked" if s.get(key) == "1" else ""
+    network_guard_html = ""
+    if section in {"ai", "latency"}:
+        guard_db = conn()
+        try:
+            network_guard_html = render_network_guard_report(network_guard_snapshot(guard_db))
+        finally:
+            guard_db.close()
     next_quality_html = next_history_html = passkey_html = ""
     if section in {"quality", "release", "security", "admins"}:
         control_db = conn()
@@ -3590,11 +3864,11 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     routing_signature_label = "Ed25519 готова" if Ed25519PrivateKey is not None else "нужен пакет cryptography"
     routing_scan_targets = (s.get("routing_scan_targets") or "").strip()[:4096]
     try:
-        saved_scan = json.loads(s.get("routing_last_scan") or "[]")
-        if not isinstance(saved_scan, list):
-            saved_scan = []
+        saved_scan = reviewed_routing_scan(s, actor_user, control_csrf)
+        scan_token = s.get("routing_scan_token") or ""
     except (TypeError, ValueError, json.JSONDecodeError):
         saved_scan = []
+        scan_token = ""
     scan_recommendation_labels = {
         "direct": "напрямую",
         "proxy": "через VPN",
@@ -3635,6 +3909,12 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         for item in saved_scan[:MAX_ROUTING_SCAN_TARGETS]
         if isinstance(item, dict) and str(item.get('target') or '')
     ) or "<div class='routing-empty'>Добавьте домены и нажмите «Сканировать цели». Проверка выполняется TCP/443 с VDS.</div>"
+    routing_scan_dialog_html = scan_dialog(
+        saved_scan, scan_token, control_csrf, auto_open=section == "routing" and flash.startswith("Проверено целей:"),
+        can_write=role_at_least(actor_role, "operator"),
+        reserve_available=reserve_profile_ready and enabled(s, "reserve_profile_enabled", True),
+        limit=MAX_ROUTING_SCAN_TARGETS,
+    )
     event_timeline = "".join(
         f"<div class='event-row'><span class='event-dot {'warn' if kind in ('error','incident') else 'ok'}'></span>"
         f"<time>{time.strftime('%H:%M', time.localtime(ts))}</time><b>{html.escape(device or 'Система')[:22]}</b>"
@@ -3674,7 +3954,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     navigation, subnavigation = aurora_navigation(section, actor_role)
     current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-    <title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}{aurora_css()}</style><body class=aurora-panel data-ui=Aurora2><main><div class=panel-shell>
+    <meta name=referrer content=same-origin><title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}{aurora_css()}{scan_dialog_css()}</style><body class=aurora-panel data-ui=Aurora2><main><div class=panel-shell>
       <aside class=sidebar>
       <div class=sidebar-brand>Quantum Control<span>AURORA · 2.0</span></div>
       {navigation}
@@ -3885,13 +4165,16 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </header>
       <section class=routing-top-grid>
         <section class="card routing-card routing-scanner">
-          <h2>Анализатор целей</h2><p class=routing-subtitle>TCP/443 с VDS, до {MAX_ROUTING_SCAN_TARGETS} доменов или публичных IP.</p>
-          <form method=post action=/operator/routing>
+          <h2>Анализатор целей</h2><p class=routing-subtitle>TCP/443 с VDS, до {MAX_ROUTING_SCAN_TARGETS} доменов, поддоменов или публичных IP.</p>
+          <p class=muted>Три начальных домена — пример короткой проверки. Замените список своими целями; проверяются только явно введённые адреса.</p>
+          <form id=routing-scan-form method=post action=/operator/routing>
             <input type=hidden name=action value=scan>
-            <label class=target-field><textarea rows=3 name=routing_scan_targets aria-label="Домены для проверки" placeholder="youtube.com\ndiscord.com\nmedia.discordapp.net">{html.escape(routing_scan_targets)}</textarea></label>
+            <input type=hidden name=csrf value="{html.escape(control_csrf, quote=True)}">
+            <label class=target-field><textarea rows=3 maxlength=4096 name=routing_scan_targets aria-label="Домены, поддомены или IP для проверки" placeholder="youtube.com\ndiscord.com\nmedia.discordapp.net">{html.escape(routing_scan_targets)}</textarea></label>
             <button class=routing-submit>Сканировать цели</button>
           </form>
           <div class=routing-results><span class=routing-results-title>Последняя проверка</span>{routing_scan_compact_html}</div>
+          <button type=button class="secondary scan-open-results" data-scan-open>Открыть результаты и выбрать цели</button>
         </section>
         <form id=routing-policy class="routing-policy-form" method=post action=/operator/routing>
           <section class="card routing-card routing-rules">
@@ -3918,18 +4201,21 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <section class="card routing-notice"><i>ⓘ</i><div><b>Блокировка рекламы не гарантируется для рекламы с доменов самого видеосервиса.</b><p>Фильтр безопасно блокирует только отдельные рекламные и трекерные домены; правила не должны ломать авторизацию, банки или обновления ОС.</p></div></section>
       </section>
       <details class="card routing-history"><summary>История маршрутизации и откат</summary><p class=muted>Откат создаёт новую ревизию — аудит и предыдущие версии сохраняются.</p><table><thead><tr><th>Ревизия</th><th>Время</th><th>Оператор</th><th>Канал</th><th>Заметка</th><th></th></tr></thead><tbody>{routing_history_html}</tbody></table></details>
+      {routing_scan_dialog_html}
     </section>
 
+    <section {show('latency')}>{network_guard_html}</section>
     <section class=grid {show('ai')}>
       <form class=card method=post action=/operator/policy>
         <input type=hidden name=section value=ai>
-        <h2>Локальный Qwen</h2>
-        <p class=muted>Советник анализирует агрегированные данные нод и сервисов на этом VDS. Он не получает пользователей, ключи, подписки, IP клиентов или журналы запросов.</p>
+        <h2>Сетевой ИИ-аналитик</h2>
+        <p class=muted>Qwen работает локально; Gemini — через официальный Google API. В облако отправляются только числовые агрегаты и обезличенные ID нод, без адресов, ключей, пользователей и журналов запросов.</p>
         <label><input type=checkbox name=ai_advisor_enabled {checked('ai_advisor_enabled')}> Включить ИИ‑советник</label>
-        <label>Модель<input name=ai_model value="{html.escape(s.get('ai_model', QWEN_DEFAULT_MODEL))}" readonly></label>
+        <label>Модель<select name=ai_model><option value="{QWEN_DEFAULT_MODEL}" {'selected' if s.get('ai_model', QWEN_DEFAULT_MODEL) == QWEN_DEFAULT_MODEL else ''}>Qwen3 0.6B · локально</option><option value="{gemini.MODEL}" {'selected' if s.get('ai_model') == gemini.MODEL else ''}>Gemini 3.8 Flash · API</option></select></label>
+        <p class=muted>Gemini: {'ключ настроен, связь проверяется анализом' if gemini.configured() else 'API-ключ не настроен — текущий Qwen остаётся работать'}. Ключ задаётся в окружении сервиса QV_GEMINI_API_KEY и никогда не передаётся в браузер.</p>
         <label>Интервал анализа, секунд<input type=number name=ai_interval_seconds min=300 max=86400 value="{html.escape(s.get('ai_interval_seconds','900'))}"></label>
         <label><input type=checkbox name=ai_telegram_enabled {checked('ai_telegram_enabled')}> Отправлять новый важный вывод в Telegram</label>
-        <p class=notice><b>Безопасность:</b> Qwen не имеет доступа к shell, API‑ключам, настройкам нод или кнопкам перезапуска. Балансировщик и карантин остаются детерминированными.</p>
+        <p class=notice><b>Безопасность:</b> ИИ не исполняет команды и не перезапускает активный VPN. Балансировщик и карантин детерминированы; изменение маршрутов проходит предпросмотр и подтверждение.</p>
         <button>Сохранить ИИ‑настройки</button>
       </form>
       <section class=card>
@@ -3946,6 +4232,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </section>
     </section>
 
+    <section {show('ai')}>{network_guard_html}</section>
     <section class=grid {show('automation')}>
       <form class=card method=post action=/operator/policy><input type=hidden name=section value=automation>
         <h2>Автопилот панели</h2>
@@ -4271,7 +4558,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       window.addEventListener('pagehide', () => clearInterval(timer), {{once:true}});
     }}
     </script>
-    {aurora_script()}{control_next.passkey_script()}</main></body></html>"""
+    {aurora_script()}{control_next.passkey_script()}{scan_dialog_script()}</main></body></html>"""
 
 
 class App(BaseHTTPRequestHandler):
@@ -4333,7 +4620,11 @@ class App(BaseHTTPRequestHandler):
 
     def control_preview_page(self, preview, adm):
         body = control_next.render_preview(preview, self.control_csrf(adm))
-        return self.reply(200, "<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Проверка изменений</title><style>" + css() + control_reference_css() + aurora_css() + "</style><body class=aurora-panel><main style='max-width:1000px;margin:24px auto;padding:16px'>" + body + "</main></body></html>", "text/html; charset=utf-8")
+        # reply() defaults to no-referrer, which makes a browser's navigational
+        # POST send Origin: null. Override it for this same-origin confirmation
+        # document so control_post can retain its exact Origin and session CSRF
+        # checks; foreign destinations still receive no referrer.
+        return self.reply(200, "<!doctype html><html lang=ru><head><meta charset=utf-8><meta name=referrer content=same-origin><meta name=viewport content='width=device-width,initial-scale=1'><title>Проверка изменений</title><style>" + css() + control_reference_css() + aurora_css() + "</style></head><body class=aurora-panel><main style='max-width:1000px;margin:24px auto;padding:16px'>" + body + "</main></body></html>", "text/html; charset=utf-8")
 
     def control_apply_values(self, db, values, scope, actor, ip):
         live = settings(db)
@@ -5966,8 +6257,10 @@ class App(BaseHTTPRequestHandler):
             action = (form.get("action", ["publish"])[0] or "publish").strip()
             try:
                 if action == "scan":
-                    raw_targets = (form.get("routing_scan_targets", [""])[0] or "")[:4096]
-                    active_payload = routing_payload(s)
+                    if self.cookie_session() and not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0]):
+                        return self.reply(403, "Неверное подтверждение запроса. Обновите страницу панели", "text/plain; charset=utf-8")
+                    raw_targets = form.get("routing_scan_targets", [""])[0] or ""
+                    active_payload = routing_scan_base(s)
                     findings = scan_routing_targets(raw_targets, active_payload)
                     # Keep this operator-only evidence outside the signed
                     # policy.  A scan cannot push a rule to clients; a human
@@ -5979,6 +6272,7 @@ class App(BaseHTTPRequestHandler):
                         "insert or replace into settings values (?,?)",
                         ("routing_last_scan", json.dumps(findings, ensure_ascii=False, separators=(",", ":"))),
                     )
+                    set_settings(db, {"routing_scan_token": routing_scan_token(s, findings, actor, self.control_csrf(adm))})
                     audit(db, actor, ip, "routing:scan", {
                         "targets": len(findings),
                         "ok": sum(1 for item in findings if item.get("status") == "ok"),
@@ -5990,6 +6284,30 @@ class App(BaseHTTPRequestHandler):
                     db.commit()
                     ready = sum(1 for item in findings if item.get("status") == "ok")
                     return self.redirect_operator("routing", f"Проверено целей: {len(findings)}, TCP/443 доступно: {ready}")
+
+                if action == "apply_scan":
+                    if not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0]):
+                        return self.reply(403, "Неверное подтверждение запроса. Обновите страницу панели", "text/plain; charset=utf-8")
+                    live = settings(db)
+                    findings = reviewed_routing_scan(live, actor, self.control_csrf(adm), form.get("scan_token", [""])[0])
+                    draft_payload, count = routing_scan_draft(live, findings, form)
+                    # Network revalidation runs before taking the write lock.
+                    # Then atomically verify the same base and consume evidence.
+                    db.execute("begin immediate")
+                    reviewed_routing_scan(settings(db), actor, self.control_csrf(adm), form.get("scan_token", [""])[0])
+                    now = int(time.time())
+                    set_settings(db, {
+                        "routing_draft_payload": canonical_json(draft_payload).decode("utf-8"),
+                        "routing_draft_updated_at": str(now), "routing_scan_token": "",
+                    })
+                    audit(db, actor, ip, "routing:apply_scan", {
+                        "selected": count, "revision_base": draft_payload["revision"],
+                        "sha256": hashlib.sha256(canonical_json(draft_payload)).hexdigest(),
+                    })
+                    db.execute("insert into events values (?,?,?,?,?)",
+                               (now, "routing_scan_draft", actor, ip, json.dumps({"selected": count})))
+                    db.commit()
+                    return self.redirect_operator("routing", f"Добавлено в черновик: {count}. Проверьте правила перед отдельной публикацией; APK пока не получает изменения.")
 
                 if action in ("save", "publish", "stage"):
                     candidate_values = routing_candidate_from_form(form)
@@ -6200,7 +6518,7 @@ class App(BaseHTTPRequestHandler):
                 flash = "Проверка запущена в фоне"
             elif action in ("run_ai_analysis", "check_ai_model"):
                 if action == "check_ai_model":
-                    model_status = qwen_local_status(s.get("ai_model") or QWEN_DEFAULT_MODEL)
+                    model_status = ({"ready": gemini.configured()} if s.get("ai_model") == gemini.MODEL else qwen_local_status(s.get("ai_model") or QWEN_DEFAULT_MODEL))
                     flash = "Qwen готова" if model_status.get("ready") else (model_status.get("error") or "Qwen недоступна")
                     db.execute(
                         "insert into events values (?,?,?,?,?)",
@@ -6560,11 +6878,13 @@ class App(BaseHTTPRequestHandler):
             except Exception:
                 return self.redirect_operator(tab, "Не сохранено: интервал ИИ должен быть целым числом")
             requested_model = (form.get("ai_model", [QWEN_DEFAULT_MODEL])[0] or "").strip()
-            if requested_model != QWEN_DEFAULT_MODEL:
-                return self.redirect_operator(tab, "Не сохранено: разрешена только локальная Qwen3 0.6B")
+            if requested_model not in {QWEN_DEFAULT_MODEL, gemini.MODEL}:
+                return self.redirect_operator(tab, "Не сохранено: выберите Qwen3 0.6B или Gemini 3.8 Flash")
+            if requested_model == gemini.MODEL and not gemini.configured():
+                return self.redirect_operator(tab, "Gemini не включён: сначала настройте QV_GEMINI_API_KEY на VDS. Текущая модель сохранена.")
             values = {
                 "ai_advisor_enabled": "1" if "ai_advisor_enabled" in form else "0",
-                "ai_model": QWEN_DEFAULT_MODEL,
+                "ai_model": requested_model,
                 "ai_interval_seconds": str(interval),
                 "ai_telegram_enabled": "1" if "ai_telegram_enabled" in form else "0",
             }

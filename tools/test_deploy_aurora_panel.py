@@ -72,6 +72,28 @@ class DeploymentGuardsTests(unittest.TestCase):
         self.assertNotIn("shell=True", source)
         self.assertIn("['systemctl', 'restart', SERVICE]", source)
 
+    def test_update_snapshot_only_normalizes_absent_false_pause(self):
+        namespace = {"__name__": "offline_deployment_fixture"}
+        exec(self.deployer.REMOTE_SOURCE, namespace)
+        # Isolate the actual snapshot function from HTTP/crypto/filesystem.
+        def snapshot(pause="absent", changed=False):
+            def fixture_request(env, path, timeout=8):
+                if path.startswith('/api/client/update'):
+                    value = {"version": "fixture", "sha256": "a" * 64}
+                    if pause != "absent": value["rollout_paused"] = pause
+                    if changed: value["sha256"] = "b" * 64
+                    return 200, {}, __import__('json').dumps(value).encode()
+                if path.startswith('/api/client/resources'): return 204, {}, b''
+                return 200, {}, b'{}'
+            namespace['request'] = fixture_request
+            namespace['envelope'] = lambda value, public: value
+            return namespace['public_snapshot']({}, 'fixture')
+        baseline = snapshot()
+        self.assertEqual(baseline, snapshot(False))
+        self.assertNotEqual(baseline, snapshot(True))
+        self.assertNotEqual(baseline, snapshot(0))
+        self.assertNotEqual(baseline, snapshot(False, changed=True))
+
     def test_isolated_chain_selected_before_external_imports(self):
         # Global cryptography 41 is cached if imported before the isolated 50.x
         # package. WebAuthn then cannot find asymmetric.mldsa even with deps on

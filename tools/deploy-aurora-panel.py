@@ -206,9 +206,17 @@ def request(env, path, timeout=8):
     else:
         connection = http.client.HTTPConnection(host, port, timeout=timeout)
     try:
-        connection.request('GET', path, headers={'User-Agent': 'QuantumVPN-Aurora-Deployment-Probe'})
-        response = connection.getresponse()
-        body = response.read(4 * 1024 * 1024 + 1)
+        try:
+            connection.request('GET', path, headers={'User-Agent': 'QuantumVPN-Aurora-Deployment-Probe'})
+            response = connection.getresponse()
+            body = response.read(4 * 1024 * 1024 + 1)
+        except TimeoutError:
+            # Fixed probe paths contain no account/token material. Never expose
+            # response bodies or runtime environment in deployment diagnostics.
+            label = path.split('?', 1)[0].strip('/').replace('/', '_')
+            if 'abi=arm64-v8a' in path: label += '_arm64'
+            elif 'abi=armeabi-v7a' in path: label += '_armv7'
+            raise CheckFailed('probe_timeout_' + label) from None
         require(len(body) <= 4 * 1024 * 1024, 'probe_size')
         return response.status, dict(response.getheaders()), body
     finally:
@@ -230,6 +238,11 @@ def public_snapshot(env, public):
         status, headers, body = request(env, '/api/client/update?abi=' + abi + '&current_version_code=0')
         require(status == 200, 'update_api_' + abi)
         result[abi] = json.loads(body)
+        # The new opt-in guard adds this boolean. Legacy omission means false,
+        # not a different release. True/non-boolean and every other field still
+        # change the snapshot and fail deployment; no artifact/routing/signer
+        # baseline is weakened by normalizing this one backward-compatible key.
+        result[abi].setdefault('rollout_paused', False)
     status, headers, body = request(env, '/api/client/routing?bucket=0')
     require(status == 200, 'routing_api')
     result['routing'] = envelope(json.loads(body), public)

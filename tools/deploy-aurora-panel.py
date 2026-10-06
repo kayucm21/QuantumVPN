@@ -25,6 +25,7 @@ COMPANIONS = ("quantumvpn_control_quality.py", "quantumvpn_resources.py")
 COMMUNITY_MODULES = ("quantumvpn_durak.py", "quantumvpn_community.py", "quantumvpn_control_next.py")
 BOT_STATUS_MODULE = "quantumvpn_bot_status.py"
 NETWORK_AI_MODULES = ("quantumvpn_gemini.py", "quantumvpn_network_guard.py", "quantumvpn_target_scan.py")
+LOCAL_AI_MODULES = ("quantumvpn_llama.py", "quantumvpn_autopilot.py", "quantumvpn_maintenance.py")
 
 # Keep the remote operation self-contained; importing app would run writable
 # initialization through helpers and is deliberately unnecessary for deployment.
@@ -41,12 +42,14 @@ BASE_SOURCES = {'app.py', 'quantumvpn_aurora.py', 'assets/quantumvpn-world.svg'}
 COMMUNITY_SOURCES = {'quantumvpn_durak.py', 'quantumvpn_community.py', 'quantumvpn_control_next.py'}
 BOT_STATUS_SOURCES = {'quantumvpn_bot_status.py'}
 NETWORK_AI_SOURCES = {'quantumvpn_gemini.py', 'quantumvpn_network_guard.py', 'quantumvpn_target_scan.py'}
+LOCAL_AI_SOURCES = {'quantumvpn_llama.py', 'quantumvpn_autopilot.py', 'quantumvpn_maintenance.py'}
 VOLATILE = {
     'node_quarantine', 'latency_state', 'latency_last_probe', 'latency_best_ms',
     'load_balancer_last_target', 'load_balancer_last_decision',
     'telegram_digest_last_attempt', 'telegram_digest_last_sent_date',
     'quality_subscription', 'ai_last_run', 'ai_last_status', 'ai_last_advice',
     'ai_last_error', 'ai_last_notification_hash', 'ai_last_notification_at',
+    'ai_autopilot_state', 'ai_autopilot_last_run', 'ai_autopilot_last_status', 'ai_autopilot_last_action',
 }
 
 class CheckFailed(Exception):
@@ -144,11 +147,13 @@ def preflight(config):
     require(command(['systemctl', 'is-active', SERVICE]).strip() == b'active', 'service_inactive')
     allowed = (BASE_SOURCES | (COMMUNITY_SOURCES if config.get('with_community') else set())
                | (BOT_STATUS_SOURCES if config.get('with_bot_status') else set())
-               | (NETWORK_AI_SOURCES if config.get('with_network_ai') else set()))
+               | (NETWORK_AI_SOURCES if config.get('with_network_ai') else set())
+               | (LOCAL_AI_SOURCES if config.get('with_local_ai') else set()))
     require(set(config['files']) <= allowed and {'app.py', 'quantumvpn_aurora.py'} <= set(config['files']), 'source_allowlist')
     require(not config.get('with_community') or COMMUNITY_SOURCES <= set(config['files']), 'community_sources_missing')
     require(not config.get('with_bot_status') or BOT_STATUS_SOURCES <= set(config['files']), 'bot_status_source_missing')
     require(not config.get('with_network_ai') or NETWORK_AI_SOURCES <= set(config['files']), 'network_ai_sources_missing')
+    require(not config.get('with_local_ai') or LOCAL_AI_SOURCES <= set(config['files']), 'local_ai_sources_missing')
     for name, expected in config['companions'].items():
         path = safe_target(name)
         require(path.is_file() and digest(path) == expected, 'companion_hash_' + name)
@@ -243,7 +248,9 @@ def envelope(value, public):
 def public_snapshot(env, public):
     result = {}
     for abi in ('arm64-v8a', 'armeabi-v7a'):
-        status, headers, body = request(env, '/api/client/update?abi=' + abi + '&current_version_code=0')
+        # A restarted process has an empty APK checksum cache. Allow one
+        # bounded cold read; contents and baseline checks stay identical.
+        status, headers, body = request(env, '/api/client/update?abi=' + abi + '&current_version_code=0', timeout=30)
         require(status == 200, 'update_api_' + abi)
         result[abi] = json.loads(body)
         # The new opt-in guard adds this boolean. Legacy omission means false,
@@ -440,6 +447,11 @@ def parser() -> argparse.ArgumentParser:
     for name in ("gemini", "network-guard", "target-scan"):
         result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
                             help="Existing module SHA-256; omitted means the module must be absent")
+    result.add_argument("--with-local-ai", action="store_true",
+                        help="Also deploy only quantumvpn_llama.py, quantumvpn_autopilot.py and quantumvpn_maintenance.py; no dependency, model or configuration changes")
+    for name in ("llama", "autopilot", "maintenance"):
+        result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
+                            help="Existing module SHA-256; omitted means the module must be absent")
     result.add_argument("--apply", action="store_true", help="Upload, back up, replace and verify; default is read-only")
     return result
 
@@ -469,6 +481,12 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
             local[name] = ROOT / "tools" / name
     elif any(getattr(args, key, None) for key in ("expected_old_gemini_sha256", "expected_old_network_guard_sha256", "expected_old_target_scan_sha256")):
         raise ValueError("Network AI old hashes require --with-network-ai")
+    with_local_ai = getattr(args, "with_local_ai", False)
+    if with_local_ai:
+        for name in LOCAL_AI_MODULES:
+            local[name] = ROOT / "tools" / name
+    elif any(getattr(args, key, None) for key in ("expected_old_llama_sha256", "expected_old_autopilot_sha256", "expected_old_maintenance_sha256")):
+        raise ValueError("Local AI old hashes require --with-local-ai")
     payloads = {name: path.read_bytes() for name, path in local.items()}
     tree = ast.parse(payloads["app.py"])
     builds = [node.value.value for node in tree.body if isinstance(node, ast.Assign)
@@ -495,6 +513,10 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
         old.update({"quantumvpn_gemini.py": getattr(args, "expected_old_gemini_sha256", None),
                     "quantumvpn_network_guard.py": getattr(args, "expected_old_network_guard_sha256", None),
                     "quantumvpn_target_scan.py": getattr(args, "expected_old_target_scan_sha256", None)})
+    if with_local_ai:
+        old.update({"quantumvpn_llama.py": getattr(args, "expected_old_llama_sha256", None),
+                    "quantumvpn_autopilot.py": getattr(args, "expected_old_autopilot_sha256", None),
+                    "quantumvpn_maintenance.py": getattr(args, "expected_old_maintenance_sha256", None)})
     files = {name: {"sha256": hashlib.sha256(payload).hexdigest(), "old_sha256": old[name],
                     "stage": ".aurora-upload-" + upload + "-" + Path(name).name}
              for name, payload in payloads.items()}
@@ -505,6 +527,7 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
             "with_community": with_community,
             "with_bot_status": with_bot_status,
             "with_network_ai": with_network_ai,
+            "with_local_ai": with_local_ai,
             "login_marker": args.login_marker}, payloads
 
 

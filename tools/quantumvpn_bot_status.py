@@ -8,6 +8,7 @@ as an invented active service. Messages are sent as plain text, not HTML.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import sqlite3
@@ -155,6 +156,7 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
     latency = _number(_scalar(db, "select avg(latency_ms) from server_health where ts>=? and ts<=? and ok=1 and latency_ms>0", (now - 86400, now)), maximum=600000)
     services = runtime.get("services") if isinstance(runtime.get("services"), dict) else {}
     guard = runtime.get("network_guard") if isinstance(runtime.get("network_guard"), dict) else {}
+    automation = runtime.get("automation") if isinstance(runtime.get("automation"), dict) else {}
     coverage = guard.get("coverage") if isinstance(guard.get("coverage"), dict) else {}
     backup = runtime.get("backup") if isinstance(runtime.get("backup"), dict) else {}
     delivered_at, delivered_ok = _latest_delivery(db)
@@ -171,6 +173,7 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
             "enabled": _flag(settings.get("ai_advisor_enabled")),
             "model": _safe_name(settings.get("ai_model"), _MODEL_NAME),
             "provider": "gemini" if local_model.get("provider") == "gemini" else "qwen",
+            "engine": _choice(local_model.get("engine"), {"ollama", "llama.cpp"}),
             "key_configured": _flag(local_model.get("key_configured")),
             "catalogue_available": _flag(local_model.get("ready")),
             "loaded": _flag(local_model.get("loaded")),
@@ -188,7 +191,7 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
             "memory_percent": _number(runtime.get("memory_percent")),
             "disk_percent": _number(runtime.get("disk_percent")),
             "memory_total_bytes": _integer(runtime.get("memory_total_bytes")),
-            "services": {name: _choice(services.get(name), {"active", "inactive", "failed", "activating", "deactivating"}) for name in ("operator", "rospanel", "xray", "ollama")},
+            "services": {name: _choice(services.get(name), {"active", "inactive", "failed", "activating", "deactivating"}) for name in ("operator", "rospanel", "xray", "ollama", "llama_cpp")},
             "health_checks_24h": health_count,
             "health_ok_percent_24h": round(health_ok * 100 / health_count, 1) if health_count and health_ok is not None else None,
             "mean_latency_ms": round(latency, 1) if latency is not None else None,
@@ -222,6 +225,14 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
             "polling": _flag(runtime.get("polling")),
             "webhook": _flag(runtime.get("webhook")),
             "alerts_enabled": _flag(settings.get("telegram_alerts_enabled")),
+        },
+        "automation": {
+            "enabled": _flag(automation.get("enabled")),
+            "mode": _choice(automation.get("mode"), {"observe", "bounded"}),
+            "actions_24h": _integer(automation.get("actions_24h")),
+            "last_action": _choice(automation.get("last_action"), {"recommendation_changed", "node_quarantined", "node_restored", "probe_failed", "rollback"}),
+            "last_action_at": _integer(automation.get("last_action_at")),
+            "last_result": _choice(automation.get("last_result"), {"verified", "verifying", "rolled_back", "failed", "blocked"}),
         },
     }
 
@@ -267,12 +278,20 @@ def _bytes(value):
     return f"{value / 1048576:.1f} МБ" if value is not None else "нет данных"
 
 
+def _model_runtime(ai):
+    if ai.get("provider") == "gemini":
+        return "официальный Google API"
+    engine = _choice(ai.get("engine"), {"ollama", "llama.cpp"})
+    return f"локально · {engine}" if engine else "локально, не облачный API"
+
+
 def format_status(snapshot):
     """Render allowlisted, evidence-labelled fields only; under 3,500 chars."""
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     def section(name):
         return snapshot.get(name) if isinstance(snapshot.get(name), dict) else {}
     ai, server, release = section("ai"), section("server"), section("release")
+    automation = section("automation")
     delivery, backup, bot = section("delivery"), section("backup"), section("bot")
     model = _safe_name(ai.get("model"), _MODEL_NAME) or "нет данных"
     version = _safe_name(release.get("version"), _VERSION) or "нет данных"
@@ -282,7 +301,12 @@ def format_status(snapshot):
     total = _integer(server.get("memory_total_bytes"))
     resident = _integer(ai.get("memory_bytes"))
     share = f" · {resident * 100 / total:.1f}% RAM сервера" if total and resident is not None and resident <= total else ""
-    service_names = {"operator": "Доп. панель", "rospanel": "Основная панель", "xray": "VPN Xray", "ollama": "Ollama"}
+    service_names = {"operator": "Доп. панель", "rospanel": "Основная панель", "xray": "VPN Xray"}
+    engine = _choice(ai.get("engine"), {"ollama", "llama.cpp"})
+    if engine == "llama.cpp":
+        service_names["llama_cpp"] = "llama.cpp"
+    elif ai.get("provider") != "gemini":
+        service_names["ollama"] = "Ollama"
     service_states = {"active": "✅ работает", "inactive": "⏸ остановлена", "failed": "❌ ошибка", "activating": "⏳ запускается", "deactivating": "⏳ останавливается"}
     services = server.get("services") if isinstance(server.get("services"), dict) else {}
     lines = [
@@ -290,27 +314,40 @@ def format_status(snapshot):
         f"Срез: {_stamp(snapshot.get('generated_at'))}", "",
         "🧠 ИИ-советник",
         f"• Советник: {_state(ai.get('enabled'))}",
-        f"• Модель: {model} · {'официальный Google API' if ai.get('provider') == 'gemini' else 'локально, не облачный API'}",
+        f"• Модель: {model} · {_model_runtime(ai)}",
         f"• {'Серверный API-ключ: ' + _state(ai.get('key_configured')) if ai.get('provider') == 'gemini' else 'Модель установлена: ' + _state(ai.get('catalogue_available'))}",
-        f"• {'Облачная модель; RAM VDS не используется для весов' if ai.get('provider') == 'gemini' else 'В RAM: ' + _state(loaded) + ' · ' + memory + share}",
+        f"• {'Облачная модель; RAM VDS не используется для весов' if ai.get('provider') == 'gemini' else 'В RAM: ' + _state(loaded) + ' · ' + (memory + share if loaded is True else 'модель выгружена' if loaded is False else 'нет данных')}",
         f"• Активных анализов: {_count(ai.get('active_requests'))}",
         f"• Анализов за 30 дней: {_count(ai.get('observations_30d'))}",
         f"• Успешных: {_count(ai.get('succeeded_30d'))} · {_percent(ai.get('success_percent'))}",
         f"• Последний анализ: {_stamp(ai.get('last_run'))} · {last_status}",
         f"• Системная инструкция: {_state(ai.get('instruction_present'))}",
         "• Диалоги не ведутся; " + ("ключ не выводится в статус" if ai.get('provider') == 'gemini' else "API-ключи не используются"),
-        "• ИИ даёт рекомендации, не исполняет произвольные команды", "",
-        "📊 Ресурсы VDS (реальный замер)",
+        "• ИИ не исполняет произвольные команды",
+    ]
+    if automation.get("enabled") is not None:
+        modes = {"observe": "наблюдение", "bounded": "действия по проверенным правилам"}
+        lines.extend([
+            f"• Автоуправление нодами: {_state(automation.get('enabled'))} · {modes.get(_choice(automation.get('mode'), modes), 'режим неизвестен')}",
+            f"• Действий за 24 ч: {_count(automation.get('actions_24h'))}",
+        ])
+        last_action = _choice(automation.get("last_action"), {"recommendation_changed", "node_quarantined", "node_restored", "probe_failed", "rollback"})
+        if last_action:
+            labels = {"recommendation_changed": "обновлена рекомендация", "node_quarantined": "нода временно исключена", "node_restored": "нода возвращена", "probe_failed": "проверка не пройдена", "rollback": "откат"}
+            results = {"verified": "проверено", "verifying": "ожидаются контрольные проверки", "rolled_back": "откат выполнен", "failed": "ошибка", "blocked": "действие не применено"}
+            lines.append(f"• Последнее действие: {labels[last_action]} · {results.get(_choice(automation.get('last_result'), results), 'результат неизвестен')}")
+    lines.extend([
+        "", "📊 Ресурсы VDS (реальный замер)",
         f"• CPU: {_bar(server.get('cpu_percent'))}",
         f"• RAM: {_bar(server.get('memory_percent'))}",
         f"• Диск: {_bar(server.get('disk_percent'))}",
-    ]
+    ])
     lines.extend(f"• {label}: {service_states.get(_choice(services.get(key), service_states), 'нет данных')}" for key, label in service_names.items())
     lines.extend([
         f"• Успешных проверок за 24 ч: {_percent(server.get('health_ok_percent_24h'))} ({_count(server.get('health_checks_24h'))})",
         f"• Средняя задержка проверок: {_count(round(server['mean_latency_ms'])) if _number(server.get('mean_latency_ms'), 600000) is not None else 'нет данных'} мс",
         "• Это проверки VDS, не пинг пользователей", "",
-        f"• Сетевой монитор: { {'healthy': 'стабильные серверные проверки', 'degraded': 'повторное ухудшение', 'insufficient_data': 'недостаточно данных'}.get(server.get('network_status'), 'нет данных')}",
+        f"• Сетевой монитор: { {'healthy': 'стабильные серверные проверки', 'degraded': 'повторное ухудшение', 'insufficient_data': 'недостаточно данных'}.get(_choice(server.get('network_status'), {'healthy', 'degraded', 'insufficient_data'}), 'нет данных')}",
         "• Причина ТСПУ не доказана; скорость VPN не измеряется", "",
         "📦 APK и выпуск (хранилище VDS)",
         f"• Публичная версия: {version} · код {_count(release.get('version_code'))}",
@@ -349,7 +386,133 @@ def format_status(snapshot):
     text = "\n".join(lines)
     # Drop Unicode controls as well as C0/C1 so supplied labels cannot hide text.
     text = "".join(char for char in text if char == "\n" or char >= " " and not ("\x7f" <= char <= "\x9f") and char not in "\u200b\u200c\u200d\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff")
-    return text[:MAX_STATUS_CHARS]
+    if len(text) <= MAX_STATUS_CHARS:
+        return text
+    # Keep the actual command footer intact even with maximal valid names and
+    # aggregate counters. Prefer dropping explanatory repetitions to cutting
+    # a backup result or a command in the middle of its sentence.
+    optional = (
+        "• GitHub, MTProto и сторонние каналы не используются\n",
+        "• Диалоги не ведутся; API-ключи не используются\n",
+        "• Диалоги не ведутся; ключ не выводится в статус\n",
+    )
+    for line in optional:
+        text = text.replace(line, "", 1)
+        if len(text) <= MAX_STATUS_CHARS:
+            return text
+    marker = "💡 Команды (только просмотр)"
+    body, footer = text.split(marker, 1)
+    footer = marker + footer
+    limit = MAX_STATUS_CHARS - len(footer) - 2
+    body = body[:limit]
+    if "\n" in body:
+        body = body.rsplit("\n", 1)[0]
+    return body.rstrip() + "\n\n" + footer
+
+
+def format_backup_caption(snapshot, kind="hourly"):
+    """Short factual caption for the encrypted archive; full status follows it.
+
+    Telegram document captions are shorter than messages. Keep this below 900
+    characters, include the report timestamp, and avoid model-generated prose.
+    """
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    server = snapshot.get("server") if isinstance(snapshot.get("server"), dict) else {}
+    ai = snapshot.get("ai") if isinstance(snapshot.get("ai"), dict) else {}
+    backup = snapshot.get("backup") if isinstance(snapshot.get("backup"), dict) else {}
+    release = snapshot.get("release") if isinstance(snapshot.get("release"), dict) else {}
+    title = "часовая" if kind == "hourly" else "ручная"
+    status = {"healthy": "стабильные проверки", "degraded": "повторное ухудшение", "insufficient_data": "накапливаются замеры"}.get(_choice(server.get("network_status"), {"healthy", "degraded", "insufficient_data"}), "нет данных")
+    model = _safe_name(ai.get("model"), _MODEL_NAME) or "нет данных"
+    version = _safe_name(release.get("version"), _VERSION) or "нет данных"
+    lines = [
+        f"🔐 Quantum Control · {title} резервная копия",
+        f"Срез: {_stamp(snapshot.get('generated_at'))}",
+        f"📦 Зашифрованный архив: {_bytes(backup.get('size_bytes'))}",
+        f"🧠 {model} · {_model_runtime(ai)}",
+        f"📊 CPU {_percent(server.get('cpu_percent'))} · RAM {_percent(server.get('memory_percent'))} · диск {_percent(server.get('disk_percent'))}",
+        f"🌐 Сеть: {status}",
+        f"📱 Публичный APK: {version}",
+        "Полный отчёт — в ответе к этому файлу.",
+        "Ключ расшифровки хранится отдельно от архива.",
+    ]
+    return "\n".join(lines)[:900]
+
+
+def _fact_issues(snapshot):
+    """Return named observed failures; unknown telemetry is never a failure."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    def section(name):
+        return snapshot.get(name) if isinstance(snapshot.get(name), dict) else {}
+    server, ai, backup = section("server"), section("ai"), section("backup")
+    generated = _integer(snapshot.get("generated_at"))
+    issues = []
+    for name, label, threshold in (("cpu_percent", "CPU", 90), ("memory_percent", "RAM", 90), ("disk_percent", "диск", 85)):
+        value = _number(server.get(name))
+        if value is not None and value >= threshold:
+            issues.append((name, f"{label}: {_percent(value)} · порог {threshold}%"))
+    services = server.get("services") if isinstance(server.get("services"), dict) else {}
+    labels = {"operator": "Дополнительная панель", "rospanel": "Основная панель", "xray": "VPN Xray"}
+    if ai.get("enabled") is True and ai.get("provider") != "gemini":
+        labels["llama_cpp" if ai.get("engine") == "llama.cpp" else "ollama"] = "Локальный ИИ"
+    for key, label in labels.items():
+        state = _choice(services.get(key), {"active", "inactive", "failed", "activating", "deactivating"})
+        if state in {"inactive", "failed"}:
+            issues.append(("service_" + key, label + (": служба остановлена" if state == "inactive" else ": ошибка службы")))
+    if server.get("network_status") == "degraded":
+        issues.append(("network_degraded", "Сеть: подтверждено повторное ухудшение серверных проверок"))
+    if ai.get("enabled") is True and ai.get("last_status") == "ошибка":
+        issues.append(("analysis_error", "ИИ: последний анализ завершился ошибкой"))
+    if backup.get("hourly_enabled") is True:
+        stamp = _integer(backup.get("ts"))
+        if backup.get("exists") is False or generated and stamp and generated - stamp > 2 * 3600:
+            issues.append(("backup_stale", "Резервная копия: нет свежего архива за последние два часа"))
+        if backup.get("last_delivery_ok") is False:
+            issues.append(("backup_delivery_failed", "Резервная копия: последняя отправка в Telegram не удалась"))
+    return issues
+
+
+def notification_fingerprint(snapshot):
+    """Stable digest of factual failure kinds, unaffected by an AI paraphrase."""
+    return hashlib.sha256(json.dumps([key for key, _ in _fact_issues(snapshot)], separators=(",", ":")).encode("ascii")).hexdigest()
+
+
+def fact_alert(snapshot, previous_fingerprint=""):
+    """Quiet while healthy/unchanged; announce observed failures or recovery.
+
+    The caller owns cadence, persistence and delivery. This function does not
+    execute actions or include raw model advice, keys, addresses or exceptions.
+    """
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    issues = _fact_issues(snapshot)
+    digest = notification_fingerprint(snapshot)
+    previous = previous_fingerprint if isinstance(previous_fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", previous_fingerprint) else ""
+    changed = digest != previous
+    # A missing runtime sample must not turn a previously observed failure into
+    # a recovery message. Recovery needs complete service/resource evidence.
+    server = snapshot.get("server") if isinstance(snapshot.get("server"), dict) else {}
+    services = server.get("services") if isinstance(server.get("services"), dict) else {}
+    complete = all(_number(server.get(name)) is not None for name in ("cpu_percent", "memory_percent", "disk_percent")) and all(services.get(name) == "active" for name in ("operator", "rospanel", "xray")) and server.get("network_status") == "healthy"
+    ai = snapshot.get("ai") if isinstance(snapshot.get("ai"), dict) else {}
+    backup = snapshot.get("backup") if isinstance(snapshot.get("backup"), dict) else {}
+    if ai.get("enabled") is True:
+        complete = complete and ai.get("last_status") == "готов"
+        if ai.get("provider") != "gemini":
+            complete = complete and services.get("llama_cpp" if ai.get("engine") == "llama.cpp" else "ollama") == "active"
+    if backup.get("hourly_enabled") is True:
+        stamp, generated = _integer(backup.get("ts")), _integer(snapshot.get("generated_at"))
+        complete = complete and backup.get("exists") is True and backup.get("last_delivery_ok") is True and bool(stamp and generated and 0 <= generated - stamp <= 2 * 3600)
+    recovery = not issues and bool(previous) and previous != hashlib.sha256(b"[]").hexdigest() and complete
+    should_notify = changed and (bool(issues) or recovery)
+    lines = ["🚨 Quantum Control · требуется внимание" if issues else "✅ Quantum Control · проверки восстановились", f"Срез: {_stamp(snapshot.get('generated_at'))}"]
+    lines.extend("• " + label for _, label in issues)
+    if recovery:
+        lines.append("• Серверные службы, ресурсы и сетевые проверки снова в норме.")
+    if any(key == "network_degraded" for key, _ in issues):
+        lines.append("Проверки выполнены с VDS. Причина сбоя пока не установлена.")
+    if should_notify:
+        lines.append("/status — полный отчёт; подробный часовой отчёт приходит с резервной копией.")
+    return {"fingerprint": digest, "should_notify": should_notify, "recovery": recovery, "issues": [key for key, _ in issues], "message": "\n".join(lines)[:1800] if should_notify else ""}
 
 
 def authorized_command(message, allowed_chat_id, allowed_user_ids=None, bot_username=None):

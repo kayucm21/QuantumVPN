@@ -81,6 +81,15 @@ except ModuleNotFoundError:
     from tools import quantumvpn_network_guard as network_guard
 
 try:
+    import quantumvpn_llama as llama
+    import quantumvpn_autopilot as autopilot
+    import quantumvpn_maintenance as maintenance
+except ModuleNotFoundError:
+    from tools import quantumvpn_llama as llama
+    from tools import quantumvpn_autopilot as autopilot
+    from tools import quantumvpn_maintenance as maintenance
+
+try:
     from quantumvpn_target_scan import scan_dialog, scan_dialog_css, scan_dialog_script
 except ModuleNotFoundError:
     from tools.quantumvpn_target_scan import scan_dialog, scan_dialog_css, scan_dialog_script
@@ -121,7 +130,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.1.2-network.1"
+PANEL_BUILD = "2.2.0-operations.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -1930,7 +1939,10 @@ def load_balancer_snapshot(db, s):
     best = candidates[0] if candidates and candidates[0]["ok"] else None
     previous = next((item for item in candidates if item["target"] == s.get("load_balancer_last_target") and item["ok"] and item["probe_failure_percent"] < 25), None)
     # Hysteresis avoids flipping recommendations on tiny RTT fluctuations.
-    choice = previous if previous and best and previous["score"] >= best["score"] - 10 else best
+    if enabled(s, "ai_autopilot_enabled", False):
+        choice = next((item for item in candidates if item["target"] == s.get("load_balancer_last_target") and item["ok"]), None)
+    else:
+        choice = previous if previous and best and previous["score"] >= best["score"] - 10 else best
     selected = choice["target"] if enabled_flag and choice else ""
     return {
         "enabled": enabled_flag,
@@ -2222,7 +2234,8 @@ def run_latency_probe(db, s=None):
                 node_samples.append(latency)
     # Keep the quarantine state in the panel database.  The next policy
     # response and balancer decision automatically exclude failing targets.
-    quarantine = update_auto_quarantine(db, s, node_targets)
+    autonomous = enabled(s, "ai_autopilot_enabled", False)
+    quarantine = active_quarantine(s) if autonomous else update_auto_quarantine(db, s, node_targets)
     s = {**s, "node_quarantine": json.dumps(quarantine)}
     max_ms = max(20, min(5000, int(s.get("latency_max_ms", "120") or 120)))
     best = min(node_samples) if node_samples else 0
@@ -2233,7 +2246,7 @@ def run_latency_probe(db, s=None):
         "latency_best_ms": str(best),
     })
     decision = load_balancer_snapshot(db, {**s, "latency_best_ms": str(best)})
-    if enabled(s, "load_balancer_enabled", True):
+    if enabled(s, "load_balancer_enabled", True) and not autonomous:
         previous = s.get("load_balancer_last_target", "")
         selected = decision.get("selected", "")
         set_settings(db, {
@@ -2251,7 +2264,10 @@ def run_latency_probe(db, s=None):
                     json.dumps({"selected": selected, "previous": previous, "strategy": decision.get("strategy")}, ensure_ascii=False),
                 ),
             )
-    monitor_network_health(db, s)
+    guard = monitor_network_health(db, s)
+    if autonomous:
+        run_autopilot_step(db, settings(db), guard)
+        decision = load_balancer_snapshot(db, settings(db))
     db.commit()
     return {"enabled": True, "samples": samples, "best_ms": best, "state": state, "balancer": decision}
 
@@ -2581,13 +2597,17 @@ def release_guard_snapshot(s):
     return {"production": production, "scheduled": scheduled}
 
 
-def telegram_send(s, text: str):
+def telegram_send(s, text: str, reply_to_message_id=None):
     token = telegram_bot_token(s)
     chat = (s.get("telegram_chat_id") or "").strip()
     if not token or not chat:
         return False
     try:
-        data = urlencode({"chat_id": chat, "text": text[:3500]}).encode()
+        fields = {"chat_id": chat, "text": text[:3500]}
+        if type(reply_to_message_id) is int and reply_to_message_id > 0:
+            fields["reply_to_message_id"] = reply_to_message_id
+            fields["allow_sending_without_reply"] = "true"
+        data = urlencode(fields).encode()
         req = Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data, method="POST")
         with urlopen(req, timeout=10) as resp:
             return 200 <= resp.status < 300
@@ -2595,7 +2615,7 @@ def telegram_send(s, text: str):
         return False
 
 
-def telegram_send_document(s, path: str, caption: str = ""):
+def telegram_send_document(s, path: str, caption: str = "", *, receipt=False):
     """Upload one backup archive to the configured Telegram chat."""
     token = telegram_bot_token(s)
     chat = (s.get("telegram_chat_id") or "").strip()
@@ -2629,6 +2649,10 @@ def telegram_send_document(s, path: str, caption: str = ""):
             method="POST",
         )
         with urlopen(req, timeout=30) as resp:
+            if receipt:
+                result = json.loads(resp.read(64 * 1024 + 1))
+                message_id = result.get("result", {}).get("message_id")
+                return message_id if result.get("ok") is True and type(message_id) is int and message_id > 0 else None
             return 200 <= resp.status < 300
     except Exception:
         return False
@@ -2758,16 +2782,57 @@ def hourly_backup_worker():
             s = settings(db)
             if enabled(s, "telegram_backups_enabled", False):
                 archive = create_backup_archive()
-                ok = telegram_send_document(
-                    s,
-                    archive,
-                    f"Quantum Control: часовая резервная копия {time.strftime('%Y-%m-%d %H:%M UTC')}",
-                )
-                audit(db, "system", "127.0.0.1", "hourly_backup", {"ok": ok, "file": os.path.basename(archive)})
-                db.commit()
+                send_backup_report(db, s, archive, kind="hourly")
             db.close()
         except Exception:
             time.sleep(30)
+
+
+def operations_status_snapshot(db, s):
+    runtime = bot_runtime_snapshot()
+    runtime["network_guard"] = network_guard_snapshot(db)
+    runtime["automation"] = autopilot_status_snapshot(db, s)
+    return bot_status.collect_status(db, s, runtime=runtime,
+                                     local_model=bot_local_model_snapshot(s))
+
+
+def send_backup_report(db, s, archive, *, kind="hourly", actor="system", ip="127.0.0.1"):
+    """Attach a factual report to the delivered archive, including this delivery."""
+    snapshot = operations_status_snapshot(db, s)
+    message_id = telegram_send_document(s, archive, bot_status.format_backup_caption(snapshot, kind), receipt=True)
+    ok = type(message_id) is int and message_id > 0
+    audit(db, actor, ip, "hourly_backup" if kind == "hourly" else "backup_now",
+          {"ok": ok, "file": os.path.basename(archive)})
+    db.commit()
+    report_sent = False
+    if ok:
+        refreshed = operations_status_snapshot(db, settings(db))
+        report_sent = telegram_send(s, bot_status.format_status(refreshed), reply_to_message_id=message_id)
+    db.execute("insert into events values (?,?,?,?,?)", (int(time.time()), "backup_report_delivery", actor, ip,
+               json.dumps({"archive_sent": ok, "report_sent": report_sent, "kind": kind})))
+    db.commit()
+    return {"archive_sent": ok, "report_sent": report_sent}
+
+
+def maintenance_worker():
+    """Aged owned intermediates only, once per hour; no recursive deletion."""
+    # Let the HTTP service finish cold-start APK checksum reads before the
+    # duplicate verifier starts its own large sequential disk reads.
+    time.sleep(60)
+    while True:
+        db = None
+        try:
+            result = maintenance.cleanup_managed(ROOT, DOWNLOAD_ROOT, apply=True)
+            if result["files"]:
+                db = conn()
+                audit(db, "maintenance", "127.0.0.1", "temporary_cleanup", result)
+                db.commit()
+        except (OSError, ValueError):
+            pass
+        finally:
+            if db is not None:
+                db.close()
+        time.sleep(3600)
 
 
 def moscow_clock(now=None):
@@ -2916,6 +2981,12 @@ def bot_runtime_snapshot():
         runtime["services"]["ollama"] = result.stdout.strip() or "unknown"
     except (OSError, subprocess.TimeoutExpired):
         runtime["services"]["ollama"] = "unknown"
+    try:
+        result = subprocess.run(["systemctl", "is-active", "quantumvpn-llama"], capture_output=True,
+                                text=True, timeout=3)
+        runtime["services"]["llama_cpp"] = result.stdout.strip() or "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        runtime["services"]["llama_cpp"] = "unknown"
     return runtime
 
 
@@ -2924,7 +2995,22 @@ def bot_local_model_snapshot(s):
     if model == gemini.MODEL:
         return {"provider": "gemini", "ready": None, "loaded": None,
                 "memory_bytes": None, "key_configured": gemini.configured()}
+    if s.get("ai_engine") == "llama.cpp":
+        status = llama.local_status()
+        result = {"provider": "qwen", "engine": "llama.cpp", "ready": status.get("installed") if status.get("ok") else None,
+                  "loaded": status.get("resident") if status.get("ok") else None, "memory_bytes": None}
+        if result["loaded"] is True:
+            try:
+                pid = subprocess.run(["systemctl", "show", "--property=MainPID", "--value", "quantumvpn-llama"],
+                                     capture_output=True, text=True, timeout=3).stdout.strip()
+                if pid.isdigit() and int(pid) > 0:
+                    with open(f"/proc/{pid}/status", encoding="ascii") as stream:
+                        result["memory_bytes"] = next(int(line.split()[1]) * 1024 for line in stream if line.startswith("VmRSS:"))
+            except (OSError, ValueError, StopIteration, subprocess.TimeoutExpired):
+                pass
+        return result
     result = qwen_local_status(model)
+    result["engine"] = "ollama"
     if result.get("ok") is not True:
         # An unavailable catalogue is unknown, not proof of an absent model.
         result["ready"] = None
@@ -2973,11 +3059,7 @@ def bot_command_reply(db, s, command):
             if os.path.isfile(path) and not os.path.islink(path):
                 lines.append(f"{abi}: {DOWNLOAD_BASE}/downloads/{version}/{name}")
         return "\n".join(lines) if len(lines) > 2 else "Опубликованный APK пока недоступен."
-    runtime = bot_runtime_snapshot()
-    runtime["network_guard"] = network_guard_snapshot(db)
-    snapshot = bot_status.collect_status(db, s, runtime=runtime,
-                                         local_model=bot_local_model_snapshot(s))
-    return bot_status.format_status(snapshot)
+    return bot_status.format_status(operations_status_snapshot(db, s))
 
 
 def telegram_receive_batch(db, s, updates, scope, rate=None, now=None):
@@ -3207,8 +3289,57 @@ def clean_ai_advice(value) -> str:
     return (text or "Модель вернула пустой ответ.")[:1800]
 
 
+def autopilot_status_snapshot(db, s):
+    try:
+        state = json.loads(s.get("ai_autopilot_state") or "{}")
+        history = state.get("history", [])
+        last = history[-1] if history else {}
+    except (ValueError, TypeError, AttributeError):
+        last = {}
+    kinds = {"select_reserve": "recommendation_changed", "quarantine_node": "node_quarantined",
+             "recover_node": "node_restored", "rollback": "rollback", "verified": "recommendation_changed"}
+    count = db.execute("select count(*) from events where ts>=? and kind in ('ai_autopilot_select_reserve','ai_autopilot_quarantine_node','ai_autopilot_recover_node','ai_autopilot_rollback')",
+                       (int(time.time()) - 86400,)).fetchone()[0]
+    return {"enabled": enabled(s, "ai_autopilot_enabled", False), "mode": "bounded",
+            "actions_24h": count, "last_action": kinds.get(last.get("kind")), "last_action_at": last.get("at"),
+            "last_result": "rolled_back" if last.get("kind") == "rollback" else "verified" if last.get("kind") in ("verified", "recover_node", "quarantine_node") else "verifying" if last.get("kind") == "select_reserve" else "blocked"}
+
+
+def autopilot_display(s):
+    statuses = {"disabled": "выключен", "observing": "наблюдение", "stable": "стабильно",
+                "applied": "изменение применено", "verifying": "контрольные проверки", "verified": "проверено"}
+    reasons = {"insufficient_data": "собираются замеры", "operator_disabled": "выключен оператором",
+               "no_registered_nodes": "нет зарегистрированных нод", "stale_report": "ожидаются свежие замеры",
+               "manual_override": "учтено ручное изменение", "reserve_regressed": "резерв ухудшился — выполнен откат",
+               "post_change_checks_passed": "контрольные проверки пройдены", "waiting_post_change_checks": "ожидаются контрольные проверки",
+               "cooldown": "пауза между изменениями", "current_node_healthy": "текущая нода исправна",
+               "no_proven_healthy_reserve": "нет подтверждённого исправного резерва",
+               "measured_registered_node_control": "действие подтверждено замерами"}
+    return statuses.get(s.get("ai_autopilot_last_status"), "ожидание"), reasons.get(s.get("ai_autopilot_last_action"), "собираются замеры")
+
+
+def run_autopilot_step(db, s, report=None, proposals=None):
+    report = report if report is not None else network_guard_snapshot(db)
+    result = autopilot.execute(db, report, parse_node_map_config(s.get("node_map_config", "")),
+                               now=int(time.time()), proposals=proposals)
+    if result["status"] != "disabled":
+        set_settings(db, {"ai_autopilot_last_run": str(int(time.time())),
+                          "ai_autopilot_last_status": result["status"], "ai_autopilot_last_action": result["reason"]})
+    if result["changes"]:
+        revision = int(settings(db).get("config_revision", "1") or 1) + 1
+        set_settings(db, {"config_revision": str(revision)})
+        audit(db, "autopilot", "127.0.0.1", "registered_node_control",
+              {"actions": result["actions"], "reason": result["reason"], "config_revision": revision})
+    if result["actions"] and enabled(s, "telegram_alerts_enabled", False):
+        labels = {"select_reserve": "Выбран резерв; ожидаются контрольные проверки", "quarantine_node": "Нода временно исключена",
+                  "recover_node": "Нода восстановлена", "rollback": "Выполнен откат", "verified": "Изменение проверено"}
+        text = "🤖 Quantum Control · автоуправление\n" + "\n".join("• " + labels.get(item["kind"], "Проверка") + ": " + item["target"] for item in result["actions"])
+        telegram_send(s, text)
+    return result
+
+
 def run_ai_analysis(db, s: dict, trigger: str = "scheduled") -> dict:
-    """Ask local Qwen for advice without giving it execution capabilities."""
+    """One bounded analysis; measured actions are validated by the executor."""
     if not _AI_RUN_LOCK.acquire(blocking=False):
         return {"ok": False, "status": "занят", "advice": "Один анализ уже выполняется; повторный не запущен.", "telegram_sent": False}
     try:
@@ -3241,6 +3372,18 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
                       "error": exc.code}
     elif model != QWEN_DEFAULT_MODEL:
         result = {"ok": False, "status": "ошибка", "advice": "Разрешена только локальная модель Qwen3 0.6B.", "error": "unsupported_model"}
+    elif s.get("ai_engine") == "llama.cpp":
+        try:
+            snapshot = ai_operations_snapshot(db, s)
+            plan = autopilot.plan_actions(network_guard_snapshot(db), parse_node_map_config(s.get("node_map_config", "")),
+                                          s, now=now)
+            analysis = llama.analyze(snapshot, allowed_actions=plan["allowed_actions"])
+            result = {"ok": True, "status": "готов", **analysis}
+            if enabled(s, "ai_autopilot_enabled", False):
+                result["automation"] = run_autopilot_step(db, settings(db), proposals=analysis["analysis"]["recommendations"])
+        except llama.LlamaError as exc:
+            result = {"ok": False, "status": "ожидание модели" if exc.code == "resources" else "ошибка",
+                      "advice": "Анализ отложен из-за нагрузки VDS." if exc.code == "resources" else "llama.cpp не завершил анализ. Монитор нод продолжает работать.", "error": exc.code}
     else:
         status = qwen_local_status(model)
         if not status.get("ready"):
@@ -3284,8 +3427,10 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
         "ai_last_advice": advice,
         "ai_last_error": str(result.get("error") or "")[:280],
     }
-    # Bot delivery is opt-in, deduplicated and never includes the raw telemetry.
-    digest = hashlib.sha256((values["ai_last_status"] + "\n" + advice).encode("utf-8")).hexdigest()
+    set_settings(db, values)
+    factual = bot_status.fact_alert(operations_status_snapshot(db, {**settings(db), **values}),
+                                   s.get("ai_last_notification_hash", ""))
+    digest = factual["fingerprint"]
     try:
         last_notice = int(s.get("ai_last_notification_at", "0") or 0)
     except (TypeError, ValueError):
@@ -3293,12 +3438,12 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
     should_notify = (
         enabled(s, "ai_telegram_enabled", True)
         and enabled(s, "telegram_alerts_enabled", False)
-        and digest != s.get("ai_last_notification_hash", "")
+        and factual["should_notify"]
         and now - last_notice >= 15 * 60
     )
     sent = False
     if should_notify:
-        sent = telegram_send(s, f"[Quantum Control · {'Gemini' if model == gemini.MODEL else 'Qwen'}]\nСтатус: {values['ai_last_status']}\n{advice}")
+        sent = telegram_send(s, factual["message"])
         if sent:
             values.update({"ai_last_notification_hash": digest, "ai_last_notification_at": str(now)})
     set_settings(db, values)
@@ -3310,20 +3455,21 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
     db.execute("delete from ai_observations where ts<?", (now - 30 * 86400,))
     db.execute(
         "insert into events values (?,?,?,?,?)",
-        (now, "ai_analysis", "gemini-api" if model == gemini.MODEL else "qwen-local", "", json.dumps({"trigger": trigger, "ok": bool(result.get("ok")), "status": values["ai_last_status"], "telegram_sent": sent}, ensure_ascii=False)),
+        (now, "ai_analysis", "gemini-api" if model == gemini.MODEL else "llama-local" if s.get("ai_engine") == "llama.cpp" else "qwen-local", "", json.dumps({"trigger": trigger, "ok": bool(result.get("ok")), "status": values["ai_last_status"], "telegram_sent": sent}, ensure_ascii=False)),
     )
     db.commit()
     return {**result, "telegram_sent": sent}
 
 
 def ai_worker():
-    """Run the local advisor on a bounded cadence; it never changes a node."""
+    """Run bounded inference; the measured executor validates node actions."""
     while True:
         db = None
         try:
             db = conn()
             s = settings(db)
-            interval = max(AI_MIN_INTERVAL_SECONDS, min(AI_MAX_INTERVAL_SECONDS, int(s.get("ai_interval_seconds", "900") or 900)))
+            minimum = 600 if s.get("ai_engine") == "llama.cpp" else AI_MIN_INTERVAL_SECONDS
+            interval = max(minimum, min(AI_MAX_INTERVAL_SECONDS, int(s.get("ai_interval_seconds", "900") or 900)))
             last_run = int(s.get("ai_last_run", "0") or 0)
             if enabled(s, "ai_advisor_enabled", True) and int(time.time()) - last_run >= interval:
                 run_ai_analysis(db, s, "scheduled")
@@ -4209,13 +4355,16 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <form class=card method=post action=/operator/policy>
         <input type=hidden name=section value=ai>
         <h2>Сетевой ИИ-аналитик</h2>
-        <p class=muted>Qwen работает локально; Gemini — через официальный Google API. В облако отправляются только числовые агрегаты и обезличенные ID нод, без адресов, ключей, пользователей и журналов запросов.</p>
+        <p class=muted>Qwen работает локально через llama.cpp или Ollama. Аналитик получает показатели сервисов и нод; автоматические действия проходят проверку замеров и сохраняются в журнале.</p>
         <label><input type=checkbox name=ai_advisor_enabled {checked('ai_advisor_enabled')}> Включить ИИ‑советник</label>
         <label>Модель<select name=ai_model><option value="{QWEN_DEFAULT_MODEL}" {'selected' if s.get('ai_model', QWEN_DEFAULT_MODEL) == QWEN_DEFAULT_MODEL else ''}>Qwen3 0.6B · локально</option><option value="{gemini.MODEL}" {'selected' if s.get('ai_model') == gemini.MODEL else ''}>Gemini 3.8 Flash · API</option></select></label>
+        <label>Локальный движок<select name=ai_engine><option value="ollama" {'selected' if s.get('ai_engine','ollama') == 'ollama' else ''}>Ollama</option><option value="llama.cpp" {'selected' if s.get('ai_engine') == 'llama.cpp' else ''}>llama.cpp · Qwen3 0.6B</option></select></label>
+        <label><input type=checkbox name=ai_autopilot_enabled {checked('ai_autopilot_enabled')}> Автоматическое управление зарегистрированными нодами</label>
+        <p class=muted>После повторных проверок: выбрать исправный резерв, временно исключить проблемную ноду и вернуть восстановившуюся. Ручные ограничения учитываются; смена рекомендации проверяется повторно, при ухудшении выполняется откат на исправную ноду.</p>
         <p class=muted>Gemini: {'ключ настроен, связь проверяется анализом' if gemini.configured() else 'API-ключ не настроен — текущий Qwen остаётся работать'}. Ключ задаётся в окружении сервиса QV_GEMINI_API_KEY и никогда не передаётся в браузер.</p>
-        <label>Интервал анализа, секунд<input type=number name=ai_interval_seconds min=300 max=86400 value="{html.escape(s.get('ai_interval_seconds','900'))}"></label>
-        <label><input type=checkbox name=ai_telegram_enabled {checked('ai_telegram_enabled')}> Отправлять новый важный вывод в Telegram</label>
-        <p class=notice><b>Безопасность:</b> ИИ не исполняет команды и не перезапускает активный VPN. Балансировщик и карантин детерминированы; изменение маршрутов проходит предпросмотр и подтверждение.</p>
+        <label>Интервал анализа, секунд<input type=number name=ai_interval_seconds min=300 max=86400 value="{html.escape(s.get('ai_interval_seconds','900'))}"></label><p class=muted>llama.cpp: не чаще одного анализа за 10 минут; мониторинг нод работает независимо.</p>
+        <label><input type=checkbox name=ai_telegram_enabled {checked('ai_telegram_enabled')}> Сообщать о подтверждённых проблемах и восстановлении в Telegram</label>
+        <p class=notice>Автопилот: {html.escape(autopilot_display(s)[0])} · {html.escape(autopilot_display(s)[1])}. Полный отчёт отправляется вместе с часовой резервной копией.</p>
         <button>Сохранить ИИ‑настройки</button>
       </form>
       <section class=card>
@@ -4228,7 +4377,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
           <button name=action value=run_ai_analysis>Запустить анализ</button>
           <button class=secondary name=action value=check_ai_model>Проверить модель</button>
         </form>
-        <p class=muted style="margin-top:12px">Если Telegram настроен в «Безопасность», панель отправляет только новый вывод и не чаще раза в 15 минут.</p>
+        <p class=muted style="margin-top:12px">В Telegram приходят фактические проблемы и результаты действий. Повторные формулировки модели не создают новые уведомления.</p>
       </section>
     </section>
 
@@ -6447,9 +6596,8 @@ class App(BaseHTTPRequestHandler):
                 flash = "Telegram OK" if ok else "Telegram ошибка (проверьте token/chat)"
             elif action == "backup_now":
                 archive = create_backup_archive()
-                ok = telegram_send_document(s, archive, f"Quantum Control: ручная резервная копия {time.strftime('%Y-%m-%d %H:%M UTC')}")
-                flash = "Backup отправлен в Telegram" if ok else "Backup создан локально, Telegram недоступен"
-                audit(db, actor, ip, "backup_now", {"ok": ok, "file": os.path.basename(archive)})
+                delivered = send_backup_report(db, s, archive, kind="manual", actor=actor, ip=ip)
+                flash = "Backup и отчёт отправлены в Telegram" if delivered["archive_sent"] and delivered["report_sent"] else "Backup отправлен, отчёт не доставлен" if delivered["archive_sent"] else "Backup создан локально, Telegram недоступен"
             elif action == "test_webhook":
                 ok = webhook_emit(s, "webhook.test", {"actor": actor, "message": "Quantum Control webhook is working"})
                 flash = "Вебхук OK" if ok else "Вебхук не доставлен: проверьте HTTPS URL, секрет и ответ получателя"
@@ -6518,8 +6666,9 @@ class App(BaseHTTPRequestHandler):
                 flash = "Проверка запущена в фоне"
             elif action in ("run_ai_analysis", "check_ai_model"):
                 if action == "check_ai_model":
-                    model_status = ({"ready": gemini.configured()} if s.get("ai_model") == gemini.MODEL else qwen_local_status(s.get("ai_model") or QWEN_DEFAULT_MODEL))
-                    flash = "Qwen готова" if model_status.get("ready") else (model_status.get("error") or "Qwen недоступна")
+                    model_status = ({"ready": gemini.configured()} if s.get("ai_model") == gemini.MODEL else llama.local_status() if s.get("ai_engine") == "llama.cpp" else qwen_local_status(s.get("ai_model") or QWEN_DEFAULT_MODEL))
+                    label = "Gemini" if s.get("ai_model") == gemini.MODEL else "Qwen · llama.cpp" if s.get("ai_engine") == "llama.cpp" else "Qwen · Ollama"
+                    flash = label + (": готова" if model_status.get("ready") else ": недоступна")
                     db.execute(
                         "insert into events values (?,?,?,?,?)",
                         (int(time.time()), "ai_model_check", actor, ip, json.dumps({"ready": bool(model_status.get("ready"))}, ensure_ascii=False)),
@@ -6882,9 +7031,18 @@ class App(BaseHTTPRequestHandler):
                 return self.redirect_operator(tab, "Не сохранено: выберите Qwen3 0.6B или Gemini 3.8 Flash")
             if requested_model == gemini.MODEL and not gemini.configured():
                 return self.redirect_operator(tab, "Gemini не включён: сначала настройте QV_GEMINI_API_KEY на VDS. Текущая модель сохранена.")
+            engine = form.get("ai_engine", [current.get("ai_engine", "ollama")])[0]
+            if engine not in ("ollama", "llama.cpp"):
+                return self.redirect_operator(tab, "Не сохранено: неизвестный локальный движок")
+            if engine == "llama.cpp" and requested_model == QWEN_DEFAULT_MODEL and not llama.local_status().get("ready"):
+                return self.redirect_operator(tab, "llama.cpp пока недоступен. Текущая модель сохранена.")
+            if engine == "llama.cpp":
+                interval = max(600, interval)
             values = {
                 "ai_advisor_enabled": "1" if "ai_advisor_enabled" in form else "0",
                 "ai_model": requested_model,
+                "ai_engine": engine,
+                "ai_autopilot_enabled": "1" if "ai_autopilot_enabled" in form else "0",
                 "ai_interval_seconds": str(interval),
                 "ai_telegram_enabled": "1" if "ai_telegram_enabled" in form else "0",
             }
@@ -6979,6 +7137,7 @@ def main():
     threading.Thread(target=ai_worker, daemon=True).start()
     threading.Thread(target=scheduled_release_worker, daemon=True).start()
     threading.Thread(target=telegram_command_worker, daemon=True).start()
+    threading.Thread(target=maintenance_worker, daemon=True).start()
     try:
         OperatorHTTPServer.request_queue_size = int(os.environ.get("QV_BACKLOG", "512"))
     except Exception:

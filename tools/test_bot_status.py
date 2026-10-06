@@ -133,7 +133,9 @@ class StatusTests(unittest.TestCase):
         self.assertIn("Модель: qwen3:0.6b", text)
         self.assertIn("Модель установлена: ✅ включено", text)
         self.assertIn("В RAM: ⏸ выключено", text)
-        self.assertIn("RAM сервера", text)
+        self.assertIn("модель выгружена", text)
+        self.model.update(loaded=True, memory_bytes=1024**2)
+        self.assertIn("RAM сервера", bot.format_status(self.snapshot()))
 
     def test_maintenance_closes_download_in_report(self):
         self.settings["maintenance"] = "1"

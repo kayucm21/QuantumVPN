@@ -1,10 +1,13 @@
 """Offline guards for source-only deployment and isolated dependency install."""
 import ast
+from contextlib import closing
 import hashlib
 import importlib.util
 import io
+import itertools
 from pathlib import Path
 import sys
+import sqlite3
 import tempfile
 import types
 import unittest
@@ -41,9 +44,11 @@ class DeploymentGuardsTests(unittest.TestCase):
         self.assertFalse(config["with_community"])
         self.assertFalse(config["with_bot_status"])
         self.assertFalse(config["with_network_ai"])
+        self.assertFalse(config["with_local_ai"])
         self.assertNotIn("quantumvpn_community.py", payloads)
         self.assertNotIn("quantumvpn_bot_status.py", payloads)
         self.assertTrue(set(self.deployer.NETWORK_AI_MODULES).isdisjoint(payloads))
+        self.assertTrue(set(self.deployer.LOCAL_AI_MODULES).isdisjoint(payloads))
         self.assertEqual(set(self.deployer.COMPANIONS), set(config["companions"]))
 
     def test_explicit_community_is_exact_fixed_allowlist(self):
@@ -164,6 +169,148 @@ class DeploymentGuardsTests(unittest.TestCase):
                     with self.assertRaises(SyntaxError):
                         self.deployer.build_config(self.args("--with-network-ai"))
                     (tools / name).write_text("# safe source\n")
+
+    def test_local_ai_exact_allowlist_combines_with_all_optional_scopes(self):
+        for community, bot, network in itertools.product((False, True), repeat=3):
+            with self.subTest(community=community, bot=bot, network=network), tempfile.TemporaryDirectory() as temp:
+                root, tools = Path(temp), Path(temp) / "tools"
+                tools.mkdir()
+                for name in ("quantumvpn_operator_panel.py", "quantumvpn_aurora.py", *self.deployer.COMPANIONS,
+                             *self.deployer.COMMUNITY_MODULES, self.deployer.BOT_STATUS_MODULE,
+                             *self.deployer.NETWORK_AI_MODULES, *self.deployer.LOCAL_AI_MODULES,
+                             "unrequested.py"):
+                    (tools / name).write_text("PANEL_BUILD='2.1.2-local.test'\n" if name == "quantumvpn_operator_panel.py" else "# safe source\n")
+                options = ["--with-local-ai", "--expected-old-llama-sha256", "b" * 64,
+                           "--expected-old-autopilot-sha256", "c" * 64]
+                if community: options.append("--with-community")
+                if bot: options.append("--with-bot-status")
+                if network: options.append("--with-network-ai")
+                with mock.patch.object(self.deployer, "ROOT", root):
+                    config, payloads = self.deployer.build_config(self.args(*options))
+                expected = {"app.py", "quantumvpn_aurora.py", *self.deployer.LOCAL_AI_MODULES}
+                if community: expected.update(self.deployer.COMMUNITY_MODULES)
+                if bot: expected.add(self.deployer.BOT_STATUS_MODULE)
+                if network: expected.update(self.deployer.NETWORK_AI_MODULES)
+                self.assertEqual(expected, set(payloads))
+                self.assertEqual(expected, set(config["files"]))
+                self.assertTrue(config["with_local_ai"])
+                self.assertEqual("b" * 64, config["files"]["quantumvpn_llama.py"]["old_sha256"])
+                self.assertEqual("c" * 64, config["files"]["quantumvpn_autopilot.py"]["old_sha256"])
+                self.assertIsNone(config["files"]["quantumvpn_maintenance.py"]["old_sha256"])
+                self.assertEqual(set(self.deployer.COMPANIONS), set(config["companions"]))
+                for name in self.deployer.LOCAL_AI_MODULES:
+                    self.assertEqual(hashlib.sha256(payloads[name]).hexdigest(), config["files"][name]["sha256"])
+
+    def test_local_ai_hashes_require_explicit_scope_and_legacy_namespace_is_safe(self):
+        for option in ("--expected-old-llama-sha256", "--expected-old-autopilot-sha256", "--expected-old-maintenance-sha256"):
+            with self.subTest(option=option), self.assertRaisesRegex(ValueError, "require --with-local-ai"):
+                self.deployer.build_config(self.args(option, "d" * 64))
+        args = self.args()
+        for attribute in ("with_local_ai", "expected_old_llama_sha256", "expected_old_autopilot_sha256", "expected_old_maintenance_sha256"):
+            delattr(args, attribute)
+        config, payloads = self.deployer.build_config(args)
+        self.assertFalse(config["with_local_ai"])
+        self.assertTrue(set(self.deployer.LOCAL_AI_MODULES).isdisjoint(payloads))
+
+    def test_local_ai_rejects_missing_and_invalid_local_sources_before_upload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, tools = Path(temp), Path(temp) / "tools"
+            tools.mkdir()
+            for name in ("quantumvpn_operator_panel.py", "quantumvpn_aurora.py", *self.deployer.COMPANIONS,
+                         *self.deployer.LOCAL_AI_MODULES):
+                (tools / name).write_text("PANEL_BUILD='2.1.2-local.test'\n" if name == "quantumvpn_operator_panel.py" else "# safe source\n")
+            with mock.patch.object(self.deployer, "ROOT", root):
+                for name in self.deployer.LOCAL_AI_MODULES:
+                    with self.subTest(name=name):
+                        path = tools / name
+                        path.unlink()
+                        with self.assertRaises(FileNotFoundError):
+                            self.deployer.build_config(self.args("--with-local-ai"))
+                        path.write_text("def broken(:\n")
+                        with self.assertRaises(SyntaxError):
+                            self.deployer.build_config(self.args("--with-local-ai"))
+                        path.write_text("# safe source\n")
+
+    def test_local_ai_settings_guard_masks_only_runtime_observations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            # Restore the real function, rather than the generic fixture stub.
+            real = {"__name__": "offline_settings_fixture"}
+            exec(self.deployer.REMOTE_SOURCE, real)
+            database = root / "operator.db"
+            with closing(sqlite3.connect(database)) as db:
+                db.executescript("create table settings(key text,value text); create table resource_state(id integer, sequence integer,production text,staging text,percent integer); create table resource_bundles(id integer); insert into resource_state values(1,1,'fixture','fixture',100);")
+                db.executemany("insert into settings values (?,?)", [("ai_engine", "ollama"), ("ai_autopilot_enabled", "0"), ("nodes_recommended", "fixture-node"), ("ai_autopilot_state", "{}"), ("ai_autopilot_last_run", "1"), ("ai_autopilot_last_status", "observing"), ("ai_autopilot_last_action", "")])
+                db.commit()
+            baseline = real["db_snapshot"](root)
+            for key in ("ai_engine", "ai_autopilot_enabled", "nodes_recommended"):
+                with self.subTest(stable=key), closing(sqlite3.connect(database)) as db:
+                    old = db.execute("select value from settings where key=?", (key,)).fetchone()[0]
+                    db.execute("update settings set value='changed' where key=?", (key,))
+                    db.commit()
+                    self.assertNotEqual(baseline, real["db_snapshot"](root))
+                    db.execute("update settings set value=? where key=?", (old, key))
+                    db.commit()
+            for key in ("ai_autopilot_state", "ai_autopilot_last_run", "ai_autopilot_last_status", "ai_autopilot_last_action"):
+                with self.subTest(volatile=key), closing(sqlite3.connect(database)) as db:
+                    db.execute("update settings set value='new observation' where key=?", (key,))
+                    db.commit()
+                    self.assertEqual(baseline, real["db_snapshot"](root))
+
+    def test_remote_local_ai_requires_all_sources_exact_presence_and_hashes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            scope = self.remote_scope(root)
+            config = {"files": {name: {"old_sha256": None} for name in ("app.py", "quantumvpn_aurora.py", *self.deployer.LOCAL_AI_MODULES)}, "companions": {}, "with_local_ai": True}
+            scope["environment"] = lambda: {"QV_DATA_DIR": str(root)}
+            with mock.patch.object(scope["os"], "geteuid", return_value=0, create=True):
+                self.assertEqual(set(config["files"]), set(scope["preflight"](config)[2]))
+                for name in self.deployer.LOCAL_AI_MODULES:
+                    with self.subTest(name=name):
+                        missing = {**config, "files": {key: item for key, item in config["files"].items() if key != name}}
+                        with self.assertRaisesRegex(scope["CheckFailed"], "local_ai_sources_missing"):
+                            scope["preflight"](missing)
+                        path = root / name
+                        path.write_text("# already installed\n")
+                        with self.assertRaisesRegex(scope["CheckFailed"], "source_presence_" + name):
+                            scope["preflight"](config)
+                        config["files"][name]["old_sha256"] = "e" * 64
+                        with self.assertRaisesRegex(scope["CheckFailed"], "source_hash_" + name):
+                            scope["preflight"](config)
+                        config["files"][name]["old_sha256"] = scope["digest"](path)
+                        self.assertTrue(scope["preflight"](config)[2][name]["exists"])
+                for flag, name in ((False, "quantumvpn_llama.py"), (True, "unrequested.py"), (True, "../quantumvpn_autopilot.py"), (True, "llama-server")):
+                    with self.subTest(flag=flag, name=name):
+                        bad = {**config, "with_local_ai": flag, "files": {**config["files"], name: {"old_sha256": None}}}
+                        with self.assertRaisesRegex(scope["CheckFailed"], "source_allowlist"):
+                            scope["preflight"](bad)
+
+    def test_local_ai_rollback_only_restores_or_removes_verified_source_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            backup = root / "source-backup"
+            backup.mkdir()
+            scope = self.remote_scope(root)
+            existing, introduced = (root / name for name in ("quantumvpn_llama.py", "quantumvpn_maintenance.py"))
+            old = b"# previous local adapter\n"
+            (backup / existing.name).write_bytes(old)
+            for path in (existing, introduced): path.write_text("# installed source\n")
+            scope["CONFIG"] = {"files": {path.name: {"sha256": scope["digest"](path)} for path in (existing, introduced)}, "upload": "fixture-local-ai"}
+            states = {existing.name: {"exists": True, "sha256": hashlib.sha256(old).hexdigest(), "uid": 0, "gid": 0, "mode": 0o600}, introduced.name: {"exists": False}}
+            database = root / "operator.db"
+            model = root / "qwen.gguf"
+            database.write_bytes(b"live users and settings")
+            model.write_bytes(b"previously installed model")
+            introduced.write_text("# concurrent edit\n")
+            with self.assertRaisesRegex(scope["CheckFailed"], "rollback_source_changed"):
+                scope["restore"](states, backup, [existing.name, introduced.name])
+            introduced.write_text("# installed source\n")
+            with mock.patch.object(scope["os"], "chown", create=True):
+                scope["restore"](states, backup, [existing.name, introduced.name])
+            self.assertEqual(old, existing.read_bytes())
+            self.assertFalse(introduced.exists())
+            self.assertEqual(b"live users and settings", database.read_bytes())
+            self.assertEqual(b"previously installed model", model.read_bytes())
 
     def remote_scope(self, root):
         namespace = {"__name__": "offline_deployment_fixture"}

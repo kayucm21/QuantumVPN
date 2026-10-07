@@ -28,6 +28,19 @@ must be verified independently before promotion.
 
 ## Verification boundaries
 
+The candidate passed 232 JVM tests, 125 focused Python tests, 84 offline release
+assertions and all 38 focused UI/Keystore tests on the dedicated API 26 x86_64
+AVD. The first SwiftShader run stalled during the fourth test; the full rerun
+with the explicit `swangle` renderer completed in 35.895 seconds. This isolates
+an emulator/capture compatibility issue without claiming a proven root cause.
+The pulled home, startup and compact-settings UI fixtures were visually reviewed.
+Both ARM APKs passed package/version, signature, SHA-256 and native ABI checks.
+
+The legacy full-project checker stops on an existing NOTICE branding mismatch;
+it is not recorded as a passed full-project or remote-CI gate. APK source is
+commit `1f1f050e3ef7e36cb6542af34ebe0d4f9658c4b4`; subsequent changes only affect
+the review launcher and documentation, not application sources or binaries.
+
 JVM, Python and disposable emulator checks do not prove physical-device VPN
 throughput, battery consumption, modern Android vendor behavior or universal
 notification delivery. No zero-bug or zero-battery claim is made. No physical

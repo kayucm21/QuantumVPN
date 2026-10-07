@@ -7,6 +7,8 @@ param(
     [int]$AndroidApi = 35,
     [string]$ReviewRoot = '',
     [int]$EmulatorPort = 5582,
+    [ValidateSet('swiftshader', 'swangle', 'software', 'host')]
+    [string]$Gpu = 'swiftshader',
     [switch]$HoldProcess,
     [string]$AppApk = '',
     [string]$TestApk = ''
@@ -118,7 +120,7 @@ if ($Mode -eq 'Boot') {
         $process = Start-Process -FilePath $emulator -WindowStyle Hidden -PassThru -ArgumentList @(
             '-avd', $avdName, '-port', $EmulatorPort, '-no-window', '-no-audio',
             '-no-snapshot', '-no-boot-anim', '-memory', '1024', '-cores', '2',
-            '-skin', '1080x1920', '-gpu', 'swiftshader',
+            '-skin', '1080x1920', '-gpu', $Gpu,
             '-feature', '-Vulkan'
         ) -RedirectStandardOutput (Join-Path $reviewPath 'emulator.stdout.log') `
           -RedirectStandardError (Join-Path $reviewPath 'emulator.stderr.log')

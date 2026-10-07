@@ -26,6 +26,7 @@ COMMUNITY_MODULES = ("quantumvpn_durak.py", "quantumvpn_community.py", "quantumv
 BOT_STATUS_MODULE = "quantumvpn_bot_status.py"
 NETWORK_AI_MODULES = ("quantumvpn_gemini.py", "quantumvpn_network_guard.py", "quantumvpn_target_scan.py")
 LOCAL_AI_MODULES = ("quantumvpn_llama.py", "quantumvpn_autopilot.py", "quantumvpn_maintenance.py")
+PULSE_MODULES = ("quantumvpn_network_center.py", "quantumvpn_ai_journal.py", "quantumvpn_mtproto.py")
 CATALOG_SOURCES = ("quantumvpn_target_catalog.py", "assets/routing-catalog-seed.json", "assets/routing-catalog-seed.LICENSE.txt")
 
 # Keep the remote operation self-contained; importing app would run writable
@@ -44,6 +45,7 @@ COMMUNITY_SOURCES = {'quantumvpn_durak.py', 'quantumvpn_community.py', 'quantumv
 BOT_STATUS_SOURCES = {'quantumvpn_bot_status.py'}
 NETWORK_AI_SOURCES = {'quantumvpn_gemini.py', 'quantumvpn_network_guard.py', 'quantumvpn_target_scan.py'}
 LOCAL_AI_SOURCES = {'quantumvpn_llama.py', 'quantumvpn_autopilot.py', 'quantumvpn_maintenance.py'}
+PULSE_SOURCES = {'quantumvpn_network_center.py', 'quantumvpn_ai_journal.py', 'quantumvpn_mtproto.py'}
 CATALOG_SOURCES = {'quantumvpn_target_catalog.py', 'assets/routing-catalog-seed.json', 'assets/routing-catalog-seed.LICENSE.txt'}
 VOLATILE = {
     'node_quarantine', 'latency_state', 'latency_last_probe', 'latency_best_ms',
@@ -151,12 +153,14 @@ def preflight(config):
                | (BOT_STATUS_SOURCES if config.get('with_bot_status') else set())
                | (NETWORK_AI_SOURCES if config.get('with_network_ai') else set())
                | (LOCAL_AI_SOURCES if config.get('with_local_ai') else set())
+               | (PULSE_SOURCES if config.get('with_pulse') else set())
                | (CATALOG_SOURCES if config.get('with_catalog') else set()))
     require(set(config['files']) <= allowed and {'app.py', 'quantumvpn_aurora.py'} <= set(config['files']), 'source_allowlist')
     require(not config.get('with_community') or COMMUNITY_SOURCES <= set(config['files']), 'community_sources_missing')
     require(not config.get('with_bot_status') or BOT_STATUS_SOURCES <= set(config['files']), 'bot_status_source_missing')
     require(not config.get('with_network_ai') or NETWORK_AI_SOURCES <= set(config['files']), 'network_ai_sources_missing')
     require(not config.get('with_local_ai') or LOCAL_AI_SOURCES <= set(config['files']), 'local_ai_sources_missing')
+    require(not config.get('with_pulse') or PULSE_SOURCES <= set(config['files']), 'pulse_sources_missing')
     require(not config.get('with_catalog') or CATALOG_SOURCES <= set(config['files']), 'catalog_sources_missing')
     for name, expected in config['companions'].items():
         path = safe_target(name)
@@ -456,6 +460,11 @@ def parser() -> argparse.ArgumentParser:
     for name in ("llama", "autopilot", "maintenance"):
         result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
                             help="Existing module SHA-256; omitted means the module must be absent")
+    result.add_argument("--with-pulse", action="store_true",
+                        help="Also deploy only the network center, AI journal and MTProto control modules; no proxy installation, service or configuration changes")
+    for name in ("network-center", "ai-journal", "mtproto"):
+        result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
+                            help="Existing Pulse module SHA-256; omitted means the module must be absent")
     result.add_argument("--apply", action="store_true", help="Upload, back up, replace and verify; default is read-only")
     result.add_argument("--with-catalog", action="store_true", help="Deploy the exact routing catalogue module, pinned seed and licence; no active route changes")
     for name in ("catalog", "catalog-seed", "catalog-license"):
@@ -495,6 +504,12 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
             local[name] = ROOT / "tools" / name
     elif any(getattr(args, key, None) for key in ("expected_old_llama_sha256", "expected_old_autopilot_sha256", "expected_old_maintenance_sha256")):
         raise ValueError("Local AI old hashes require --with-local-ai")
+    with_pulse = getattr(args, "with_pulse", False)
+    if with_pulse:
+        for name in PULSE_MODULES:
+            local[name] = ROOT / "tools" / name
+    elif any(getattr(args, key, None) for key in ("expected_old_network_center_sha256", "expected_old_ai_journal_sha256", "expected_old_mtproto_sha256")):
+        raise ValueError("Pulse old hashes require --with-pulse")
     with_catalog = getattr(args, "with_catalog", False)
     if with_catalog:
         for name in CATALOG_SOURCES:
@@ -531,6 +546,10 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
         old.update({"quantumvpn_llama.py": getattr(args, "expected_old_llama_sha256", None),
                     "quantumvpn_autopilot.py": getattr(args, "expected_old_autopilot_sha256", None),
                     "quantumvpn_maintenance.py": getattr(args, "expected_old_maintenance_sha256", None)})
+    if with_pulse:
+        old.update({"quantumvpn_network_center.py": getattr(args, "expected_old_network_center_sha256", None),
+                    "quantumvpn_ai_journal.py": getattr(args, "expected_old_ai_journal_sha256", None),
+                    "quantumvpn_mtproto.py": getattr(args, "expected_old_mtproto_sha256", None)})
     if with_catalog:
         old.update({"quantumvpn_target_catalog.py": getattr(args, "expected_old_catalog_sha256", None),
                     "assets/routing-catalog-seed.json": getattr(args, "expected_old_catalog_seed_sha256", None),
@@ -546,6 +565,7 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
             "with_bot_status": with_bot_status,
             "with_network_ai": with_network_ai,
             "with_local_ai": with_local_ai,
+            "with_pulse": with_pulse,
             "with_catalog": with_catalog,
             "login_marker": args.login_marker}, payloads
 

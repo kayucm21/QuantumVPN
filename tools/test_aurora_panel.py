@@ -153,9 +153,9 @@ class AuroraPanelTests(unittest.TestCase):
             return response.read().decode("utf-8")
 
     def test_build_and_tab_registry_cover_existing_routes(self):
-        self.assertTrue(self.panel.PANEL_BUILD.startswith("2.2.1-routing"))
-        self.assertEqual(set(self.panel.PAGE_TITLES), LEGACY_TABS)
-        self.assertEqual(len(self.panel.AURORA_NAV_GROUPS), 9)
+        self.assertTrue(self.panel.PANEL_BUILD.startswith("2.3.0-pulse"))
+        self.assertEqual(set(self.panel.PAGE_TITLES), LEGACY_TABS | {"network"})
+        self.assertEqual(len(self.panel.AURORA_NAV_GROUPS), 8)
         for tab, title in self.panel.PAGE_TITLES.items():
             with self.subTest(tab=tab):
                 self.assertTrue(title[0])
@@ -168,7 +168,7 @@ class AuroraPanelTests(unittest.TestCase):
                 primary_html, subnav_html = self.panel.aurora_navigation(tab, "owner")
                 primary = PanelHTML(primary_html).tab_links()
                 subnav = PanelHTML(subnav_html).tab_links()
-                self.assertEqual(len(primary), 9)
+                self.assertEqual(len(primary), 8)
                 self.assertEqual(sum(PanelHTML.active(node) for _, node in primary), 1)
                 current = [name for name, node in subnav if PanelHTML.active(node)]
                 if subnav:
@@ -176,7 +176,7 @@ class AuroraPanelTests(unittest.TestCase):
                 else:
                     self.assertIn((tab, True), [(name, PanelHTML.active(node)) for name, node in primary])
                 reachable.update(name for name, _ in primary + subnav)
-        self.assertEqual(reachable, LEGACY_TABS)
+        self.assertEqual(reachable, LEGACY_TABS | {"network"})
 
     def test_admin_link_is_visible_only_to_owner(self):
         for role in ("owner", "operator", "viewer"):

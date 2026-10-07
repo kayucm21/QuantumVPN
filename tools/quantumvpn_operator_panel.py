@@ -25,6 +25,7 @@ import time
 import zipfile
 import sys
 from collections import defaultdict, deque
+from contextlib import closing
 from email.parser import BytesParser
 from email.policy import default as email_default
 from functools import lru_cache
@@ -97,6 +98,15 @@ except ModuleNotFoundError:
     from tools import quantumvpn_target_catalog as target_catalog
 
 try:
+    import quantumvpn_network_center as network_center
+    import quantumvpn_ai_journal as ai_journal
+    import quantumvpn_mtproto as mtproto
+except ModuleNotFoundError:
+    from tools import quantumvpn_network_center as network_center
+    from tools import quantumvpn_ai_journal as ai_journal
+    from tools import quantumvpn_mtproto as mtproto
+
+try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
@@ -132,7 +142,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.2.1-routing.1"
+PANEL_BUILD = "2.3.0-pulse.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -153,6 +163,7 @@ _ALERT_STATE = {"last": {}, "lock": threading.Lock()}
 # The same registry drives navigation and page headings. Legacy URLs and POST
 # return_tab values remain unchanged; grouping is a presentation-only change.
 PAGE_TITLES = {
+    "network": ("Сеть · Quantum Pulse", "Ноды, DNS, маршруты, контролируемый ИИ и Telegram-прокси"),
     "dashboard": ("Командный центр", "Состояние VPN-инфраструктуры и приоритетные события"),
     "fleet": ("Центр флота", "Приложения, подписки и доступность VDS"),
     "quality": ("КОНТРОЛЬ КАЧЕСТВА", "Подписка, маршруты и доказательства восстановления"),
@@ -180,12 +191,11 @@ PAGE_TITLES = {
 }
 AURORA_NAV_GROUPS = (
     ("overview", "Обзор", "▦", ("dashboard", "fleet", "quality")),
-    ("nodes", "Ноды", "▤", ("latency", "automation")),
+    ("network", "Сеть", "⇄", ("network", "latency", "automation", "routing", "ai")),
     ("clients", "Клиенты", "♧", ("users", "service", "devices", "support", "donations")),
-    ("routes", "Маршруты", "⇄", ("routing",)),
     ("releases", "Релизы", "◇", ("release", "resources", "features", "branding")),
     ("events", "События", "≡", ("incidents", "logs", "reports", "audit")),
-    ("security", "Защита", "♢", ("security", "admins", "ai")),
+    ("security", "Защита", "♢", ("security", "admins")),
     ("games", "Игры", "♠", ("cards",)),
     ("system", "Система", "⚙", ("integrations",)),
 )
@@ -235,6 +245,7 @@ ROUTING_SETTING_KEYS = (
     "routing_proxy_cidrs",
 )
 MAX_ROUTING_ITEMS = 2_000
+MAX_ROUTING_FORM_BYTES = 4 * 1024 * 1024
 # Target inspection is intentionally small and bounded.  The operator panel is
 # not a network scanner: it only probes a short, explicitly entered list over
 # TCP/443 after filtering every resolved address to public internet space.
@@ -3355,6 +3366,7 @@ def autopilot_display(s):
 
 
 def run_autopilot_step(db, s, report=None, proposals=None):
+    s = settings(db)  # The registry and manual controls must be a fresh snapshot.
     report = report if report is not None else network_guard_snapshot(db)
     result = autopilot.execute(db, report, parse_node_map_config(s.get("node_map_config", "")),
                                now=int(time.time()), proposals=proposals)
@@ -3369,7 +3381,7 @@ def run_autopilot_step(db, s, report=None, proposals=None):
     if result["actions"] and enabled(s, "telegram_alerts_enabled", False):
         labels = {"select_reserve": "Выбран резерв; ожидаются контрольные проверки", "quarantine_node": "Нода временно исключена",
                   "recover_node": "Нода восстановлена", "rollback": "Выполнен откат", "verified": "Изменение проверено"}
-        text = "🤖 Quantum Control · автоуправление\n" + "\n".join("• " + labels.get(item["kind"], "Проверка") + ": " + item["target"] for item in result["actions"])
+        text = "🤖 Quantum Control · автоуправление\n" + ai_journal.render_entry(result.get("journal") or {})
         telegram_send(s, text)
     return result
 
@@ -3756,7 +3768,87 @@ def render_login(error=""):
     </form></section></main>{aurora_script()}{control_next.passkey_script()}</body></html>"""
 
 
-def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None, actor_user="", control_csrf=""):
+def network_policy_payload(s, source="production"):
+    if source == "draft":
+        return routing_scan_base(s)
+    if source == "staging" and enabled(s, "routing_staging_enabled", False):
+        staged = json.loads(s.get("routing_staging_payload") or "{}")
+        validated = dict(s)
+        validated.update(routing_settings_from_payload(staged))
+        return routing_payload(validated, int(s.get("routing_staging_revision") or 1))
+    return routing_payload(s)
+
+
+def render_network_pulse(s, csrf, actor_role, view="overview", target="", source="production", nodes=None):
+    """Authenticated, compact hub; no network probes or secret reads on GET."""
+    can_write = role_at_least(actor_role, "operator")
+    source = source if source in network_center.POLICY_SOURCES else "production"
+    notice = ""
+    try:
+        if source == "staging" and not enabled(s, "routing_staging_enabled", False):
+            raise ValueError("Тестовый канал не опубликован")
+        if source == "draft" and not json.loads(s.get("routing_draft_payload") or "{}"):
+            raise ValueError("Сохранённого черновика пока нет")
+        payload = network_policy_payload(s, source)
+    except (ValueError, TypeError):
+        notice = "<p class=notice>Выбранная политика недоступна. Показана опубликованная версия.</p>"
+        source, payload = "production", routing_payload(s)
+    xray = network_center.read_xray_snapshot("/var/lib/rospanel/xray/config.json")
+    result = None
+    if target:
+        try:
+            result = network_center.route_laboratory(payload, target, xray, source,
+                        traffic_context={"inbound_tag": "vless-in", "network": "tcp", "port": 443})
+        except ValueError as error:
+            notice = "<p class=notice>" + html.escape(str(error)) + "</p>"
+    with closing(conn()) as db:
+        journal = ai_journal.read_entries(db, 12)
+        history = [dict(zip(("revision", "actor", "state", "note"), row)) for row in db.execute(
+            "select revision,actor,state,note from routing_revisions order by id desc limit 12")]
+        plan = autopilot.plan_actions(network_guard_snapshot(db), parse_node_map_config(s.get("node_map_config", "")),
+                                       s, now=int(time.time()))
+    esc = lambda value: html.escape(str(value), quote=True)
+    policy = autopilot.control_policy(s)
+    journal_html = "".join("<article class=network-card><pre style='white-space:pre-wrap;overflow-wrap:anywhere;margin:0'>"
+                    + esc(ai_journal.render_entry(item)) + "</pre></article>" for item in journal)
+    journal_html = "<details class=network-card><summary>Журнал ИИ · причины, замеры и откат</summary>" + (
+                      journal_html or "<p class=muted>Новых решений пока нет. Старый текст модели не считается выполненным действием.</p>") + "</details>"
+    disabled = "" if can_write else "disabled"
+    ai_html = f'''<div class=network-grid><section class=network-card><h2>Контролируемый автопилот</h2>
+      <p class=network-hint>Работает только с зарегистрированными нодами и повторными замерами. IP, домены и живые подключения не перестраиваются каждую миллисекунду.</p>
+      <form method=post action=/operator/network/ai><input type=hidden name=csrf value="{esc(csrf)}"><fieldset {disabled}>
+      <label><input type=checkbox name=ai_autopilot_enabled {'checked' if enabled(s,'ai_autopilot_enabled',False) else ''}> Разрешить проверенные изменения рекомендаций нод</label>
+      <label>Наблюдение, секунд<input type=number min=60 max=3600 name=ai_monitor_interval_seconds value={policy['monitor_interval_seconds']}></label>
+      <label>Пауза между изменениями, секунд<input type=number min=300 max=86400 name=ai_action_cooldown_seconds value={policy['action_cooldown_seconds']}></label>
+      <label>Последовательных проверок<input type=number min=3 max=10 name=ai_required_checks value={policy['required_checks']}></label>
+      <div class=network-actions><button name=action value=save>Сохранить ограничения</button><button class=secondary name=action value=freeze>Остановить изменения</button><button class=secondary name=action value=unfreeze>Возобновить изменения</button></div></fieldset></form>
+      <p class=network-hint>Qwen: {esc(s.get('ai_engine','ollama'))}; анализ модели — отдельно, каждые {esc(s.get('ai_interval_seconds','900'))} с. Наблюдение не зависит от ответа модели.</p>
+      <a class=network-link href="/operator?tab=ai">Модель и подробные настройки →</a></section>
+      <section class=network-card><h2>План по текущим замерам</h2><pre style='white-space:pre-wrap;overflow-wrap:anywhere'>{esc(ai_journal.render_entry(plan.get('journal') or {}))}</pre>
+      <p class=network-hint>Этот просмотр не применяет изменения. Без исправного резерва автопилот не выдумывает новую ноду.</p></section></div>{journal_html}'''
+    proxy = mtproto.snapshot() if view == "mtproto" else {}
+    proxy_status = {"active": "Работает", "inactive": "Остановлен", "not_installed": "Не установлен",
+                    "configuration_unavailable": "Конфигурация недоступна"}.get(proxy.get("status"), proxy.get("status", "Нет данных"))
+    owner_controls = ""
+    if actor_role == "owner":
+        owner_controls = f'''<form method=post action=/operator/network/mtproto><input type=hidden name=csrf value="{esc(csrf)}">
+          <div class=network-actions><button name=action value=links>Показать ссылку подключения</button><button class=secondary name=action value=probe>Проверить MTProto-протокол</button></div></form>
+          <details><summary>Управление сервисом</summary><form method=post action=/operator/network/mtproto><input type=hidden name=csrf value="{esc(csrf)}">
+          <label><input type=checkbox name=confirm value=yes required> Подтверждаю запуск, остановку или переподключение только Telegram-прокси</label>
+          <div class=network-actions><button name=action value=start>Запустить</button><button class=secondary name=action value=stop>Остановить</button><button class=secondary name=action value=restart>Перезапустить</button></div></form></details>'''
+    mtproto_html = f'''<section class=network-card><h2>Собственный Telegram MTProto</h2><div class=network-metrics>
+      <div class=network-metric><span>Сервис</span><b>{esc(proxy_status)}</b></div><div class=network-metric><span>Порт</span><b>{esc(proxy.get('port',3443))}</b></div>
+      <div class=network-metric><span>Готовые upstream</span><b>{esc(proxy.get('stats',{}).get('total_ready_targets','—'))}</b></div></div>
+      <p class=network-hint>Официальный MTProxy, отдельный непривилегированный процесс. Статистика доступна только на loopback. Секрет не включается в обычную страницу, публичный статус или журнал ИИ.</p>
+      <p class=network-hint>MTProto — прокси только для Telegram, не VPN для браузера или других приложений. TCP-ответ сам по себе не подтверждает работу протокола.</p>{owner_controls}</section>'''
+    node_html = "".join(f"<article class=network-node><b>{esc(item.get('label','Нода'))}</b><p>{esc(item.get('location',''))} · {esc(item.get('target',''))}</p><span class=network-badge>{esc(item.get('measurement','Ожидает замер'))}</span></article>" for item in (nodes or [])[:24])
+    nodes_html = f'<section class=network-card><h2>Ноды · фактические замеры</h2><div class=network-node-list>{node_html or "Нет зарегистрированных нод"}</div><p class=network-hint>TCP-задержка измерена с VDS, не с телефона пользователя.</p><a class=network-link href="/operator?tab=latency">Карта, ручные техработы и настройки нод →</a></section>'
+    return notice + network_center.render_network_hub(s, csrf, payload=payload, lab_result=result,
+                    xray_snapshot=xray, nodes=nodes, history=history, active=view, can_write=can_write,
+                    policy_source=source, panel_html={"ai":ai_html,"mtproto":mtproto_html,"nodes":nodes_html,"journal":journal_html})
+
+
+def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None, actor_user="", control_csrf="", network_view="overview", network_target="", policy_source="production"):
     checked = lambda key: "checked" if s.get(key) == "1" else ""
     network_guard_html = ""
     if section in {"ai", "latency"}:
@@ -3888,13 +3980,15 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     subscription_main_label = s.get("subscription_main_label", "Встроенная подписка включена")[:160]
     reserve_profile_label = s.get("reserve_profile_label", "Публиковать пятый профиль «Резерв TLS»")[:160]
     totp_setup = ""
-    if not role_at_least(actor_role, "operator"):
+    if actor_role != "owner":
         totp_setup = "<p class=muted>Настройки безопасности доступны только ролям operator и owner.</p>"
     elif not enabled(s, "totp_enabled", False) or not s.get("totp_secret"):
         totp_setup = "<p class=muted>2FA выключена. Включите и сохраните — секрет сгенерируется автоматически.</p>"
-    else:
+    elif section == "security":
         uri = f"otpauth://totp/QuantumControl:{USER}?secret={s.get('totp_secret')}&issuer=QuantumControl"
         totp_setup = f"<p class=ok>2FA активна.</p><p class=muted>Секрет: <code>{html.escape(s.get('totp_secret'))}</code></p><p class=muted>URI: <code>{html.escape(uri)}</code></p>"
+    else:
+        totp_setup = "<p class=ok>2FA активна. Данные настройки не включаются в другие страницы.</p>"
 
     def show(name):
         return "" if section == name else "style='display:none'"
@@ -4135,6 +4229,9 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     ) or '<p class=muted>Записей пока нет</p>'
     page_title, page_description = PAGE_TITLES.get(section, PAGE_TITLES['dashboard'])
     navigation, subnavigation = aurora_navigation(section, actor_role)
+    if section == "network":
+        subnavigation = ""  # The compact hub already owns its six local tabs.
+    network_html = render_network_pulse(s, control_csrf, actor_role, network_view, network_target, policy_source, map_nodes) if section == "network" else ""
     current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <meta name=referrer content=same-origin><title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}{aurora_css()}{scan_dialog_css()}{catalog_dialog_css()}</style><body class=aurora-panel data-ui=Aurora2><main><div class=panel-shell>
@@ -4154,6 +4251,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     <section {show('quality')}>{next_quality_html}{next_history_html}</section>
     <section {show('release')}>{next_quality_html}{next_guard_html}{next_history_html}</section>
     {resources_html}
+    <section {show('network')}>{network_html}</section>
 
     <section class="dashboard" {show('dashboard')}>
       <div class=reference-kpis>
@@ -4808,6 +4906,11 @@ class App(BaseHTTPRequestHandler):
 
     def control_preview_page(self, preview, adm):
         body = control_next.render_preview(preview, self.control_csrf(adm))
+        if getattr(self, "_network_return_view", None):
+            body = body.replace("</form>", '<input type=hidden name=return_tab value=network><input type=hidden name=return_view value="' + html.escape(self._network_return_view, quote=True) + '"></form>')
+            cancel_source = getattr(self, "_network_cancel_source", "draft")
+            cancel_url = '/operator?tab=network&amp;network_view=' + self._network_return_view + '&amp;policy_source=' + cancel_source
+            body = body.replace('href=/operator?tab=quality>Отмена', 'href="' + cancel_url + '">Отмена')
         # reply() defaults to no-referrer, which makes a browser's navigational
         # POST send Origin: null. Override it for this same-origin confirmation
         # document so control_post can retain its exact Origin and session CSRF
@@ -4843,6 +4946,8 @@ class App(BaseHTTPRequestHandler):
                 self.close_connection = True
                 return self.reply(413, "Запрос слишком большой", "text/plain; charset=utf-8")
             form = parse_qs(self.rfile.read(length).decode("utf-8"))
+            if form.get("return_tab") == ["network"]:
+                self._network_return_view = "dns" if form.get("return_view") == ["dns"] else "routes"
             expected_origin, _ = control_next.public_origin(PUBLIC_BASE)
             if (self.headers.get("Origin", "") != expected_origin
                     or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
@@ -6031,6 +6136,9 @@ class App(BaseHTTPRequestHandler):
                     control_csrf=self.control_csrf(adm),
                     card_rows=card_rows,
                     card_wallet_rows=card_wallet_rows,
+                    network_view=query.get("network_view", ["overview"])[0],
+                    network_target=query.get("network_target", [""])[0][:1024],
+                    policy_source=query.get("policy_source", ["production"])[0],
                 ),
                 "text/html; charset=utf-8",
             )
@@ -6133,6 +6241,8 @@ class App(BaseHTTPRequestHandler):
         self.end_headers()
 
     def redirect_operator(self, tab="dashboard", flash=""):
+        if tab == "routing" and getattr(self, "_network_return_view", None):
+            return self.redirect_network(self._network_return_view, flash, source=getattr(self, "_network_return_source", "production"))
         loc = f"/operator?tab={quote(tab)}"
         if flash:
             loc += f"&flash={quote(flash)}"
@@ -6140,7 +6250,103 @@ class App(BaseHTTPRequestHandler):
         self.send_header("Location", loc)
         self.end_headers()
 
+    def redirect_network(self, view="overview", flash="", target="", source="production"):
+        view = view if view in network_center.NETWORK_VIEWS else "overview"
+        source = source if source in network_center.POLICY_SOURCES else "production"
+        loc = f"/operator?tab=network&network_view={view}&policy_source={source}"
+        if target:
+            loc += "&network_target=" + quote(target, safe="")
+        if flash:
+            loc += "&flash=" + quote(flash, safe="")
+        self.send_response(303)
+        self.send_header("Location", loc)
+        self.end_headers()
+
+    def network_post(self, db, path, adm):
+        """Bounded typed controls; never accept command/config paths or secret GETs."""
+        required = "owner" if path == "/operator/network/mtproto" else "operator"
+        if not self.require_role(adm, required):
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 8192:
+                self.close_connection = True
+                return self.reply(413, "Некорректный размер запроса", "text/plain; charset=utf-8")
+            form = parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True, max_num_fields=12)
+            if any(len(value) != 1 for value in form.values()):
+                raise ValueError("Повторяющиеся поля запроса")
+            expected_origin, _ = control_next.public_origin(PUBLIC_BASE)
+            if (self.headers.get("Origin", "") != expected_origin
+                    or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                    or not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0])):
+                return self.reply(403, "Неверное подтверждение запроса. Обновите страницу панели", "text/plain; charset=utf-8")
+            values = {key: value[0] for key, value in form.items()}
+            allowed = {"csrf", "return_tab", "return_view", "action"}
+            if path.endswith("/lab"):
+                allowed.update({"route_target", "policy_source"})
+            elif path.endswith("/ai"):
+                allowed.update({"ai_autopilot_enabled", *autopilot.POLICY_FIELDS})
+            else:
+                allowed.add("confirm")
+            if set(values) - allowed:
+                raise ValueError("Неизвестные поля запроса")
+            actor, ip = adm["user"], adm["ip"]
+            if path == "/operator/network/lab":
+                target = network_center.normalize_lab_target(values.get("route_target", ""))["target"]
+                source = values.get("policy_source", "production")
+                if source not in network_center.POLICY_SOURCES:
+                    raise ValueError("Неизвестная политика")
+                return self.redirect_network("routes", target=target, source=source)
+            if path == "/operator/network/ai":
+                action = values.get("action", "")
+                if action == "save":
+                    changes = autopilot.validate_control_policy(values)
+                    changes["ai_autopilot_enabled"] = "1" if "ai_autopilot_enabled" in values else "0"
+                elif action in {"freeze", "unfreeze"}:
+                    changes = {"ai_autopilot_enabled": "1" if action == "unfreeze" else "0"}
+                else:
+                    raise ValueError("Неизвестное действие ИИ")
+                db.execute("begin immediate")
+                before = settings(db)
+                set_settings(db, changes)
+                audit(db, actor, ip, "network:ai:" + action, {
+                    "before": {key: before.get(key, "") for key in changes}, "after": changes})
+                db.commit()
+                return self.redirect_network("ai", "Ограничения ИИ сохранены. Живые подключения не изменены")
+            action = values.get("action", "")
+            if action == "links":
+                links = mtproto.owner_connection_links()
+                audit(db, actor, ip, "network:mtproto:links", {"revealed_to_owner": True})
+                db.commit()
+                esc = lambda value: html.escape(str(value), quote=True)
+                body = '<h1>Подключение Telegram</h1><p>Ссылка содержит секрет прокси. Не публикуйте её в открытом доступе.</p>'
+                body += '<p><a class=button href="' + esc(links["telegram"]) + '">Подключить в Telegram</a></p><p><a href="' + esc(links["https"]) + '" rel="noreferrer noopener">Открыть через t.me</a></p>'
+                body += '<p><a href="/operator?tab=network&amp;network_view=mtproto">Вернуться в панель</a></p>'
+                return self.reply(200, '<!doctype html><html lang=ru><head><meta charset=utf-8><meta name=referrer content=no-referrer><meta name=viewport content="width=device-width,initial-scale=1"><title>Telegram-прокси</title><style>' + css() + aurora_css() + '</style></head><body class=aurora-panel><main style="max-width:720px;margin:24px auto;padding:20px">' + body + '</main></body></html>', "text/html; charset=utf-8", headers={"Cache-Control":"no-store", "X-Robots-Tag":"noindex, nofollow"})
+            if action == "probe":
+                result = mtproto.health_probe()
+                audit(db, actor, ip, "network:mtproto:probe", {"ok": result.get("ok") is True})
+                db.commit()
+                return self.redirect_network("mtproto", "MTProto-протокол подтверждён" if result.get("ok") is True else "MTProto не подтвердился. Проверьте статус сервиса")
+            if action not in {"start", "stop", "restart"}:
+                raise ValueError("Неизвестное действие прокси")
+            if values.get("confirm") != "yes":
+                raise ValueError("Отметьте подтверждение управления Telegram-прокси")
+            result = mtproto.control(action)
+            audit(db, actor, ip, "network:mtproto:" + action, {"ok": result.get("ok") is True})
+            db.commit()
+            return self.redirect_network("mtproto", "Команда прокси выполнена" if result.get("ok") is True else "Сервис не выполнил команду")
+        except (ValueError, TypeError, UnicodeError):
+            db.rollback()
+            return self.reply(400, "Некорректный запрос. Проверьте поля и подтверждение", "text/plain; charset=utf-8")
+        except (OSError, RuntimeError, PermissionError):
+            db.rollback()
+            return self.reply(503, "Сервис временно недоступен. Секреты и внутренние ошибки скрыты", "text/plain; charset=utf-8")
+
     def do_POST(self):
+        self._network_return_view = None
+        self._network_return_source = "production"
+        self._network_cancel_source = "draft"
         parsed = urlsplit(self.path)
         path = parsed.path
         db = self.connection_db()
@@ -6327,6 +6533,9 @@ class App(BaseHTTPRequestHandler):
             return
         actor, ip = adm["user"], adm["ip"]
 
+        if path in {"/operator/network/lab", "/operator/network/ai", "/operator/network/mtproto"}:
+            return self.network_post(db, path, adm)
+
         if path.startswith("/operator/control/"):
             return self.control_post(db, s, path, adm)
 
@@ -6477,9 +6686,33 @@ class App(BaseHTTPRequestHandler):
             return self.redirect_operator("cards", "Виртуальные Q-coins начислены")
 
         if path == "/operator/routing":
-            length = min(int(self.headers.get("Content-Length", "0")), 256 * 1024)
-            form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= MAX_ROUTING_FORM_BYTES:
+                    self.close_connection = True
+                    return self.reply(413, "Слишком большой или пустой запрос маршрутизации", "text/plain; charset=utf-8")
+                body = self.rfile.read(length)
+                if len(body) != length:
+                    raise ValueError("incomplete_routing_form")
+                form = parse_qs(body.decode("utf-8"), keep_blank_values=True, max_num_fields=256)
+                if any(len(values) != 1 for key, values in form.items() if key != "scan_selected"):
+                    raise ValueError("duplicate_routing_fields")
+                if form.get("return_tab") == ["network"] and not form.get("action", [""])[0]:
+                    raise ValueError("missing_network_routing_action")
+            except (ValueError, UnicodeError):
+                return self.reply(400, "Некорректный запрос маршрутизации. Обновите страницу", "text/plain; charset=utf-8")
+            if form.get("return_tab") == ["network"]:
+                self._network_return_view = "dns" if form.get("return_view") == ["dns"] else "routes"
+                expected_origin, _ = control_next.public_origin(PUBLIC_BASE)
+                if (self.headers.get("Origin", "") != expected_origin
+                        or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                        or not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0])):
+                    return self.reply(403, "Неверное подтверждение запроса. Обновите страницу панели", "text/plain; charset=utf-8")
             action = (form.get("action", ["publish"])[0] or "publish").strip()
+            if getattr(self, "_network_return_view", None):
+                selected_source = form.get("policy_source", ["staging" if action == "promote" else "draft"])[0]
+                self._network_cancel_source = selected_source if selected_source in network_center.POLICY_SOURCES else "draft"
+                self._network_return_source = "draft" if action in {"save", "apply_scan"} else "staging" if action == "stage" else "production"
             try:
                 if action == "scan":
                     if not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0]):

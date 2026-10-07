@@ -6,9 +6,10 @@ from unittest.mock import patch
 
 try:
     import quantumvpn_autopilot as autopilot
+    import quantumvpn_ai_journal as ai_journal
     import quantumvpn_llama as llama
 except ImportError:
-    from tools import quantumvpn_autopilot as autopilot, quantumvpn_llama as llama
+    from tools import quantumvpn_autopilot as autopilot, quantumvpn_llama as llama, quantumvpn_ai_journal as ai_journal
 
 
 NOW = 1791300000
@@ -166,6 +167,73 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(value['changes'], {})
         self.assertEqual(value['status'], 'stable')
 
+    def test_one_failure_cannot_select_healthy_reserve(self):
+        value = self.plan(report(stage(PRIMARY, healthy=False, checks=1), stage(RESERVE)),
+                          proposals=[{'node_id': autopilot.node_id(RESERVE), 'action': 'select_reserve'}])
+        self.assertEqual(value['changes'], {})
+        self.assertEqual(value['reason'], 'no_proven_regression')
+        self.assertNotIn({'node_id': autopilot.node_id(RESERVE), 'action': 'select_reserve'}, value['allowed_actions'])
+
+    def test_stored_policy_has_floors_and_form_policy_is_strict(self):
+        self.assertEqual(autopilot.control_policy({}),
+                         {'monitor_interval_seconds': 60, 'action_cooldown_seconds': 900, 'required_checks': 3})
+        value = autopilot.control_policy({'ai_monitor_interval_seconds': '0', 'ai_action_cooldown_seconds': 1,
+                                          'ai_required_checks': '1'})
+        self.assertEqual(value, {'monitor_interval_seconds': 60, 'action_cooldown_seconds': 300, 'required_checks': 3})
+        maximum = autopilot.control_policy(dict.fromkeys(autopilot.POLICY_FIELDS, 9999999999))
+        self.assertEqual(maximum, {'monitor_interval_seconds': 3600, 'action_cooldown_seconds': 86400, 'required_checks': 10})
+        for malformed in (True, False, 0.001, '0.001', '1e3', '-1', 'exec reboot', [], {}):
+            self.assertEqual(autopilot.control_policy({'ai_action_cooldown_seconds': malformed})['action_cooldown_seconds'], 900)
+            with self.assertRaises(ValueError):
+                autopilot.validate_control_policy({'ai_action_cooldown_seconds': malformed})
+        for unsafe in ('1', '299', '86401'):
+            with self.assertRaises(ValueError):
+                autopilot.validate_control_policy({'ai_action_cooldown_seconds': unsafe})
+        self.assertEqual(autopilot.validate_control_policy({'ai_monitor_interval_seconds': '120'}),
+                         {'ai_monitor_interval_seconds': '120', 'ai_action_cooldown_seconds': '900', 'ai_required_checks': '3'})
+
+    def test_monitor_interval_preserves_pending_verification_and_manual_override_is_immediate(self):
+        stored, initial = self.applied()
+        now = NOW + 1
+        value = self.plan(report(stage(PRIMARY, when=now), stage(RESERVE, when=now), now=now), stored, now)
+        self.assertEqual(value['reason'], 'monitor_interval')
+        self.assertEqual(value['state']['pending'], initial['state']['pending'])
+        self.assertEqual(value['state']['last_decision_at'], NOW)
+        stored['nodes_recommended'] = 'manual-choice'
+        value = self.plan(report(stage(PRIMARY, when=now), stage(RESERVE, when=now), now=now), stored, now)
+        self.assertEqual(value['reason'], 'manual_override')
+        self.assertIsNone(value['state']['pending'])
+        self.assertEqual(value['changes'], {})
+
+    def test_configured_cooldown_and_check_series_are_enforced(self):
+        evidence = report(stage(PRIMARY, healthy=False), stage(RESERVE))
+        stored = settings(ai_action_cooldown_seconds='300',
+                          ai_autopilot_state=json.dumps({'schema': 1, 'last_action_at': NOW - 299}))
+        self.assertEqual(self.plan(evidence, stored)['reason'], 'cooldown')
+        stored['ai_autopilot_state'] = json.dumps({'schema': 1, 'last_action_at': NOW - 300})
+        self.assertTrue(self.plan(evidence, stored)['changes'])
+        stored = settings(ai_required_checks='5')
+        self.assertEqual(self.plan(evidence, stored)['changes'], {})
+        value = self.plan(report(stage(PRIMARY, healthy=False, checks=5), stage(RESERVE, checks=5)), stored)
+        self.assertTrue(value['changes'])
+        stored = {**stored, **value['changes'], 'ai_autopilot_state': json.dumps(value['state'])}
+        for offset in (60, 120, 180, 240, 300):
+            now = NOW + offset
+            value = self.plan(report(stage(PRIMARY, healthy=False, when=now, checks=5),
+                                     stage(RESERVE, when=now, checks=5), now=now), stored, now)
+            self.assertEqual(value['status'], 'verified' if offset == 300 else 'verifying')
+            stored['ai_autopilot_state'] = json.dumps(value['state'])
+
+    def test_maximum_monitor_interval_can_complete_post_change_checks(self):
+        stored = settings(ai_monitor_interval_seconds='3600')
+        value = self.plan(report(stage(PRIMARY, healthy=False), stage(RESERVE)), stored)
+        stored = {**stored, **value['changes'], 'ai_autopilot_state': json.dumps(value['state'])}
+        for offset in (3600, 7200, 10800):
+            now = NOW + offset
+            value = self.plan(report(stage(PRIMARY, healthy=False, when=now), stage(RESERVE, when=now), now=now), stored, now)
+            self.assertEqual(value['status'], 'verified' if offset == 10800 else 'verifying')
+            stored['ai_autopilot_state'] = json.dumps(value['state'])
+
     def test_no_single_node_lockout_or_unregistered_fabrication(self):
         evidence = report(stage(PRIMARY, healthy=False), stage(RESERVE))
         value = self.plan(evidence, nodes=[PRIMARY])
@@ -253,6 +321,7 @@ class AutopilotTests(unittest.TestCase):
         db.executemany('insert into settings values (?,?)', list(settings().items()))
         db.execute('insert into settings values (?,?)', ('root_password', 'protected'))
         db.commit()
+        self.addCleanup(db.close)
         return db
 
     def test_executor_atomic_settings_audit_and_outer_transaction(self):
@@ -261,7 +330,14 @@ class AutopilotTests(unittest.TestCase):
         value = autopilot.execute(db, report(stage(PRIMARY, healthy=False), stage(RESERVE)), [PRIMARY, RESERVE], now=NOW)
         self.assertTrue(db.in_transaction)
         self.assertEqual(db.execute('select value from settings where key=?', ('nodes_recommended',)).fetchone()[0], RESERVE)
-        self.assertEqual(db.execute('select count(*) from events').fetchone()[0], 2)
+        events = db.execute('select kind,detail from events order by rowid').fetchall()
+        self.assertEqual([row[0] for row in events], ['ai_autopilot_plan', 'ai_autopilot_quarantine_node',
+                                                   'ai_autopilot_select_reserve', 'ai_autopilot_decision'])
+        self.assertEqual(json.loads(events[0][1])['phase'], 'planned')
+        self.assertEqual(json.loads(events[-1][1])['phase'], 'applied')
+        self.assertEqual(ai_journal.read_entries(db), [value['journal']])
+        self.assertNotIn(PRIMARY, json.dumps(events))
+        self.assertNotIn(RESERVE, json.dumps(events))
         self.assertEqual(db.execute('select value from settings where key=?', ('root_password',)).fetchone()[0], 'protected')
         db.rollback()
         self.assertEqual(db.execute('select value from settings where key=?', ('nodes_recommended',)).fetchone()[0], PRIMARY)
@@ -274,6 +350,111 @@ class AutopilotTests(unittest.TestCase):
             autopilot.execute(db, report(stage(PRIMARY, healthy=False), stage(RESERVE)), [PRIMARY, RESERVE], now=NOW)
         self.assertEqual(db.execute('select value from settings where key=?', ('nodes_recommended',)).fetchone()[0], PRIMARY)
         self.assertIsNone(db.execute('select value from settings where key=?', ('ai_autopilot_state',)).fetchone())
+
+    def test_executor_refuses_a_change_whose_before_state_cannot_be_rolled_back(self):
+        db = self.db()
+        db.execute("update settings set value=? where key='nodes_recommended'", ('x' * 8193,))
+        with self.assertRaisesRegex(ValueError, 'rollback limits'):
+            autopilot.execute(db, report(stage(PRIMARY, healthy=False), stage(RESERVE)), [PRIMARY, RESERVE], now=NOW)
+        self.assertEqual(db.execute("select value from settings where key='nodes_recommended'").fetchone()[0], 'x' * 8193)
+        self.assertEqual(db.execute('select count(*) from events').fetchone()[0], 0)
+
+    def test_executor_rechecks_freeze_manual_limits_and_policy_before_action(self):
+        original = autopilot.plan_actions
+        for key, changed in (('ai_autopilot_enabled', '0'), ('nodes_forbidden', RESERVE),
+                             ('node_drains', json.dumps({RESERVE: {}})), ('ai_monitor_interval_seconds', '120'),
+                             ('ai_action_cooldown_seconds', '1800'), ('ai_autopilot_state', '{}')):
+            with self.subTest(key=key):
+                db = self.db()
+                def changed_during_plan(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    db.execute('insert into settings values (?,?) on conflict(key) do update set value=excluded.value', (key, changed))
+                    return result
+                with patch.object(autopilot, 'plan_actions', side_effect=changed_during_plan):
+                    with self.assertRaisesRegex(RuntimeError, 'changed during decision'):
+                        autopilot.execute(db, report(stage(PRIMARY, healthy=False), stage(RESERVE)), [PRIMARY, RESERVE], now=NOW)
+                self.assertEqual(db.execute('select value from settings where key=?', ('nodes_recommended',)).fetchone()[0], PRIMARY)
+                self.assertEqual(db.execute('select count(*) from events').fetchone()[0], 0)
+
+    def test_audited_plan_freeze_cancels_action_and_disabled_executor_preserves_state(self):
+        db = self.db()
+        db.execute("create trigger operator_freeze after insert on events when new.kind='ai_autopilot_plan' begin update settings set value='0' where key='ai_autopilot_enabled'; end")
+        with self.assertRaisesRegex(RuntimeError, 'changed during decision'):
+            autopilot.execute(db, report(stage(PRIMARY, healthy=False), stage(RESERVE)), [PRIMARY, RESERVE], now=NOW)
+        self.assertEqual(db.execute('select value from settings where key=?', ('nodes_recommended',)).fetchone()[0], PRIMARY)
+        db.execute('drop trigger operator_freeze')
+        stored, initial = self.applied()
+        db.executemany('insert into settings values (?,?) on conflict(key) do update set value=excluded.value', list(stored.items()))
+        db.execute("update settings set value='0' where key='ai_autopilot_enabled'")
+        value = autopilot.execute(db, report(stage(PRIMARY), stage(RESERVE)), [PRIMARY, RESERVE], now=NOW + 60)
+        self.assertEqual(value['status'], 'disabled')
+        self.assertEqual(json.loads(db.execute("select value from settings where key='ai_autopilot_state'").fetchone()[0]), initial['state'])
+        self.assertEqual(db.execute('select count(*) from events').fetchone()[0], 0)
+
+    def test_repeated_executor_call_does_not_write_state_or_journal_within_interval(self):
+        db = self.db()
+        value = autopilot.execute(db, report(stage(PRIMARY), stage(RESERVE)), [PRIMARY, RESERVE], now=NOW)
+        self.assertEqual(value['status'], 'stable')
+        state = db.execute("select value from settings where key='ai_autopilot_state'").fetchone()[0]
+        value = autopilot.execute(db, report(stage(PRIMARY), stage(RESERVE)), [PRIMARY, RESERVE], now=NOW + 1)
+        self.assertEqual(value['reason'], 'monitor_interval')
+        self.assertEqual(db.execute("select value from settings where key='ai_autopilot_state'").fetchone()[0], state)
+        self.assertEqual(db.execute('select count(*) from events').fetchone()[0], 1)
+
+
+class DecisionJournalTests(unittest.TestCase):
+    def test_readable_journal_is_deterministic_redacted_and_bounded(self):
+        evidence = report({**stage(PRIMARY, healthy=False), 'detail': 'token secret-user unsafe-shell'},
+                          {**stage(RESERVE), 'subscription': 'private-vless://secret'})
+        stored = settings(root_password='private-password', node_drains='{"secret-account":{}}')
+        value = autopilot.plan_actions(evidence, [PRIMARY, RESERVE], stored, now=NOW,
+                                       proposals=[{'node_id': autopilot.node_id(RESERVE), 'action': 'select_reserve', 'text': 'opaque model'}])
+        entry = value['journal']
+        text = ai_journal.render_entry(entry)
+        self.assertEqual(text, ai_journal.render_entry(entry))
+        self.assertIn('Действие:', text)
+        self.assertIn('Доказательства:', text)
+        self.assertIn('До:', text)
+        self.assertIn('После:', text)
+        self.assertIn('Откат: доступен', text)
+        self.assertIn('активные VPN-сеансы не переключаются', text)
+        encoded = json.dumps(entry, ensure_ascii=False) + text
+        for secret in (PRIMARY, RESERVE, 'secret-user', 'unsafe-shell', 'private-vless', 'private-password', 'secret-account', 'opaque model'):
+            self.assertNotIn(secret, encoded)
+        self.assertLess(len(json.dumps(entry)), ai_journal.MAX_ENTRY_BYTES)
+
+    def test_persisted_unknown_text_and_malformed_types_are_not_rendered(self):
+        value = {'reason': [], 'status': {'secret': True}, 'phase': 'secret-phase', 'why': 'secret-prose',
+                 'action': 'exec secret-command', 'actions': [{'kind': [], 'node_id': 'secret-target'}],
+                 'evidence': [{'node_id': autopilot.node_id(PRIMARY), 'stage': 'tcp', 'status': 'healthy',
+                               'latency_ms': 2**10000, 'detail': 'secret-detail'}],
+                 'before': {'recommendations': ['private-vless://secret'], 'selected_node': PRIMARY},
+                 'after': {'token': 'secret-token'}, 'rollback_available': 'yes'}
+        clean = ai_journal.sanitize_entry(value)
+        self.assertFalse(clean['rollback_available'])
+        self.assertIsNone(clean['evidence'][0]['latency_ms'])
+        rendered = ai_journal.render_entry(value)
+        self.assertNotIn('secret', rendered)
+        self.assertNotIn(PRIMARY, rendered)
+
+    def test_journal_uses_latest_stage_measurement_like_planner(self):
+        old = stage(PRIMARY, healthy=False, when=NOW - 60)
+        fresh = stage(PRIMARY)
+        value = autopilot.plan_actions(report(old, fresh, stage(RESERVE)), [PRIMARY, RESERVE], settings(), now=NOW)
+        facts = [row for row in value['journal']['evidence'] if row['node_id'] == autopilot.node_id(PRIMARY)]
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]['status'], 'healthy')
+        self.assertEqual(value['journal']['phase'], 'observed')
+
+    def test_reader_ignores_invalid_or_oversized_entries_and_enforces_limit(self):
+        db = sqlite3.connect(':memory:')
+        self.addCleanup(db.close)
+        db.execute('create table events(ts integer,kind text,device text,ip text,detail text)')
+        clean = ai_journal.sanitize_entry({'at': NOW, 'reason': 'current_node_healthy'})
+        for detail in (json.dumps(clean), '{bad json', 'x' * (ai_journal.MAX_ENTRY_BYTES + 1), json.dumps({'schema': 2})):
+            db.execute('insert into events values (?,?,?,?,?)', (NOW, 'ai_autopilot_decision', '', '', detail))
+        self.assertEqual(ai_journal.read_entries(db), [clean])
+        self.assertEqual(ai_journal.read_entries(db, limit=1), [])
 
 
 if __name__ == '__main__':

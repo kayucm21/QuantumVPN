@@ -153,7 +153,7 @@ class AuroraPanelTests(unittest.TestCase):
             return response.read().decode("utf-8")
 
     def test_build_and_tab_registry_cover_existing_routes(self):
-        self.assertTrue(self.panel.PANEL_BUILD.startswith("2.2.0-operations"))
+        self.assertTrue(self.panel.PANEL_BUILD.startswith("2.2.1-routing"))
         self.assertEqual(set(self.panel.PAGE_TITLES), LEGACY_TABS)
         self.assertEqual(len(self.panel.AURORA_NAV_GROUPS), 9)
         for tab, title in self.panel.PAGE_TITLES.items():

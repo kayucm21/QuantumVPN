@@ -90,9 +90,11 @@ except ModuleNotFoundError:
     from tools import quantumvpn_maintenance as maintenance
 
 try:
-    from quantumvpn_target_scan import scan_dialog, scan_dialog_css, scan_dialog_script
+    from quantumvpn_target_scan import scan_dialog, scan_dialog_css, scan_dialog_script, catalog_dialog, catalog_dialog_css, catalog_dialog_script
+    import quantumvpn_target_catalog as target_catalog
 except ModuleNotFoundError:
-    from tools.quantumvpn_target_scan import scan_dialog, scan_dialog_css, scan_dialog_script
+    from tools.quantumvpn_target_scan import scan_dialog, scan_dialog_css, scan_dialog_script, catalog_dialog, catalog_dialog_css, catalog_dialog_script
+    from tools import quantumvpn_target_catalog as target_catalog
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -130,7 +132,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.2.0-operations.1"
+PANEL_BUILD = "2.2.1-routing.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -828,6 +830,10 @@ def conn():
                 )
             community.migrate(db)
             control_next.migrate(db)
+            target_catalog.schema(db)
+            seed = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "routing-catalog-seed.json")
+            if os.path.isfile(seed):
+                target_catalog.install_seed(db, seed)
             _DB_READY = True
         if now - _LAST_EVENT_CLEANUP >= 3600:
             db.execute("delete from events where ts < ?", (now - 14 * 86400,))
@@ -1198,14 +1204,44 @@ def _scan_routing_target(payload: dict, kind: str, target: str) -> dict:
     }
 
 
+def routing_scan_capacity() -> dict:
+    """Reduce probe parallelism under pressure; never truncate the catalogue."""
+    load, available = None, None
+    try:
+        load = os.getloadavg()[0] / max(1, os.cpu_count() or 1)
+    except (OSError, AttributeError):
+        pass
+    try:
+        with open("/proc/meminfo", encoding="ascii") as stream:
+            memory = {line.split(":", 1)[0]: int(line.split()[1]) for line in stream
+                      if line.startswith(("MemTotal:", "MemAvailable:"))}
+        if memory.get("MemTotal", 0) > 0:
+            available = memory.get("MemAvailable", 0) / memory["MemTotal"]
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        workers = target_catalog.workload_workers(load, available)
+        warning = ""
+    except ValueError as error:
+        workers, warning = 1, str(error)
+    return {"workers": workers, "max_scan": MAX_ROUTING_SCAN_TARGETS,
+            "scan_available": not bool(warning), "scan_warning": warning,
+            "load_per_cpu": round(load, 2) if load is not None else None,
+            "memory_available_percent": round(available * 100, 1) if available is not None else None}
+
+
 def scan_routing_targets(raw: str, payload: dict) -> list[dict]:
     """Safely inspect up to 24 public targets in parallel with a hard budget."""
     targets = normalize_routing_scan_targets(raw)
+    capacity = routing_scan_capacity()
+    if not capacity["scan_available"]:
+        raise ValueError(capacity["scan_warning"])
+    workers = capacity["workers"]
     scan_slots = _ROUTING_SCAN_SLOTS
     if not scan_slots.acquire(blocking=False):
         raise ValueError("Две проверки уже выполняются. Повторите после их завершения.")
     results: list[dict] = []
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(targets)))
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(targets)))
     futures = [executor.submit(_scan_routing_target, payload, kind, target) for kind, target in targets]
     # DNS lookups may outlive the response deadline. Keep the slot occupied
     # until the workers really finish, preventing repeated scans from spawning
@@ -4061,6 +4097,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         reserve_available=reserve_profile_ready and enabled(s, "reserve_profile_enabled", True),
         limit=MAX_ROUTING_SCAN_TARGETS,
     )
+    routing_catalog_dialog_html = catalog_dialog(control_csrf, can_write=role_at_least(actor_role, "operator"))
     event_timeline = "".join(
         f"<div class='event-row'><span class='event-dot {'warn' if kind in ('error','incident') else 'ok'}'></span>"
         f"<time>{time.strftime('%H:%M', time.localtime(ts))}</time><b>{html.escape(device or 'Система')[:22]}</b>"
@@ -4100,7 +4137,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     navigation, subnavigation = aurora_navigation(section, actor_role)
     current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-    <meta name=referrer content=same-origin><title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}{aurora_css()}{scan_dialog_css()}</style><body class=aurora-panel data-ui=Aurora2><main><div class=panel-shell>
+    <meta name=referrer content=same-origin><title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}{aurora_css()}{scan_dialog_css()}{catalog_dialog_css()}</style><body class=aurora-panel data-ui=Aurora2><main><div class=panel-shell>
       <aside class=sidebar>
       <div class=sidebar-brand>Quantum Control<span>AURORA · 2.0</span></div>
       {navigation}
@@ -4311,13 +4348,14 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </header>
       <section class=routing-top-grid>
         <section class="card routing-card routing-scanner">
-          <h2>Анализатор целей</h2><p class=routing-subtitle>TCP/443 с VDS, до {MAX_ROUTING_SCAN_TARGETS} доменов, поддоменов или публичных IP.</p>
-          <p class=muted>Три начальных домена — пример короткой проверки. Замените список своими целями; проверяются только явно введённые адреса.</p>
+          <h2>Каталог и анализатор целей</h2><p class=routing-subtitle>Домены, поддомены, IP и сети из подключённых списков, правил и ваших импортов. Без повторов.</p>
+          <button type=button class=routing-submit data-catalog-open>Сканировать цели · открыть каталог</button>
+          <p class=muted>В каталоге доступны поиск и выбор нескольких целей. Проверяем только выбранные адреса, до {MAX_ROUTING_SCAN_TARGETS} за запуск; параллелизм зависит от нагрузки VDS.</p>
           <form id=routing-scan-form method=post action=/operator/routing>
             <input type=hidden name=action value=scan>
             <input type=hidden name=csrf value="{html.escape(control_csrf, quote=True)}">
             <label class=target-field><textarea rows=3 maxlength=4096 name=routing_scan_targets aria-label="Домены, поддомены или IP для проверки" placeholder="youtube.com\ndiscord.com\nmedia.discordapp.net">{html.escape(routing_scan_targets)}</textarea></label>
-            <button class=routing-submit>Сканировать цели</button>
+            <button class="routing-submit secondary">Проверить введённые адреса</button>
           </form>
           <div class=routing-results><span class=routing-results-title>Последняя проверка</span>{routing_scan_compact_html}</div>
           <button type=button class="secondary scan-open-results" data-scan-open>Открыть результаты и выбрать цели</button>
@@ -4348,6 +4386,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       </section>
       <details class="card routing-history"><summary>История маршрутизации и откат</summary><p class=muted>Откат создаёт новую ревизию — аудит и предыдущие версии сохраняются.</p><table><thead><tr><th>Ревизия</th><th>Время</th><th>Оператор</th><th>Канал</th><th>Заметка</th><th></th></tr></thead><tbody>{routing_history_html}</tbody></table></details>
       {routing_scan_dialog_html}
+      {routing_catalog_dialog_html}
     </section>
 
     <section {show('latency')}>{network_guard_html}</section>
@@ -4707,7 +4746,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       window.addEventListener('pagehide', () => clearInterval(timer), {{once:true}});
     }}
     </script>
-    {aurora_script()}{control_next.passkey_script()}{scan_dialog_script()}</main></body></html>"""
+    {aurora_script()}{control_next.passkey_script()}{scan_dialog_script()}{catalog_dialog_script()}</main></body></html>"""
 
 
 class App(BaseHTTPRequestHandler):
@@ -5538,6 +5577,24 @@ class App(BaseHTTPRequestHandler):
         if path.startswith("/downloads/"):
             return self.download_file(path)
 
+        if path == "/operator/routing/catalog":
+            adm = self.admin(require_login_page=False)
+            if not adm:
+                return
+            if rate_limited("routing-catalog:" + adm["user"] + ":" + adm["ip"], 120):
+                return self.reply(429, '{"error":"rate_limited","message":"Слишком много поисковых запросов. Подождите минуту."}')
+            try:
+                synced = target_catalog.sync_policy(db, s, routing_scan_base(s))
+                db.commit()
+                result = target_catalog.page(db, query=query.get("q", [""])[0], kind=query.get("kind", [""])[0],
+                                             offset=int(query.get("offset", ["0"])[0]), limit=int(query.get("limit", ["50"])[0]))
+                result.update(routing_scan_capacity())
+                result["catalog_warning"] = (synced.get("warning") or {}).get("message", "")
+                return self.reply(200, json.dumps(result, ensure_ascii=False))
+            except (ValueError, TypeError, json.JSONDecodeError) as error:
+                db.rollback()
+                return self.reply(400, json.dumps({"error": "invalid_catalog_query", "message": str(error)}, ensure_ascii=False))
+
         if path == "/operator/health":
             adm = self.admin(require_login_page=False)
             if not adm:
@@ -6302,6 +6359,25 @@ class App(BaseHTTPRequestHandler):
         if not self.require_role(adm, "operator"):
             return
 
+        if path == "/operator/routing/catalog/import":
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 4 * 1024 * 1024:
+                    self.close_connection = True
+                    return self.reply(413, '{"error":"catalog_too_large","message":"Файл каталога: не более 1 МБ."}')
+                form = parse_qs(self.rfile.read(size).decode("utf-8"), max_num_fields=8)
+                if len(form.get("csrf", [])) != 1 or not hmac.compare_digest(self.control_csrf(adm), form["csrf"][0]):
+                    return self.reply(403, '{"error":"invalid_csrf","message":"Сессия устарела. Обновите страницу панели."}')
+                if len(form.get("targets", [])) != 1:
+                    raise ValueError("Нужен один файл со списком целей.")
+                result = target_catalog.import_entries(db, form["targets"][0])
+                audit(db, actor, ip, "routing:catalog_import", result)
+                db.commit()
+                return self.reply(200, json.dumps(result, ensure_ascii=False))
+            except (ValueError, UnicodeError) as error:
+                db.rollback()
+                return self.reply(400, json.dumps({"error": "invalid_catalog", "message": str(error)}, ensure_ascii=False))
+
         if path == "/operator/resources":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -6406,7 +6482,7 @@ class App(BaseHTTPRequestHandler):
             action = (form.get("action", ["publish"])[0] or "publish").strip()
             try:
                 if action == "scan":
-                    if self.cookie_session() and not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0]):
+                    if not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0]):
                         return self.reply(403, "Неверное подтверждение запроса. Обновите страницу панели", "text/plain; charset=utf-8")
                     raw_targets = form.get("routing_scan_targets", [""])[0] or ""
                     active_payload = routing_scan_base(s)
@@ -6422,6 +6498,7 @@ class App(BaseHTTPRequestHandler):
                         ("routing_last_scan", json.dumps(findings, ensure_ascii=False, separators=(",", ":"))),
                     )
                     set_settings(db, {"routing_scan_token": routing_scan_token(s, findings, actor, self.control_csrf(adm))})
+                    target_catalog.sync_policy(db, settings(db), active_payload)
                     audit(db, actor, ip, "routing:scan", {
                         "targets": len(findings),
                         "ok": sum(1 for item in findings if item.get("status") == "ok"),

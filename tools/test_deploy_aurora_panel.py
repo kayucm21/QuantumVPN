@@ -70,6 +70,22 @@ class DeploymentGuardsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.deployer.build_config(self.args("--expected-old-durak-sha256", "b" * 64))
 
+    def test_catalog_is_opt_in_exact_allowlist_with_pinned_asset_hashes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tools = root / "tools"
+            (tools / "assets").mkdir(parents=True)
+            for name in ("quantumvpn_operator_panel.py", "quantumvpn_aurora.py", *self.deployer.COMPANIONS, *self.deployer.CATALOG_SOURCES):
+                (tools / name).write_text("PANEL_BUILD='2.2.1-routing.test'\n" if name == "quantumvpn_operator_panel.py" else "# source\n")
+            with mock.patch.object(self.deployer, "ROOT", root):
+                config, payloads = self.deployer.build_config(self.args("--with-catalog", "--expected-old-catalog-seed-sha256", "d" * 64))
+            self.assertTrue(config["with_catalog"])
+            self.assertEqual({"app.py", "quantumvpn_aurora.py", *self.deployer.CATALOG_SOURCES}, set(payloads))
+            self.assertEqual("d" * 64, config["files"]["assets/routing-catalog-seed.json"]["old_sha256"])
+            self.assertIsNone(config["files"]["quantumvpn_target_catalog.py"]["old_sha256"])
+        with self.assertRaises(ValueError):
+            self.deployer.build_config(self.args("--expected-old-catalog-sha256", "d" * 64))
+
     def test_explicit_bot_status_is_exact_fixed_allowlist(self):
         for community in (False, True):
             with self.subTest(community=community), tempfile.TemporaryDirectory() as temp:

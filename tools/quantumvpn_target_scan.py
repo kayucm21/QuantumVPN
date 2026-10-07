@@ -108,14 +108,16 @@ def scan_dialog_script() -> str:
         update();
       });
       document.addEventListener('submit', event => {
-        if (event.target.id === 'routing-scan-apply' && !dialog().querySelector('[name="scan_selected"]:checked')) {
+        if (event.target.id === 'routing-scan-apply' && (busy || !dialog().querySelector('[name="scan_selected"]:checked'))) {
           event.preventDefault(); update();
         }
       });
       source.addEventListener('submit', async event => {
         event.preventDefault(); if (busy) return;
         const previous = dialog().querySelector('[name="scan_token"]').value;
-        busy = true; open();
+        busy = true; source.dataset.scanBusy = '1'; source.dispatchEvent(new Event('routing-scan-state')); open();
+        dialog().querySelectorAll('[name="scan_selected"], [name^="scan_direction_"], #routing-scan-select-all').forEach(control => control.disabled = true);
+        dialog().querySelector('[name="scan_token"]').value = '';
         const progress = dialog().querySelector('#routing-scan-progress');
         progress.textContent = 'Проверяем заданные цели: DNS и TCP/443 с VDS. До 10 секунд…';
         source.querySelector('button').disabled = true;
@@ -132,7 +134,201 @@ def scan_dialog_script() -> str:
           dialog().replaceWith(fresh); busy = false; open();
         } catch (error) {
           progress.textContent = error.message || 'Проверка не выполнена. Повторите запрос.';
-        } finally {busy = false; source.querySelector('button').disabled = false; update();}
+        } finally {busy = false; source.dataset.scanBusy = '0'; source.dispatchEvent(new Event('routing-scan-state')); source.querySelector('button').disabled = false; update();}
       });
       if (dialog().dataset.autoOpen === '1') open(); else update();
+    })();</script>"""
+
+
+def catalog_dialog(csrf: str, *, can_write: bool = True) -> str:
+    """A paginated list of known targets; opening it never probes or changes rules."""
+    escape = lambda value: html.escape(str(value), quote=True)
+    disabled = "" if can_write else "disabled"
+    return f'''<dialog id="routing-catalog-dialog" class="routing-catalog-dialog" aria-labelledby="routing-catalog-title" data-can-write="{1 if can_write else 0}">
+      <header class="scan-dialog-head"><div><h2 id="routing-catalog-title">Каталог целей</h2><p>Все известные цели из ваших правил, списков и проверок — без повторов</p></div><button type="button" class="secondary" data-catalog-close aria-label="Закрыть каталог">Закрыть</button></header>
+      <p class="muted">Это каталог подключённых списков, а не всех доменов Интернета. Поиск не сканирует сеть. Для замера выберите до 24 доменов, поддоменов или публичных IP.</p>
+      <div class="catalog-search"><label>Поиск домена, поддомена или IP<input type="search" id="routing-catalog-search" maxlength="160" placeholder="Домен, поддомен или IP…" autocomplete="off"></label><label>Тип<select id="routing-catalog-kind"><option value="">Все типы</option><option value="domain">Домены и поддомены</option><option value="ip">Публичные IP</option><option value="cidr">IP-сети (CIDR)</option></select></label></div>
+      <p id="routing-catalog-status" class="scan-progress" role="status" aria-live="polite">Откройте каталог для загрузки списка.</p>
+      <div class="catalog-pickbar"><label class="scan-select-all"><input type="checkbox" id="routing-catalog-select-all" {disabled}> Выбрать доступные на странице</label><button type="button" id="routing-catalog-clear" class="secondary" {disabled}>Снять выбор</button></div>
+      <div class="scan-table-wrap"><table class="catalog-table"><thead><tr><th>Цель</th><th>Тип</th><th>Источник</th><th>TCP/443 с VDS</th></tr></thead><tbody id="routing-catalog-rows"><tr><td colspan="4">Список пока не загружен.</td></tr></tbody></table></div>
+      <div class="catalog-pagination"><button type="button" id="routing-catalog-prev" class="secondary" disabled>← Назад</button><span id="routing-catalog-page" role="status">По 50 целей на странице</span><button type="button" id="routing-catalog-next" class="secondary" disabled>Далее →</button></div>
+      <details class="catalog-notes"><summary>О замерах и IP-сетях</summary><p class="muted">CIDR — диапазон адресов: его нельзя измерить как один сервер, поэтому выбор сети для TCP-проверки недоступен. Неизмеренная цель не считается рабочей. Задержка VDS не равна пингу телефона; публикация маршрутов выполняется отдельно.</p></details>
+      <footer class="scan-dialog-actions"><span id="routing-catalog-selection" role="status">Выбрано: 0 / 24</span><button type="button" id="routing-catalog-scan" disabled>Проверить выбранные</button></footer>
+      <details class="catalog-import"><summary>Добавить свой список TXT</summary><p class="muted">До 1 МБ, домены / публичные IP / CIDR через запятую или с новой строки. Импорт добавляет только записи каталога: он не создаёт и не публикует правила.</p><label>Файл списка<input type="file" id="routing-catalog-file" accept=".txt,text/plain" {disabled}></label><button type="button" id="routing-catalog-import" class="secondary" {disabled}>Импортировать в каталог</button><p id="routing-catalog-import-status" role="status" aria-live="polite"></p></details>
+      <input type="hidden" id="routing-catalog-csrf" value="{escape(csrf)}">
+    </dialog>'''
+
+
+def catalog_dialog_css() -> str:
+    return """
+    .routing-catalog-dialog{width:min(1160px,calc(100vw - 32px));max-height:90vh;padding:20px;border:1px solid #40677e;border-radius:14px;background:#101f2e;color:#e1edf7;box-shadow:0 20px 100px #0009;overflow:auto}.routing-catalog-dialog:not([open]){display:none}.routing-catalog-dialog::backdrop{background:#030b16b8;backdrop-filter:blur(3px)}
+    .catalog-search{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:12px}.catalog-search label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#b5ccde}.catalog-search input,.catalog-search select{width:100%;box-sizing:border-box}.catalog-pickbar,.catalog-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0}.catalog-pickbar .scan-select-all{margin:0}.catalog-pagination span{color:#a6bdcf;font-size:12px}.catalog-table{width:100%;min-width:650px}.catalog-table small{display:block;color:#a6bdcf;font-size:11px;margin-top:5px}.catalog-table .scan-pick span{max-width:300px}.catalog-table td{overflow-wrap:anywhere}.catalog-table td:first-child{min-width:210px}.catalog-import{margin-top:18px;border-top:1px solid #345063;padding-top:14px}.catalog-import summary{cursor:pointer;color:#84d9ff}.catalog-import input[type=file]{display:block;max-width:100%;margin:8px 0}.routing-catalog-dialog button:disabled{opacity:.5;cursor:not-allowed}.routing-catalog-dialog input[type=checkbox]{width:18px;height:18px;min-width:18px}
+    .routing-catalog-dialog[open]{display:flex;flex-direction:column;gap:8px;height:min(820px,calc(100dvh - 32px));max-height:90dvh;box-sizing:border-box;overflow:hidden}.routing-catalog-dialog>.scan-dialog-head,.routing-catalog-dialog>.catalog-search,.routing-catalog-dialog>.scan-progress,.routing-catalog-dialog>.catalog-pickbar,.routing-catalog-dialog>.catalog-pagination,.routing-catalog-dialog>.scan-dialog-actions{flex-shrink:0}.routing-catalog-dialog>p{margin:0;font-size:12px;line-height:1.4}.routing-catalog-dialog .catalog-search label{margin:0}.routing-catalog-dialog .catalog-pickbar,.routing-catalog-dialog .catalog-pagination,.routing-catalog-dialog .scan-dialog-actions{margin:0}.routing-catalog-dialog .scan-table-wrap{flex:1;min-height:90px;overflow:auto;overscroll-behavior:contain}.routing-catalog-dialog thead{position:sticky;top:0;background:#172d3e;z-index:1}.catalog-import,.catalog-notes{flex-shrink:0;margin:0;padding-top:6px;max-height:25vh;overflow:auto}.catalog-notes summary{cursor:pointer;font-size:12px;color:#84d9ff}.catalog-notes p{font-size:12px;margin:6px 0}
+    @media(max-width:640px){.routing-catalog-dialog{padding:14px;width:calc(100vw - 16px)}.catalog-search{grid-template-columns:1fr}.catalog-pickbar{align-items:flex-start;flex-wrap:wrap}.catalog-pagination{gap:8px}.catalog-pagination button{padding:8px}.catalog-pagination span{text-align:center}}
+    """
+
+
+def catalog_dialog_script() -> str:
+    return r"""<script>(() => {
+      const box = document.getElementById('routing-catalog-dialog');
+      const source = document.getElementById('routing-scan-form');
+      if (!box || !source) return;
+      const get = id => box.querySelector('#routing-catalog-' + id);
+      const rows = get('rows'), status = get('status'), chosen = new Map();
+      const canWrite = box.dataset.canWrite === '1', pageSize = 50;
+      let current = [], offset = 0, matched = 0, total = 0, maxScan = 24;
+      let sequence = 0, controller = null, debounce = null, loading = false, importing = false, scanAvailable = true;
+      const labels = {domain:'Домен / поддомен',ip:'Публичный IP',cidr:'IP-сеть (CIDR)'};
+      const statusLabels = {ok:'Доступна',timeout:'TCP/443 не ответил',unresolved:'Нет публичного DNS',budget:'Истёк лимит проверки'};
+      const sourceLabels = {policy:'Действующие правила',draft:'Черновик',manual:'Введено вручную',scan:'Проверенная цель',dns:'DNS проверенных целей',import:'Импорт TXT'};
+      const sourceLabel = value => sourceLabels[value] || (String(value).startsWith('seed:') ? 'Каталог: ' + String(value).slice(5) : String(value));
+      const key = item => item.kind + ':' + item.target;
+      const node = (tag, content, css) => {
+        const element = document.createElement(tag);
+        if (content !== undefined) element.textContent = String(content);
+        if (css) element.className = css;
+        return element;
+      };
+      const available = item => canWrite && item.selectable === true && item.kind !== 'cidr';
+      const update = () => {
+        get('selection').textContent = 'Выбрано: ' + chosen.size + ' / ' + maxScan;
+        get('scan').disabled = !canWrite || loading || importing || !scanAvailable || source.dataset.scanBusy === '1' || !chosen.size || chosen.size > maxScan;
+        get('clear').disabled = !canWrite || !chosen.size;
+        const eligible = current.filter(available), count = eligible.filter(item => chosen.has(key(item))).length;
+        get('select-all').disabled = loading || !eligible.length;
+        get('select-all').checked = !!eligible.length && count === eligible.length;
+        get('select-all').indeterminate = count > 0 && count < eligible.length;
+        get('prev').disabled = loading || offset <= 0;
+        get('next').disabled = loading || offset + pageSize >= matched;
+        rows.querySelectorAll('input[type="checkbox"]').forEach(input => {
+          input.checked = chosen.has(input.dataset.targetKey);
+          input.disabled = loading || !canWrite || input.dataset.selectable !== '1' || (!input.checked && chosen.size >= maxScan);
+        });
+      };
+      const render = () => {
+        rows.replaceChildren();
+        if (!current.length) {
+          const row = node('tr'), cell = node('td', 'Цели не найдены. Измените поиск или импортируйте свой список.');
+          cell.colSpan = 4; row.append(cell); rows.append(row);
+        }
+        current.forEach(item => {
+          const row = node('tr'), targetCell = node('td'), pick = node('label', undefined, 'scan-pick');
+          const input = node('input'); input.type = 'checkbox';
+          input.dataset.targetKey = key(item); input.dataset.selectable = available(item) ? '1' : '0';
+          input.setAttribute('aria-label', 'Выбрать ' + item.target);
+          const text = node('span'); text.append(node('b', item.target));
+          if (item.kind === 'cidr') text.append(node('small', 'Диапазон, не отдельный сервер'));
+          if (Array.isArray(item.addresses) && item.addresses.length)
+            text.append(node('small', 'IP / DNS: ' + item.addresses.slice(0,8).map(address => typeof address === 'string' ? address : (address.address || '')).join(' · ')));
+          pick.append(input, text); targetCell.append(pick);
+          const sourceCell = node('td', Array.isArray(item.sources) ? item.sources.map(sourceLabel).join(' · ') : (item.sources ? sourceLabel(item.sources) : 'Не указан'));
+          const measured = node('td');
+          if (item.status === 'ok' && Number.isFinite(item.latency_ms) && item.latency_ms > 0)
+            measured.append(node('span', item.latency_ms + ' мс', 'ok'));
+          else measured.append(node('span', statusLabels[item.status] || 'Не измерено', item.status ? 'warn' : 'muted'));
+          if (Number.isFinite(item.checked_at) && item.checked_at > 0)
+            measured.append(node('small', 'Замер: ' + new Date(item.checked_at * 1000).toLocaleString('ru-RU')));
+          measured.append(node('small', 'Источник замера: VDS · TCP/443'));
+          row.append(targetCell, node('td', labels[item.kind] || 'Неизвестный тип'), sourceCell, measured);
+          rows.append(row);
+        });
+        get('page').textContent = matched ? (offset + 1) + '–' + Math.min(offset + current.length, matched) + ' из ' + matched.toLocaleString('ru-RU') : '0 результатов';
+        update();
+      };
+      const load = async (reset = false) => {
+        if (reset) offset = 0;
+        if (controller) controller.abort();
+        controller = new AbortController();
+        const request = ++sequence;
+        loading = true; status.textContent = 'Загружаем каталог…'; update();
+        try {
+          const query = new URLSearchParams({q:get('search').value.trim(),kind:get('kind').value,offset:String(offset),limit:String(pageSize)});
+          const response = await fetch('/operator/routing/catalog?' + query, {credentials:'same-origin',cache:'no-store',signal:controller.signal});
+          if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? 'Сессия истекла. Обновите страницу и войдите снова.' : 'Каталог недоступен. HTTP ' + response.status);
+          const data = await response.json();
+          if (request !== sequence) return;
+          if (!Array.isArray(data.items) || !Number.isFinite(data.total) || !Number.isFinite(data.matched)) throw new Error('Не удалось прочитать каталог. Обновите страницу.');
+          current = data.items.slice(0,pageSize).filter(item => item && typeof item.target === 'string' && ['domain','ip','cidr'].includes(item.kind));
+          total = Math.max(0,data.total); matched = Math.max(0,data.matched);
+          offset = Math.max(0,Number(data.offset) || 0);
+          maxScan = Math.max(1,Math.min(24,Number(data.max_scan) || 24));
+          scanAvailable = data.scan_available !== false;
+          const workers = Number.isFinite(data.workers) ? data.workers : null;
+          status.textContent = 'Всего уникальных целей: ' + total.toLocaleString('ru-RU') + ' · найдено: ' + matched.toLocaleString('ru-RU') + (workers !== null ? ' · одновременных проверок с учётом нагрузки VDS: ' + workers : '') + '. Сеть не сканировалась.' + (data.scan_warning ? ' ' + String(data.scan_warning) : '') + (data.catalog_warning ? ' ' + String(data.catalog_warning) : '');
+          render();
+        } catch (error) {
+          if (error.name !== 'AbortError' && request === sequence) {current = []; matched = 0; render(); status.textContent = error.message || 'Каталог не загружен.';}
+        } finally {if (request === sequence) {loading = false; update();}}
+      };
+      const close = () => {
+        if (controller) controller.abort();
+        ++sequence; loading = false; clearTimeout(debounce);
+        if (box.close) box.close(); else box.removeAttribute('open');
+        update();
+      };
+      document.addEventListener('click', event => {
+        if (event.target.closest('[data-catalog-open]')) {
+          if (!box.open) {if (box.showModal) box.showModal(); else box.setAttribute('open','');}
+          load(); get('search').focus();
+        }
+        if (event.target.closest('[data-catalog-close]')) close();
+      });
+      box.addEventListener('cancel', event => {event.preventDefault(); close();});
+      source.addEventListener('routing-scan-state', update);
+      get('search').addEventListener('input', () => {clearTimeout(debounce); if (controller) controller.abort(); ++sequence; loading = true; update(); debounce = setTimeout(() => load(true),250);});
+      get('kind').addEventListener('change', () => {clearTimeout(debounce); load(true);});
+      get('prev').addEventListener('click', () => {offset = Math.max(0,offset - pageSize); load();});
+      get('next').addEventListener('click', () => {offset += pageSize; load();});
+      rows.addEventListener('change', event => {
+        const input = event.target;
+        if (loading || input.type !== 'checkbox') return;
+        const item = current.find(candidate => key(candidate) === input.dataset.targetKey);
+        if (!item || !available(item)) return;
+        if (input.checked && chosen.size < maxScan) chosen.set(key(item),item);
+        else chosen.delete(key(item));
+        update();
+      });
+      get('select-all').addEventListener('change', event => {
+        if (loading) return;
+        current.filter(available).forEach(item => {
+          if (!event.target.checked) chosen.delete(key(item));
+          else if (chosen.size < maxScan) chosen.set(key(item),item);
+        });
+        update();
+      });
+      get('clear').addEventListener('click', () => {chosen.clear(); update();});
+      get('scan').addEventListener('click', () => {
+        if (source.dataset.scanBusy === '1') {status.textContent = 'Предыдущая проверка ещё выполняется. Дождитесь её завершения.'; update(); return;}
+        if (loading || importing || !canWrite || !scanAvailable || !chosen.size || chosen.size > maxScan) return;
+        const field = source.querySelector('[name="routing_scan_targets"]');
+        if (!field) return;
+        field.value = [...chosen.values()].map(item => item.target).join('\n');
+        close();
+        if (source.requestSubmit) source.requestSubmit(); else source.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+      });
+      get('import').addEventListener('click', async () => {
+        if (!canWrite || importing) return;
+        const file = get('file').files[0], note = get('import-status');
+        if (!file) {note.textContent = 'Выберите TXT-файл со списком.'; return;}
+        if (file.size > 1024 * 1024) {note.textContent = 'Файл слишком большой. Максимум 1 МБ.'; return;}
+        if (!window.confirm('Добавить записи только в каталог? Действующие маршруты и черновик не изменятся.')) return;
+        importing = true; get('import').disabled = true; get('file').disabled = true; update();
+        note.textContent = 'Импортируем список в каталог…';
+        try {
+          const text = await file.text();
+          const response = await fetch('/operator/routing/catalog/import',{method:'POST',credentials:'same-origin',cache:'no-store',body:new URLSearchParams({csrf:get('csrf').value,targets:text})});
+          if (!response.ok) {
+            let detail = null;
+            if (response.status === 400) {try {const rejected = await response.json(); detail = String(rejected.message || rejected.error || '').slice(0,500);} catch (_) {}}
+            throw new Error(detail || (response.status === 413 ? 'Список слишком большой. Максимум 1 МБ.' : (response.status === 401 || response.status === 403 ? 'Сессия или подтверждение запроса недействительны. Обновите страницу.' : 'Импорт не выполнен. HTTP ' + response.status)));
+          }
+          const result = await response.json();
+          if (result.ok === false) throw new Error(result.error || 'Импорт не выполнен.');
+          note.textContent = 'Каталог обновлён. Добавлено: ' + (result.added ?? result.inserted ?? 0) + ' · уже в каталоге: ' + (result.existing ?? result.duplicates ?? 0) + ' · отклонено: ' + (result.rejected ?? result.invalid ?? 0) + '. Маршруты не изменены.';
+          get('file').value = '';
+          await load(true);
+        } catch (error) {note.textContent = error.message || 'Импорт не выполнен. Повторите запрос.';}
+        finally {importing = false; get('import').disabled = !canWrite; get('file').disabled = !canWrite; update();}
+      });
+      update();
     })();</script>"""

@@ -105,7 +105,8 @@ class RoutingScanTests(unittest.TestCase):
         page = self.scan()
         self.assertIn('id="routing-scan-dialog"', page)
         self.assertIn('data-auto-open="1" open', page)
-        self.assertIn("Три начальных домена — пример", page)
+        self.assertIn("Каталог и анализатор целей", page)
+        self.assertIn("data-catalog-open", page)
         self.assertIn("Рекомендация и резерв", page)
         self.assertIn("1.1.1.1 · 19 мс", page)
         self.assertIn("Это не ICMP-пинг", page)
@@ -295,6 +296,79 @@ class RoutingScanTests(unittest.TestCase):
         self.assertNotIn('<img src=x', result)
         self.assertNotIn('<script>bad', result)
         self.assertIn("&lt;script&gt;bad", result)
+
+    def catalog(self, **query):
+        with urlopen(Request(self.base + "/operator/routing/catalog?" + urlencode(query), headers=self.basic), timeout=15) as response:
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            return json.load(response)
+
+    def test_catalog_has_all_known_targets_with_search_pagination_no_duplicate_rows_or_probes(self):
+        before = self.current()
+        from tools import quantumvpn_target_catalog as catalog
+        with closing(self.panel.conn()) as db:
+            catalog.import_entries(db, "\n".join(f"catalog-http-{index:03d}.example.org" for index in range(115)))
+            db.commit()
+        with mock.patch.object(self.panel, "_routing_scan_addresses") as resolver, mock.patch.object(self.panel, "_routing_tcp_latency_ms") as probe:
+            first = self.catalog(q="catalog-http-", limit=50)
+            second = self.catalog(q="catalog-http-", offset=50, limit=50)
+            last = self.catalog(q="catalog-http-", offset=100, limit=50)
+        self.assertEqual(first["matched"], 115)
+        self.assertEqual([len(page["items"]) for page in (first, second, last)], [50, 50, 15])
+        self.assertEqual(len({item["target"] for page in (first, second, last) for item in page["items"]}), 115)
+        self.assertTrue(all(item["latency_ms"] is None for item in first["items"]))
+        resolver.assert_not_called(); probe.assert_not_called()
+        self.assertEqual(self.panel.routing_payload(before), self.panel.routing_payload(self.current()))
+        self.assertEqual(before["routing_draft_payload"], self.current()["routing_draft_payload"])
+
+    def test_catalog_searches_subdomains_and_resolved_public_ip_without_unchecked_latency(self):
+        self.scan("media.catalog-search.example.org")
+        found = self.catalog(q="media.catalog-search", kind="domain")
+        self.assertEqual([item["target"] for item in found["items"]], ["media.catalog-search.example.org"])
+        self.assertEqual(found["items"][0]["latency_ms"], 19)
+        found = self.catalog(q="1.1.1.1", kind="domain")
+        self.assertIn("media.catalog-search.example.org", [item["target"] for item in found["items"]])
+        self.assertTrue(self.catalog(kind="ip")["matched"] >= 1)
+
+    def test_catalog_import_requires_csrf_is_additive_and_never_changes_live_rules(self):
+        before = self.current()
+        csrf = ScanForms(self.page()).forms["routing-scan-form"]["csrf"]
+        path = self.base + "/operator/routing/catalog/import"
+        for token in ("", "wrong"):
+            with self.assertRaises(HTTPError) as denied:
+                urlopen(Request(path, data=urlencode({"csrf": token, "targets": "new.catalog-import.example.org"}).encode(), headers=self.basic))
+            self.assertEqual(denied.exception.code, 403); denied.exception.close()
+        def upload(targets):
+            with urlopen(Request(path, data=urlencode({"csrf": csrf, "targets": targets}).encode(), headers=self.basic), timeout=15) as response:
+                return json.load(response)
+        result = upload("new.catalog-import.example.org\nNEW.CATALOG-IMPORT.EXAMPLE.ORG\n1.0.0.0/24")
+        self.assertGreaterEqual(result["added"], 1)
+        self.assertEqual(upload("new.catalog-import.example.org")["added"], 0)
+        result = self.catalog(q="1.0.0.0/24")
+        self.assertFalse(result["items"][0]["selectable"])
+        with self.assertRaises(HTTPError) as invalid:
+            upload("should-not-save.catalog-import.example.org\n127.0.0.1")
+        self.assertEqual(invalid.exception.code, 400); invalid.exception.close()
+        self.assertEqual(self.catalog(q="should-not-save.catalog-import")["matched"], 0)
+        self.assertEqual(self.panel.routing_payload(before), self.panel.routing_payload(self.current()))
+        self.assertEqual(before["routing_draft_payload"], self.current()["routing_draft_payload"])
+
+    def test_catalog_api_requires_auth_validates_bounds_and_survives_scan_pressure(self):
+        with self.assertRaises(HTTPError) as denied:
+            urlopen(self.base + "/operator/routing/catalog")
+        self.assertEqual(denied.exception.code, 401); denied.exception.close()
+        for query in ({"limit": 51}, {"offset": -1}, {"q": "a" * 161}, {"kind": "anything"}):
+            with self.subTest(query=query), self.assertRaises(HTTPError) as bad:
+                self.catalog(**query)
+            self.assertEqual(bad.exception.code, 400); bad.exception.close()
+        with mock.patch.object(self.panel.target_catalog, "workload_workers", side_effect=ValueError("Сервер занят, повторите позже")):
+            page = self.catalog()
+            self.assertFalse(page["scan_available"])
+            self.assertGreater(page["total"], 3)
+            slots = threading.BoundedSemaphore(1)
+            with mock.patch.object(self.panel, "_ROUTING_SCAN_SLOTS", slots), self.assertRaises(ValueError):
+                self.panel.scan_routing_targets("example.org", self.panel.routing_payload(self.current()))
+            self.assertTrue(slots.acquire(blocking=False))
+            slots.release()
 
 
 if __name__ == "__main__":

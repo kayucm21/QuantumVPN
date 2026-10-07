@@ -9,3 +9,5 @@
 core-patches/*.patch text eol=lf -whitespace
 *.jar binary
 *.png binary
+tools/assets/routing-catalog-seed.json text eol=lf
+tools/assets/routing-catalog-seed.LICENSE.txt text eol=lf

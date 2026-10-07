@@ -924,7 +924,7 @@ class OperatorTests(unittest.TestCase):
             page = response.read().decode("utf-8")
         self.assertIn("Маршрутизация и DNS", page)
         self.assertIn("Тестовый канал", page)
-        self.assertIn("Анализатор целей", page)
+        self.assertIn("Каталог и анализатор целей", page)
         self.assertIn("Правила маршрута", page)
         self.assertIn("DNS и публикация", page)
         self.assertIn('id=routing-policy', page)
@@ -966,13 +966,24 @@ class OperatorTests(unittest.TestCase):
 
     def test_routing_target_advisor_is_bounded_and_never_publishes(self):
         token = base64.b64encode(b"test:test").decode()
+        with urlopen(Request(self.base + "/operator?tab=routing", headers={"Authorization": "Basic " + token})) as response:
+            page = response.read().decode("utf-8")
+        class CSRF(HTMLParser):
+            value = ""
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "input" and attrs.get("id") == "routing-catalog-csrf":
+                    self.value = attrs.get("value", "")
+        parser = CSRF()
+        parser.feed(page)
+        self.assertTrue(parser.value)
         with closing(self.panel.conn()) as db:
             revision_before = self.panel.settings(db)["routing_revision"]
         with mock.patch.object(self.panel, "_routing_scan_addresses", return_value=["1.1.1.1"]), \
              mock.patch.object(self.panel, "_routing_tcp_latency_ms", return_value=17):
             request = Request(
                 self.base + "/operator/routing",
-                data=b"action=scan&routing_scan_targets=example.com%0A1.1.1.1",
+                data=urlencode({"action": "scan", "routing_scan_targets": "example.com\n1.1.1.1", "csrf": parser.value}).encode(),
                 headers={"Authorization": "Basic " + token},
             )
             with urlopen(request) as response:
@@ -988,7 +999,7 @@ class OperatorTests(unittest.TestCase):
         self.assertNotIn("example.com", json.dumps(envelope["payload"]))
         with urlopen(Request(self.base + "/operator?tab=routing", headers={"Authorization": "Basic " + token})) as response:
             page = response.read().decode("utf-8")
-        self.assertIn("Анализатор целей", page)
+        self.assertIn("Каталог и анализатор целей", page)
         self.assertIn("Последняя проверка", page)
         self.assertIn("routing-empty", page)
         with self.assertRaises(ValueError):

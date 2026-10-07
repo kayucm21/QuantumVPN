@@ -389,6 +389,64 @@ class DeploymentTransactionTests(ReleaseFixture):
             self.remote["schedule"](self.config, self.database, self.data)
         self.assertEqual(self.state(), original)
 
+    def immediate_config(self):
+        self.set_values({'release_schedule_enabled': '0'})
+        return {**self.config, 'mode': 'promote', 'publish_at': 0}
+
+    def test_immediate_promotion_adds_one_redacted_broadcast_inbox_release(self):
+        config = {**self.immediate_config(), 'notes': 'Aurora UI token=fixture-release-secret vless://fixture@vpn.example.invalid'}
+        result = self.remote['finalize'](config)
+        self.assertEqual(result['promoted'], VERSION)
+        self.assertTrue(result['notification_signal'])
+        self.assertEqual(self.state()['app_version'], VERSION)
+        self.assertEqual(self.state()['app_version_code'], str(CODE))
+        event = self.db.execute('select device,kind,title,body,dedupe_key from community_events').fetchone()
+        self.assertEqual(event[:3], ('', 'release', 'Обновление QuantumVPN ' + VERSION))
+        self.assertEqual(event[4], 'release:' + str(CODE))
+        self.assertIn('Aurora UI', event[3])
+        self.assertNotIn('fixture-release-secret', event[3])
+        self.assertNotIn('vless://', event[3])
+        for device in ('0123456789abcdef', 'fedcba9876543210'):
+            inbox = PANEL.community.inbox(self.db, device)
+            self.assertEqual(inbox['unread'], 1)
+            self.assertEqual(inbox['events'][0]['key'], event[4])
+        self.assertEqual(self.db.execute('select key from client_keys').fetchone()[0], 'fixture-key')
+        with self.assertRaisesRegex(ValueError, 'CAS'):
+            self.remote['promote'](config, self.database, self.data, {})
+        self.assertEqual(self.db.execute("select count(*) from community_events where kind='release'").fetchone()[0], 1)
+
+    def test_immediate_promotion_reuses_existing_release_dedupe_key(self):
+        config = self.immediate_config()
+        event_id = PANEL.community.append_event(self.db, 'release', 'Существующее объявление',
+                                               'Сохранённое сообщение', 'release:' + str(CODE))
+        self.db.commit()
+        self.remote['promote'](config, self.database, self.data, {})
+        self.assertEqual(self.db.execute('select id,title,body from community_events').fetchall(),
+                         [(event_id, 'Существующее объявление', 'Сохранённое сообщение')])
+
+    def test_immediate_inbox_error_rolls_back_version_and_all_signals(self):
+        config = self.immediate_config()
+        self.db.execute("create trigger deny_release_event before insert on community_events begin select raise(abort,'fixture failure'); end")
+        self.db.commit()
+        original = self.state()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.remote['promote'](config, self.database, self.data, {})
+        self.assertEqual(self.state(), original)
+        self.assertEqual(self.db.execute('select count(*) from device_flags').fetchone()[0], 0)
+        self.assertEqual(self.db.execute("select count(*) from events where kind='release_promoted'").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("select count(*) from community_events where kind='release'").fetchone()[0], 0)
+
+    def test_immediate_banner_error_rolls_back_inbox_and_version(self):
+        config = self.immediate_config()
+        self.db.execute("create trigger deny_banner before insert on device_flags begin select raise(abort,'fixture failure'); end")
+        self.db.commit()
+        original = self.state()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.remote['promote'](config, self.database, self.data, {})
+        self.assertEqual(self.state(), original)
+        self.assertEqual(self.db.execute("select count(*) from events where kind='release_promoted'").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("select count(*) from community_events where kind='release'").fetchone()[0], 0)
+
     def test_conflicting_schedule_is_preserved(self):
         state = self.state()
         state["scheduled_app_version"] = "5.11.3"

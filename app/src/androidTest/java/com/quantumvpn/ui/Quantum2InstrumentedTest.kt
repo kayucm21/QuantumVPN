@@ -120,6 +120,49 @@ class Quantum2InstrumentedTest {
         compose.onAllNodes(hasText("Проверка…", substring = true)).assertCountEquals(1)
     }
 
+    @Test fun personalizedHomeRoutesPowerServerProtectionNotificationsAndGames() {
+        var connects = 0
+        var servers = 0
+        var protection = 0
+        var games = 0
+        var notifications = 0
+        compose.setContent {
+            QuantumVpnTheme(darkTheme = true) {
+                V2Home(ClientPolicy(), false, false, true, "Тестовый сервер", null, true, 60, VpnSessionStats(),
+                    onConnect = { connects++ }, onServers = { servers++ }, onSettings = { protection++ },
+                    onCards = { games++ }, reduceMotion = true, onNotifications = { notifications++ },
+                    displayName = "Алексей")
+            }
+        }
+        compose.onNodeWithTag("home-greeting").assertTextEquals("Привет, Алексей")
+        compose.onNodeWithContentDescription("Открыть уведомления").performClick()
+        compose.onNodeWithTag("home-connect").performClick()
+        compose.onNodeWithTag("home-server").performScrollTo().performClick()
+        compose.onNodeWithTag("home-protection").performScrollTo().performClick()
+        compose.onNodeWithTag("home-games").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals(1, connects)
+            assertEquals(1, servers)
+            assertEquals(1, protection)
+            assertEquals(1, games)
+            assertEquals(1, notifications)
+        }
+    }
+
+    @Test fun pendingVpnHomeDisablesDuplicatePowerActionButKeepsGameRoomAvailable() {
+        compose.setContent {
+            QuantumVpnTheme(darkTheme = true) {
+                V2Home(ClientPolicy(), false, true, true, "Тестовый сервер", null, true, 60, VpnSessionStats(),
+                    onConnect = { error("Busy power must not send another VPN request") },
+                    onServers = {}, onSettings = {}, onCards = {}, reduceMotion = true, onNotifications = {})
+            }
+        }
+        compose.onNodeWithTag("home-connect").assertIsNotEnabled()
+        compose.onNodeWithText("Устанавливаем соединение…").assertExists()
+        compose.onAllNodesWithText("Соединение защищено").assertCountEquals(0)
+        compose.onNodeWithTag("home-games").performScrollTo().assertIsEnabled().assertHasClickAction()
+    }
+
     @Test fun serversDoNotCallAnUnmeasuredEndpointATimeout() {
         var favorite: Pair<String, String>? = null
         compose.setContent {

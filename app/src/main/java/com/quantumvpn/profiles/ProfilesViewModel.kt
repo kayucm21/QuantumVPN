@@ -1086,6 +1086,14 @@ class ProfilesViewModel(
         settingsStore.setOnboardingCompleted(true)
     }
 
+    fun completeOnboarding(displayName: String) = operation(markBusy = false) {
+        settingsStore.completeNamedOnboarding(displayName)
+    }
+
+    fun setDisplayName(displayName: String) = operation(markBusy = false) {
+        settingsStore.setDisplayName(displayName)
+    }
+
     fun setBlockNonVpnTraffic(enabled: Boolean) = operation(markBusy = false) {
         if (!ClientFeatureGate.features().killSwitch) {
             showMessage("Kill switch отключён оператором.")

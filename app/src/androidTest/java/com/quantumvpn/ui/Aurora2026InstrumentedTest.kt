@@ -114,6 +114,8 @@ class Aurora2026InstrumentedTest {
         compose.onNodeWithContentDescription("Карта 8 ♥").assertIsNotEnabled()
         compose.onNodeWithContentDescription("Карта 9 ♦").assertIsNotEnabled()
         compose.onNodeWithContentDescription("Карта 7 ♠").assertIsEnabled().performScrollTo().performClick()
+        compose.runOnIdle { check(defended == null) }
+        compose.onNodeWithTag("cards-defend").assertIsEnabled().performScrollTo().performClick()
         compose.runOnIdle { check(defended == ("7S" to 1)) }
         compose.onNodeWithTag("cards-pass").assertIsNotEnabled()
     }
@@ -147,8 +149,59 @@ class Aurora2026InstrumentedTest {
             canDefend = true, canTake = true, legalDefenses = listOf(CardDefense("7S", 0))), busy = true)
         compose.onNodeWithContentDescription("Карта 7 ♠").assertIsNotEnabled()
         compose.onNodeWithContentDescription("Карта 6 ♠").assertIsNotEnabled()
+        compose.onNodeWithTag("cards-defend").assertIsNotEnabled()
         compose.onNodeWithText("Беру").assertIsNotEnabled()
         compose.onNodeWithTag("cards-pass").assertIsNotEnabled()
+    }
+
+    @Test fun defenderCannotUsePassEvenIfAnObsoleteFlagSaysItIsAllowed() {
+        renderCardTable(cardSnapshot().copy(tableCards = listOf(CardPair("6S", "7S")),
+            canAttack = true, canPass = true, canTake = true, legalAttackCards = listOf("9D")))
+        compose.onNodeWithTag("cards-pass").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("Карта 9 ♦").assertIsNotEnabled()
+        compose.onNodeWithText("Все карты отбиты. Ждём подкидку или отбой соперника.").assertExists()
+        compose.onAllNodesWithText("Нет карты для защиты — нажмите «Беру».").assertCountEquals(0)
+    }
+
+    @Test fun selectedDefenseIsClearedWhenTheAuthoritativeRevisionChanges() {
+        val current = androidx.compose.runtime.mutableStateOf(cardSnapshot().copy(
+            tableCards = listOf(CardPair("6S", "")), canDefend = true, canTake = true,
+            legalDefenses = listOf(CardDefense("7S", 0))))
+        compose.setContent {
+            QuantumVpnTheme {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                    V2DurakTablePreview(current.value, false, { _, _ -> })
+                }
+            }
+        }
+        compose.onNodeWithContentDescription("Карта 7 ♠").performScrollTo().performClick()
+        compose.onNodeWithTag("cards-defend").assertIsEnabled()
+        compose.runOnIdle { current.value = current.value.copy(revision = current.value.revision + 1) }
+        compose.onNodeWithTag("cards-defend").assertIsNotEnabled()
+    }
+
+    @Test fun disconnectedTableCannotSubmitCardsOrEndABout() {
+        val session = V2CardSession().apply {
+            snapshot.value = cardSnapshot().copy(tableCards = listOf(CardPair("6S", "")),
+                canDefend = true, canTake = true, legalDefenses = listOf(CardDefense("7S", 0)))
+            synchronized.value = false
+        }
+        compose.setContent { QuantumVpnTheme { V2Cards(onBack = {}, session = session) } }
+        compose.onNodeWithContentDescription("Карта 7 ♠").assertIsNotEnabled()
+        compose.onNodeWithText("Беру").assertIsNotEnabled()
+        compose.onNodeWithTag("cards-pass").assertIsNotEnabled()
+    }
+
+    @Test fun expiredWaitingRoomCanReturnToCodeEntryWithoutStartingAParty() {
+        val session = V2CardSession().apply {
+            snapshot.value = cardSnapshot().copy(state = "expired", gamePhase = "unavailable", opponentName = "",
+                hand = emptyList(), message = "Время ожидания истекло")
+        }
+        compose.setContent { QuantumVpnTheme { V2Cards(onBack = {}, session = session) } }
+        compose.onNodeWithText("Комната недоступна").assertExists()
+        compose.onNodeWithText("Войти по коду").performScrollTo().performClick()
+        compose.onNodeWithTag("cards-join").assertExists().assertIsNotEnabled()
+        compose.onNodeWithTag("cards-table").assertDoesNotExist()
     }
 
     @Test fun realDiscardAndDeckCountsAreVisibleAtTable() {

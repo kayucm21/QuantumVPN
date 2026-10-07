@@ -178,13 +178,13 @@ if ($Mode -eq 'RunTests') {
         AppSha256 = (Get-FileHash -LiteralPath $appPath -Algorithm SHA256).Hash.ToLowerInvariant()
         TestApk = $testPath
         TestSha256 = (Get-FileHash -LiteralPath $testPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        TestClasses = @('com.quantumvpn.ui.Quantum2InstrumentedTest', 'com.quantumvpn.ui.Aurora2026InstrumentedTest')
+        TestClasses = @('com.quantumvpn.ui.Quantum2InstrumentedTest', 'com.quantumvpn.ui.Aurora2026InstrumentedTest', 'com.quantumvpn.ui.AuroraOnboardingInstrumentedTest', 'com.quantumvpn.cards.CardTableSessionInstrumentedTest')
     } | ConvertTo-Json | Out-File -LiteralPath (Join-Path $testRunPath 'inputs.json') -Encoding utf8
     & $adb -s $serial install -r -t $appPath 2>&1 | Tee-Object -FilePath (Join-Path $testRunPath 'install-app.txt')
     if ($LASTEXITCODE -ne 0) { throw 'Debug APK installation failed; existing AVD data is preserved.' }
     & $adb -s $serial install -r -t $testPath 2>&1 | Tee-Object -FilePath (Join-Path $testRunPath 'install-test.txt')
     if ($LASTEXITCODE -ne 0) { throw 'Instrumentation APK installation failed; existing AVD data is preserved.' }
-    $classes = 'com.quantumvpn.ui.Quantum2InstrumentedTest,com.quantumvpn.ui.Aurora2026InstrumentedTest'
+    $classes = 'com.quantumvpn.ui.Quantum2InstrumentedTest,com.quantumvpn.ui.Aurora2026InstrumentedTest,com.quantumvpn.ui.AuroraOnboardingInstrumentedTest,com.quantumvpn.cards.CardTableSessionInstrumentedTest'
     $result = & $adb -s $serial shell am instrument -w -r -e class $classes `
         'com.quantumvpn.debug.test/androidx.test.runner.AndroidJUnitRunner' 2>&1 |
         Tee-Object -FilePath (Join-Path $testRunPath 'instrumentation.txt')

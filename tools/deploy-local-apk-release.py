@@ -361,6 +361,10 @@ def schedule(config,database,data):
     return backup
 
 def promote(config,database,data,env):
+    # Reuse the operator's redacted, deduplicated inbox event in the same
+    # transaction as the release settings and device banners.
+    sys.path.insert(0,'/opt/quantumvpn-operator')
+    import quantumvpn_community as community
     backup=backup_database(database,data,config['version'])
     now=int(time.time()); banner='Доступно обновление QuantumVPN '+config['version']+'. Откройте уведомление для установки.'
     with closing(sqlite3.connect(str(database),timeout=30)) as db:
@@ -373,6 +377,8 @@ def promote(config,database,data,env):
             'announce_en':'QuantumVPN '+config['version']+' is available.','announce_until':'0',
             'force_update_message':banner,'config_revision':str(int(settings.get('config_revision','1'))+1)}
         for key,value in values.items(): db.execute('insert or replace into settings(key,value) values (?,?)',(key,value))
+        community.append_event(db,'release','Обновление QuantumVPN '+config['version'],
+                               values['app_changelog'],'release:'+str(config['metadata']['version_code']),now=now)
         devices=db.execute("select distinct device from events where kind='policy' and ts>? and device!='' limit 5000",
                            (now-365*86400,)).fetchall()
         for (device,) in devices:

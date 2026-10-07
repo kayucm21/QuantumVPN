@@ -742,6 +742,72 @@ class OperatorTests(unittest.TestCase):
                 self.assertEqual(len(reply["hand"]), 5)
                 self.assertEqual(reply["q_coins"], 1160)
 
+    def test_card_game_rejoin_restores_active_room_then_deals_fresh_after_finish(self):
+        """The existing authenticated join is also the safe new-party path."""
+        with mock.patch.object(self.panel, "rate_limited", return_value=False):
+            devices, snapshots = self._card_pair("fresh-match")
+            code = "fresh-match-code-2026"
+            for seat in self.panel.durak.SEATS:
+                self._card_http(devices[seat], "/api/client/cards/action", {
+                    "ticket": snapshots[seat]["ticket"], "action": "ready",
+                })
+            before = self._card_state(devices["host"], snapshots["host"]["ticket"])
+            restored = self._card_http(devices["host"], "/api/client/cards/join", {
+                "access_code": code, "display_name": "Игрок host",
+            })
+            self.assertEqual(restored["table_id"], before["table_id"])
+            self.assertEqual(restored["hand"], before["hand"])
+            self.assertEqual(restored["revision"], before["revision"])
+            self.assertEqual(restored["q_coins"], 1160)
+            with closing(self.panel.conn()) as db:
+                game = json.loads(db.execute("select game_json from card_tables where id=?",
+                                             (before["table_id"],)).fetchone()[0])
+                game.update(deck=[], hands={"host": ["6H"], "guest": ["7H"]}, attacker="host", table=[],
+                            bout_limit=1, discard=sorted(self.panel.durak.CARDS.difference(["6H", "7H"])))
+                db.execute("update card_tables set game_json=? where id=?", (json.dumps(game), before["table_id"]))
+                db.commit()
+            for seat, action, card in (("host", "attack", "6H"), ("guest", "defend", "7H"), ("host", "pass", "")):
+                finished = self._card_http(devices[seat], "/api/client/cards/action", {
+                    "ticket": snapshots[seat]["ticket"], "action": action, "card": card,
+                })
+            self.assertEqual(finished["game_phase"], "finished")
+            self.assertEqual(finished["winner"], "draw")
+            fresh_deal = self.panel.durak.new_game(rng=random.Random(71))
+            with mock.patch.object(self.panel, "durak_new_game", return_value=fresh_deal):
+                new_host = self._card_http(devices["host"], "/api/client/cards/join", {
+                    "access_code": code, "display_name": "Игрок host",
+                })
+                self.assertNotEqual(new_host["table_id"], before["table_id"])
+                self.assertEqual(new_host["game_phase"], "waiting")
+                self.assertEqual(new_host["hand"], [])
+                self.assertEqual(new_host["q_coins"], 1200)
+                new_guest = self._card_http(devices["guest"], "/api/client/cards/join", {
+                    "access_code": code, "display_name": "Игрок guest",
+                })
+            self.assertEqual(new_guest["table_id"], new_host["table_id"])
+            self.assertEqual(new_guest["game_phase"], "ready")
+            self.assertEqual(new_guest["deck_count"], 24)
+            self.assertEqual(new_guest["discard_count"], 0)
+            self.assertEqual(new_guest["revision"], 0)
+            self.assertFalse(new_guest["can_take"])
+            old_room = self._card_state(devices["host"], snapshots["host"]["ticket"])
+            self.assertEqual(old_room["game_phase"], "finished")
+            with self.assertRaises(HTTPError) as old_action:
+                self._card_http(devices["host"], "/api/client/cards/action", {
+                    "ticket": snapshots["host"]["ticket"], "action": "attack", "card": "6H",
+                })
+            old_action.exception.close()
+            for seat in self.panel.durak.SEATS:
+                current = self._card_http(devices[seat], "/api/client/cards/action", {
+                    "ticket": (new_host if seat == "host" else new_guest)["ticket"], "action": "ready",
+                    "action_id": "fresh-party-ready-" + seat,
+                })
+            self.assertEqual(current["game_phase"], "playing")
+            for seat in self.panel.durak.SEATS:
+                view = self._card_state(devices[seat], (new_host if seat == "host" else new_guest)["ticket"])
+                self.assertEqual(view["hand"], fresh_deal["hands"][seat])
+                self.assertEqual(view["q_coins"], 1160)
+
     def test_routing_draft_saves_doh_without_publishing(self):
         token = base64.b64encode(b"test:test").decode()
         with closing(self.panel.conn()) as db:

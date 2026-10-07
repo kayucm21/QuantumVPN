@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -51,7 +52,7 @@ internal fun AuroraStartup2026(
         else -> if (!rulesReady) "Проверяем подписанные правила" else if (!serversChecked) "Проверяем доступность серверов" else "Приложение готово"
     }
     BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF040B16))) {
-        Quantum2Wallpaper(Modifier.fillMaxSize(), earth = true)
+        Quantum2Wallpaper(Modifier.fillMaxSize())
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x55040B16), Color.Transparent, Color(0xF0040B16)))))
         val compact = maxHeight < 650.dp
         Column(
@@ -59,17 +60,20 @@ internal fun AuroraStartup2026(
                 .verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("Добро пожаловать", color = Color.White, fontSize = if (compact) 25.sp else 28.sp, fontWeight = FontWeight.Bold)
+            Text("Подготавливаем приложение", color = muted, fontSize = 14.sp)
             Spacer(Modifier.height(if (compact) 18.dp else 38.dp))
-            AuroraBrandMark(false, Modifier.size(if (compact) 112.dp else 148.dp))
+            AuroraQMark2026(Modifier.size(if (compact) 96.dp else 128.dp))
             Text(LocalAppResources.current?.text("brand_name", "QuantumVPN") ?: "QuantumVPN",
                 color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-            Text("2.0", color = cyan, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(if (compact) 44.dp else 74.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                StartupStage("Проверяем\nобновление", updateSettled, !updateSettled, cyan, Modifier.weight(1f))
-                StartupStage("Загружаем\nправила", rulesReady, updateSettled && !rulesReady, cyan, Modifier.weight(1f))
-                StartupStage("Проверяем\nсерверы", serversChecked, rulesReady && !serversChecked, cyan, Modifier.weight(1f))
+            Text("Больше свободы. Ближе к вам.", color = muted, fontSize = 13.sp)
+            Spacer(Modifier.height(if (compact) 32.dp else 64.dp))
+            Surface(color = Color(0xD0091D31), border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF25445F)),
+                shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    StartupStage("Проверка обновлений", updateSettled, !updateSettled, cyan, Modifier.fillMaxWidth())
+                    StartupStage("Подписанные правила", rulesReady, updateSettled && !rulesReady, cyan, Modifier.fillMaxWidth())
+                    StartupStage("Доступность серверов", serversChecked, rulesReady && !serversChecked, cyan, Modifier.fillMaxWidth())
+                }
             }
             Spacer(Modifier.height(20.dp))
             Text(status, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, textAlign = TextAlign.Center)
@@ -109,14 +113,15 @@ internal fun AuroraStartup2026(
 
 @Composable
 private fun StartupStage(title: String, complete: Boolean, active: Boolean, accent: Color, modifier: Modifier) {
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Surface(shape = CircleShape, color = if (active) accent.copy(alpha = .18f) else Color(0xFF081A2E),
             border = androidx.compose.foundation.BorderStroke(2.dp, if (complete || active) accent else Color(0xFF536A85)), modifier = Modifier.size(25.dp)) {
             Box(contentAlignment = Alignment.Center) {
                 Text(if (complete) "✓" else if (active) "●" else "", color = accent, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
         }
-        Text(title, color = if (complete || active) Color.White else Color(0xFFABC0D4), fontSize = 11.sp,
-            textAlign = TextAlign.Center, modifier = Modifier.padding(top = 10.dp))
+        Text(title, color = if (complete || active) Color.White else Color(0xFFABC0D4), fontSize = 13.sp,
+            modifier = Modifier.weight(1f))
+        Text(if (complete) "Готово" else if (active) "Проверяем…" else "Ожидание", color = if (complete) accent else Color(0xFFABC0D4), fontSize = 11.sp)
     }
 }

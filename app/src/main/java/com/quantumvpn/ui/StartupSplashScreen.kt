@@ -28,9 +28,10 @@ fun StartupSplashScreen(
         }
         rulesReady = true
     }
-    var serversChecked by remember { mutableStateOf(serverItems.isEmpty()) }
-    var reachable by remember { mutableStateOf<Int?>(null) }
     val serverProbeKey = serverItems.map { Triple(it.tag, it.type, it.endpoint) }
+    // New targets must reset synchronously, before the finish effect can run.
+    var serversChecked by remember(serverProbeKey) { mutableStateOf(serverItems.isEmpty()) }
+    var reachable by remember(serverProbeKey) { mutableStateOf<Int?>(null) }
     LaunchedEffect(serverProbeKey) {
         if (serverItems.isEmpty()) { serversChecked = true; reachable = null; return@LaunchedEffect }
         serversChecked = false

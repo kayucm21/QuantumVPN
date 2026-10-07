@@ -437,13 +437,15 @@ fun QuantumVpnAppV2(
     onCancelUpdate: () -> Unit,
 ) {
     var tab by rememberSaveable { mutableStateOf(V2Tab.Home) }
+    val shellReady = state.initialized && state.settings.onboardingCompleted && state.settings.displayName.isNotBlank()
     var settingsNotificationsOpen by rememberSaveable { mutableStateOf(false) }
     // The device-bound game ticket lives in the shell, not in a transient tab.
-    // Never save the ticket or an access code into an Activity bundle or disk.
+    // The repository stores only a bounded ticket in AndroidKeystore-backed storage.
+    // An access code never goes into an Activity bundle or persistent storage.
     val cardSession = remember { V2CardSession() }
     val cardRequestScope = rememberCoroutineScope()
-    androidx.compose.runtime.DisposableEffect(tab) {
-        onHomeSelected(tab == V2Tab.Home || tab == V2Tab.Statistics)
+    androidx.compose.runtime.DisposableEffect(tab, shellReady) {
+        onHomeSelected(shellReady && (tab == V2Tab.Home || tab == V2Tab.Statistics))
         onDispose { onHomeSelected(false) }
     }
     LaunchedEffect(state.message) {
@@ -488,8 +490,8 @@ fun QuantumVpnAppV2(
     // Probing every server on a screen where its result is invisible wastes
     // radio time and can make lower-end phones feel less responsive. Keep
     // live pings on the home/server pages and stop the worker elsewhere.
-    LaunchedEffect(tab, pingTargets, visible) {
-        if (!visible || (tab != V2Tab.Home && tab != V2Tab.Servers)) {
+    LaunchedEffect(tab, pingTargets, visible, shellReady) {
+        if (!shellReady || !visible || (tab != V2Tab.Home && tab != V2Tab.Servers)) {
             return@LaunchedEffect
         }
         while (true) {
@@ -498,8 +500,8 @@ fun QuantumVpnAppV2(
             kotlinx.coroutines.delay(20_000)
         }
     }
-    LaunchedEffect(tab, connected, mainGroup?.tag, visible) {
-        if (!connected || !visible) return@LaunchedEffect
+    LaunchedEffect(tab, connected, mainGroup?.tag, visible, shellReady) {
+        if (!shellReady || !connected || !visible) return@LaunchedEffect
         while (tab == V2Tab.Servers || tab == V2Tab.Home) {
             mainGroup?.tag?.takeIf(String::isNotBlank)?.let(onMeasureGroup) ?: onMeasurePing()
             kotlinx.coroutines.delay(20_000)
@@ -508,8 +510,8 @@ fun QuantumVpnAppV2(
     val app = context.applicationContext as QuantumVpnApplication
     val policy by app.container.clientPolicyRepository.policy.collectAsState()
     val resources by app.container.appResourceRepository.resources.collectAsState()
-    LaunchedEffect(visible) {
-        if (!visible) return@LaunchedEffect
+    LaunchedEffect(visible, shellReady) {
+        if (!shellReady || !visible) return@LaunchedEffect
         while (true) {
             app.container.appResourceRepository.refresh()
             kotlinx.coroutines.delay(300_000)
@@ -574,12 +576,9 @@ fun QuantumVpnAppV2(
             V2MaintenanceScreen(policy.maintenanceMessage)
             return@Surface
         }
-        if (!state.settings.onboardingCompleted && state.initialized) {
-            V2OnboardingScreen(
-                hasServers = groups.any { it.items.isNotEmpty() },
-                updateState = updateState,
-                onLoadServers = { viewModel.installManagedSubscription() },
-                onFinished = { viewModel.completeOnboarding() },
+        if (state.initialized && (!state.settings.onboardingCompleted || state.settings.displayName.isBlank())) {
+            AuroraNamedOnboarding2026(
+                onFinished = { name -> viewModel.completeOnboarding(name) },
             )
             return@Surface
         }
@@ -622,6 +621,7 @@ fun QuantumVpnAppV2(
                         onCards = { tab = V2Tab.Cards },
                         dnsStatus = if (!connected) "С VPN" else if (state.settings.adBlockEnabled) "Фильтр" else "Активен",
                         routingLabel = routingLabel,
+                        displayName = state.settings.displayName,
                     )
                     V2Tab.Servers -> V2Servers(
                         groups, mainGroup?.tag, mainGroup?.selected, offlinePings, onSelectServer,
@@ -686,11 +686,13 @@ fun QuantumVpnAppV2(
                         onNotifyExitIpChange = viewModel::setNotifyExitIpChange,
                         onConnectSound = viewModel::setConnectSoundEnabled,
                         initialNotificationsOpen = settingsNotificationsOpen,
+                        onDisplayName = viewModel::setDisplayName,
                     )
                     V2Tab.Cards -> V2Cards(
                         onBack = { tab = V2Tab.Home },
                         session = cardSession,
                         requestScope = cardRequestScope,
+                        initialDisplayName = state.settings.displayName,
                     )
                 }
                 }
@@ -908,24 +910,20 @@ internal fun V2Home(
     pingMeasured: Boolean = false,
     dnsStatus: String = if (connected) "Активен" else "С VPN",
     routingLabel: String = "—",
+    displayName: String = "",
 ) {
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     val hapticsEnabled = LocalAuroraHaptics.current
     val resources = LocalAppResources.current
     val stateText = when {
-        connected -> "Защищено"
-        busy -> "Подключение…"
-        else -> "Не защищено"
-    }
-    val stateHint = when {
-        connected -> "Ваш трафик проходит через защищённый канал"
-        busy -> "Проверяем сеть и устанавливаем соединение…"
-        else -> "Нажмите кнопку, чтобы включить защиту"
+        busy -> if (connected) "Меняем соединение…" else "Устанавливаем соединение…"
+        connected -> "Соединение защищено"
+        else -> "Соединение не защищено"
     }
     val stateColor = when {
-        connected -> Color(0xFF54F4CF)
         busy -> Color(0xFFC395FF)
-        else -> Aurora.Danger
+        connected -> Color(0xFF54F4CF)
+        else -> Aurora.Muted
     }
     val actionLabel = when {
         connected -> "Отключить"
@@ -934,81 +932,114 @@ internal fun V2Home(
     }
     V2AuroraBackdrop(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
-        val compact = maxHeight < 620.dp || resources?.compactHome == true
+        val compact = maxHeight < 680.dp || resources?.compactHome == true
+        val largeText = LocalDensity.current.fontScale > 1.2f
+        // Keep the three main actions above navigation on ordinary short screens.
+        // Large accessibility text can scroll without shrinking any text or touch target.
+        val powerDiameter = if (largeText) 212.dp else if (compact) {
+            (maxHeight - 386.dp).coerceIn(136.dp, 186.dp)
+        } else 224.dp
         Column(
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 10.dp)
-                .padding(bottom = 8.dp),
+                .padding(horizontal = 16.dp, vertical = if (compact) 6.dp else 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                AuroraBrandMark(connected = connected, modifier = Modifier.size(34.dp))
-                Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                    Text(resources?.text("brand_name", policy.branding.name) ?: policy.branding.name, color = Aurora.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(
-                        resources?.text("tagline", quantum2Tagline(policy.branding.tagline)) ?: quantum2Tagline(policy.branding.tagline),
-                        color = Aurora.Muted,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                AuroraQMark2026(Modifier.size(38.dp), Aurora.Mint)
+                AuroraHomeWordmark2026(
+                    name = resources?.text("brand_name", policy.branding.name) ?: policy.branding.name,
+                    textColor = Aurora.Text, accent = Aurora.Mint,
+                    modifier = Modifier.weight(1f).padding(start = 8.dp, end = 8.dp),
+                )
                 Surface(
                     onClick = onNotifications,
                     shape = CircleShape,
-                    color = Color(0xFF152344).copy(alpha = .86f),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .13f)),
-                    modifier = Modifier.size(48.dp).semantics { contentDescription = "Открыть настройки и уведомления" },
+                    color = Aurora.Violet.copy(alpha = .22f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .46f)),
+                    modifier = Modifier.size(48.dp).semantics { contentDescription = "Открыть уведомления" },
                 ) {
-                    Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Notifications, null, tint = Aurora.Text, modifier = Modifier.size(22.dp)) }
+                    Box(contentAlignment = Alignment.Center) {
+                        if (displayName.isBlank()) Icon(Icons.Default.Notifications, null, tint = Aurora.Text, modifier = Modifier.size(22.dp))
+                        else Text(auroraHomeInitial(displayName), color = Aurora.Text, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
-            Spacer(Modifier.height(if (compact) 8.dp else 20.dp))
-            AuroraStatusPill(stateText = stateText, stateColor = stateColor, subtitle = stateHint)
-            Spacer(Modifier.height(6.dp))
-            AuroraConnectButton(
-                connected = connected,
+            Spacer(Modifier.height(if (compact) 4.dp else 12.dp))
+            Text(auroraHomeGreeting(displayName), color = Aurora.Text,
+                fontSize = if (compact) 20.sp else 23.sp, fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center, modifier = Modifier.testTag("home-greeting").semantics { heading() })
+            Spacer(Modifier.height(if (compact) 2.dp else 8.dp))
+            // The design stays static even while busy; reduced-motion users see identical controls.
+            AuroraHomePower2026(
                 busy = busy,
-                enabled = !busy,
-                reduceMotion = reduceMotion,
                 actionLabel = actionLabel,
-                compact = compact,
+                accent = if (busy) Aurora.Violet else Aurora.Mint,
+                textColor = Aurora.Text,
+                dark = LocalAuroraDark.current,
+                diameter = powerDiameter,
                 onClick = {
                     if (hapticsEnabled) haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                     onConnect()
                 },
             )
-            Spacer(Modifier.height(if (compact) 8.dp else 20.dp))
-            V2GlassPanel(
-                modifier = Modifier.fillMaxWidth().clickable(onClick = onServers).testTag("home-server").semantics { contentDescription = "Выбрать сервер" },
+            Spacer(Modifier.height(if (compact) 4.dp else 12.dp))
+            Surface(
+                onClick = onServers, color = Aurora.Glass.copy(alpha = .93f),
+                shape = RoundedCornerShape(18.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .55f)),
+                modifier = Modifier.fillMaxWidth().testTag("home-server").semantics { contentDescription = "Выбрать сервер" },
             ) {
-                Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(serverFlag(server), fontSize = 22.sp)
-                    Column(Modifier.weight(1f).padding(start = 10.dp, end = 7.dp)) {
-                        Text("Выбранный сервер", color = Color(0xFFB4C7DD), fontSize = 12.sp)
-                        Text(server, color = Aurora.Text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(Modifier.heightIn(min = if (compact) 56.dp else 70.dp)
+                    .padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Surface(shape = CircleShape, color = Aurora.Muted.copy(alpha = .1f), modifier = Modifier.size(36.dp)) {
+                        AuroraHomeGlobe2026(Aurora.Muted, Modifier.padding(5.dp))
                     }
-                    Text("›", color = Color.White.copy(alpha = .72f), fontSize = 22.sp, modifier = Modifier.padding(start = 7.dp))
+                    Column(Modifier.weight(1f).padding(start = 12.dp, end = 7.dp)) {
+                        Text("Сервер", color = Aurora.Muted, fontSize = 11.sp)
+                        Text(server, color = Aurora.Text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                            maxLines = if (largeText) 2 else 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text("›", color = Aurora.Muted, fontSize = 24.sp)
+                }
+            }
+            Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
+            Surface(
+                onClick = onSettings, color = Aurora.Glass.copy(alpha = .93f), shape = RoundedCornerShape(18.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .55f)),
+                modifier = Modifier.fillMaxWidth().testTag("home-protection"),
+            ) {
+                Row(Modifier.heightIn(min = if (compact) 52.dp else 64.dp)
+                    .padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AuroraHomeShield2026(stateColor, connected, Modifier.size(32.dp))
+                    Text(stateText, color = Aurora.Text, fontSize = 14.sp,
+                        modifier = Modifier.weight(1f).padding(start = 12.dp, end = 6.dp))
+                    Text("›", color = Aurora.Muted, fontSize = 24.sp)
+                }
+            }
+            Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
+            Surface(onClick = onCards, color = Color.Transparent, shape = RoundedCornerShape(18.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFC5A7FF).copy(alpha = .55f)),
+                modifier = Modifier.fillMaxWidth().testTag("home-games")) {
+                Row(Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color(0xFF8B57DB), Color(0xFF6532B8))))
+                    .heightIn(min = if (compact) 64.dp else 80.dp).padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    AuroraHomeCards2026(Modifier.size(44.dp))
+                    Column(Modifier.weight(1f).padding(start = 12.dp, end = 6.dp)) {
+                        Text(resources?.text("games_title", "Игры с друзьями") ?: "Игры с друзьями",
+                            color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("Дурак · отдельная комната", color = Color(0xFFF3EFFF), fontSize = 11.sp)
+                    }
+                    Text("›", color = Color.White, fontSize = 24.sp)
                 }
             }
             Spacer(Modifier.height(8.dp))
+            // Secondary diagnostics stay available below the main actions, with real values only.
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 V2HomePill("⌁", "Пинг", serverPingText(ping, pingMeasured), Modifier.weight(1f).testTag("home-ping"), if (ping != null) Aurora.Mint else Aurora.Muted, onServers)
                 V2HomePill("●", "DNS", dnsStatus, Modifier.weight(1f).testTag("home-dns"), if (connected) Aurora.Mint else Aurora.Muted, onSettings)
                 V2HomePill("≡", "Правила", routingLabel, Modifier.weight(1f).testTag("home-routing"), Aurora.Violet, onSettings)
-            }
-            Spacer(Modifier.height(8.dp))
-            V2GlassPanel(modifier = Modifier.fillMaxWidth().clickable(onClick = onCards).testTag("home-games"), accent = Color(0xFFA88CFF)) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("♠  ♥", color = Color(0xFFC6A7FF), fontSize = 26.sp)
-                    Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                        Text(resources?.text("games_title", "Играть с друзьями") ?: "Играть с друзьями", color = Aurora.Text, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("Только виртуальные Q-coins", color = Aurora.Muted, fontSize = 10.sp)
-                    }
-                    Text("›", color = Aurora.Mint, fontSize = 24.sp)
-                }
             }
             if (!hasProfile) {
                 Text("Загружаем встроенный список серверов…", color = Color(0xFF5CF5D0), fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
@@ -1027,6 +1058,12 @@ internal class V2CardSession {
     val snapshot = mutableStateOf<CardTableSnapshot?>(null)
     val joining = mutableStateOf(false)
     val error = mutableStateOf<String?>(null)
+    val actionError = mutableStateOf<String?>(null)
+    val synchronized = mutableStateOf(true)
+    val resume = mutableStateOf<com.quantumvpn.cards.CardTableResume?>(null)
+    val dealing = mutableStateOf(false)
+    var restoreAttempted = false
+    var generation = 0
 }
 
 @Composable
@@ -1034,6 +1071,7 @@ internal fun V2Cards(
     onBack: () -> Unit,
     session: V2CardSession = remember { V2CardSession() },
     requestScope: kotlinx.coroutines.CoroutineScope = rememberCoroutineScope(),
+    initialDisplayName: String = "",
 ) {
     val context = LocalContext.current
     val repository = remember(context) { CardTableRepository(context) }
@@ -1044,53 +1082,175 @@ internal fun V2Cards(
     var snapshot by session.snapshot
     var joining by session.joining
     var error by session.error
+    var actionError by session.actionError
+    var synchronized by session.synchronized
+    var resume by session.resume
+    var dealing by session.dealing
+    var revealCode by remember { mutableStateOf(false) }
+    var resumeRetry by remember { mutableStateOf(0) }
+    val reduceMotion = LocalAuroraReduceMotion.current
+
+    LaunchedEffect(initialDisplayName) {
+        if (displayName.isBlank()) displayName = initialDisplayName.take(24)
+    }
+
+    fun rememberTable(result: CardTableSnapshot, fallbackTicket: String = "") {
+        val current = snapshot ?: return
+        // A delayed response can never replace a different room or rewind a
+        // confirmed turn. Waiting -> ready can legitimately share revision 0.
+        if (result.tableId != current.tableId) return
+        if (result.gamePhase == "unavailable") {
+            // A damaged server deal has no valid revision. Hide the last hand
+            // and freeze actions while preserving the confirmed revision.
+            snapshot = current.copy(gamePhase = "unavailable", state = result.state, message = result.message,
+                canReady = false, canAttack = false, canDefend = false, canTake = false, canPass = false)
+            synchronized = false
+            if (result.state == "expired") repository.clearSession()
+            error = null
+            return
+        }
+        if (result.revision < current.revision) return
+        val next = result.copy(ticket = result.ticket.ifBlank { fallbackTicket })
+        val phaseOrder = listOf("waiting", "ready", "playing", "finished")
+        if (result.revision == current.revision && phaseOrder.indexOf(result.gamePhase) < phaseOrder.indexOf(current.gamePhase)) return
+        if (current.gamePhase == "ready" && next.gamePhase == "playing" && !reduceMotion) dealing = true
+        if (next.revision > current.revision || next.gamePhase != current.gamePhase) actionError = null
+        snapshot = next
+        repository.rememberSession(next)
+        synchronized = true
+        error = null
+    }
+
+    fun forgetRoom() {
+        session.generation++
+        repository.clearSession()
+        snapshot = null
+        resume = null
+        dealing = false
+        synchronized = true
+        joining = false
+        error = null
+        actionError = null
+    }
+
+    fun connectionFailed(failure: Throwable) {
+        synchronized = false
+        error = if (failure is java.io.IOException) "Соединение потеряно. Комната сохранена; подключимся автоматически."
+            else failure.message ?: "Не удалось обновить состояние комнаты"
+        if ((failure as? com.quantumvpn.cards.CardTableRequestException)?.sessionUnavailable == true) {
+            repository.clearSession()
+            snapshot = null
+            resume = null
+            dealing = false
+            joining = false
+            actionError = null
+            session.generation++
+        }
+    }
 
     // The server is the source of truth for hands and turns. Polling stops as
     // soon as a match finishes and is cancelled when the screen is left.
     val visible = rememberAuroraVisible()
     BackHandler { onBack() }
+    LaunchedEffect(visible, resumeRetry) {
+        if (!visible || snapshot != null) return@LaunchedEffect
+        if (!session.restoreAttempted) {
+            session.restoreAttempted = true
+            resume = repository.rememberedSession()
+        }
+        val saved = resume ?: return@LaunchedEffect
+        val generation = session.generation
+        var failures = 0
+        while (generation == session.generation && snapshot == null && resume != null) {
+            joining = true
+            try {
+                repository.state(saved.ticket).onSuccess { result ->
+                    if (generation == session.generation && result.tableId == saved.tableId) {
+                        snapshot = result.copy(ticket = result.ticket.ifBlank { saved.ticket })
+                        if (result.name.isNotBlank()) displayName = result.name.take(24)
+                        repository.rememberSession(snapshot!!)
+                        resume = null
+                        synchronized = result.gamePhase != "unavailable"
+                        error = null
+                    } else if (generation == session.generation) {
+                        forgetRoom()
+                        error = "Сохранённая комната недоступна. Введите код ещё раз"
+                    }
+                }.onFailure { failure ->
+                    if (generation == session.generation) {
+                        failures++
+                        connectionFailed(failure)
+                    }
+                }
+            } finally {
+                if (generation == session.generation) joining = false
+            }
+            if (snapshot != null || resume == null) break
+            kotlinx.coroutines.delay(5_000L * failures.coerceIn(1, 6))
+        }
+    }
     LaunchedEffect(snapshot?.ticket, snapshot?.gamePhase, visible) {
         if (!visible) return@LaunchedEffect
         val ticket = snapshot?.ticket?.takeIf(String::isNotBlank) ?: return@LaunchedEffect
         if (snapshot?.gamePhase == "finished") return@LaunchedEffect
+        val roomId = snapshot?.tableId
+        val generation = session.generation
+        var failures = 0
         while (true) {
-            repository.state(ticket).onSuccess { refreshed ->
-                // Older panel builds omitted ticket from state polling.  Keep
-                // the current device-bound ticket as a compatibility guard so
-                // the coroutine cannot silently stop after a guest joins.
-                val current = snapshot
-                if (current == null || refreshed.tableId != current.tableId || refreshed.revision >= current.revision) {
-                    snapshot = refreshed.copy(ticket = refreshed.ticket.ifBlank { ticket })
+            if (generation != session.generation || snapshot?.tableId != roomId) break
+            if (!joining) {
+                repository.state(ticket).onSuccess { refreshed ->
+                    if (generation == session.generation && snapshot?.tableId == roomId) {
+                        rememberTable(refreshed, ticket)
+                        failures = 0
+                    }
+                }.onFailure { failure ->
+                    if (generation == session.generation && snapshot?.tableId == roomId) {
+                        failures++
+                        connectionFailed(failure)
+                    }
                 }
-                error = null
-            }.onFailure { failure ->
-                error = failure.message ?: "Не удалось обновить состояние стола"
             }
-            kotlinx.coroutines.delay(if (snapshot?.waiting == true) 5_000 else 2_500)
+            if (snapshot?.gamePhase in setOf("finished", "unavailable") || snapshot?.state == "expired") break
+            val delayMillis = if (failures > 0) (5_000L * failures.coerceAtMost(6))
+                else if (snapshot?.waiting == true) 5_000L else 2_500L
+            kotlinx.coroutines.delay(delayMillis)
         }
+    }
+    LaunchedEffect(snapshot?.tableId, dealing, visible) {
+        if (!dealing) return@LaunchedEffect
+        if (visible && !reduceMotion) kotlinx.coroutines.delay(650)
+        dealing = false
     }
 
     V2AuroraBackdrop(Modifier.fillMaxSize()) {
         Column(
-            Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp),
+            Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp).padding(bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Игры", color = Aurora.Text, fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).semantics { heading() })
-                TextButton(onClick = onBack) { Text("‹ Назад", color = Aurora.Mint) }
+                TextButton(onClick = onBack, modifier = Modifier.semantics { contentDescription = "На главную" }) { Text("‹", color = Aurora.Mint, fontSize = 29.sp) }
+                Text(if (snapshot?.waiting == true) "Игровая комната" else "Дурак с друзьями", color = Aurora.Text, fontSize = if (snapshot?.gamePhase == "playing") 18.sp else 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).semantics { heading() })
+                if (snapshot?.gamePhase == "playing") Surface(color = Aurora.Glass, shape = RoundedCornerShape(999.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border)) {
+                    Text("Q ${snapshot?.qCoins}", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp))
+                }
             }
-            if (snapshot == null) {
+            if (snapshot == null && resume == null) {
                 V2GlassPanel(Modifier.fillMaxWidth(), accent = Aurora.Violet) {
-                    Row(Modifier.fillMaxWidth().padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("♠  ♥  ♣  ♦", color = Color(0xFFC7A6FF), fontSize = 27.sp)
-                        Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                            Text("Дурак с друзьями", color = Aurora.Text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                            Text("Только виртуальные Q-coins", color = Aurora.Muted, fontSize = 11.sp)
+                    Column(Modifier.fillMaxWidth().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Q", color = Aurora.Mint, fontSize = 43.sp, fontWeight = FontWeight.Black)
+                        Text("QuantumVPN 2.0", color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Row(Modifier.padding(top = 14.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            V2DurakCard("KS", false) {}
+                            V2DurakCard("QH", false) {}
+                            V2DurakCard("JC", false) {}
                         }
+                        Text("Представьтесь и введите\nкод доступа", color = Aurora.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
                     }
                 }
             }
-            snapshot?.let { table ->
+            snapshot?.takeIf { it.gamePhase != "playing" }?.let { table ->
                 V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Color(0xFFFFC857)) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
@@ -1105,12 +1265,22 @@ internal fun V2Cards(
                     }
                 }
             }
-            if (snapshot == null) {
+            if (snapshot == null && resume != null) {
+                V2GlassPanel(Modifier.fillMaxWidth(), accent = Aurora.Mint) {
+                    Column(Modifier.fillMaxWidth().padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Text("Возвращаемся в комнату", color = Aurora.Text, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                        Text("Карты и очередь хода сохранены на сервере", color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 12.sp)
+                        if (joining && visible) CircularProgressIndicator(color = Aurora.Mint, modifier = Modifier.size(32.dp))
+                        else Button(onClick = { resumeRetry++ }, modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night)) { Text("Восстановить комнату") }
+                        TextButton(onClick = { forgetRoom() }, enabled = !joining) { Text("Войти по коду", color = Aurora.Mint) }
+                    }
+                }
+            } else if (snapshot == null) {
                 V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Color(0xFFC395FF)) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("Дурак с друзьями", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                         Text(
-                            "Введите код доступа, созданный владельцем в Quantum Control. Это не пароль администратора панели.",
+                            "Код доступа выдаёт администратор игры. Партия начнётся, когда подключится второй игрок и оба подтвердят готовность.",
                             color = Aurora.Muted,
                             fontSize = 12.sp,
                         )
@@ -1128,7 +1298,9 @@ internal fun V2Cards(
                             singleLine = true,
                             label = { Text("Код доступа") },
                             colors = quantum2TextFieldColors(),
-                            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            visualTransformation = if (revealCode) androidx.compose.ui.text.input.VisualTransformation.None
+                                else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            trailingIcon = { TextButton(onClick = { revealCode = !revealCode }) { Text(if (revealCode) "Скрыть" else "Показать", color = Aurora.Mint, fontSize = 11.sp) } },
                             modifier = Modifier.fillMaxWidth(),
                         )
                         Button(
@@ -1136,16 +1308,29 @@ internal fun V2Cards(
                                 if (joining) return@Button
                                 val enteredCode = accessCode
                                 val enteredName = displayName
+                                val generation = ++session.generation
                                 error = null
+                                actionError = null
                                 joining = true
                                 accessCode = ""
+                                revealCode = false
                                 scope.launch {
-                                    repository.join(enteredCode, enteredName)
-                                        .onSuccess { result ->
-                                            snapshot = result
-                                        }
-                                        .onFailure { failure -> error = failure.message ?: "Не удалось войти за стол" }
-                                    joining = false
+                                    try {
+                                        repository.join(enteredCode, enteredName)
+                                            .onSuccess { result ->
+                                                if (generation == session.generation) {
+                                                    snapshot = result
+                                                    displayName = result.name.take(24)
+                                                    repository.rememberSession(result)
+                                                    synchronized = true
+                                                }
+                                            }
+                                            .onFailure { failure ->
+                                                if (generation == session.generation) error = failure.message ?: "Не удалось войти за стол"
+                                            }
+                                    } finally {
+                                        if (generation == session.generation) joining = false
+                                    }
                                 }
                             },
                             enabled = !joining && displayName.trim().length >= 2 && accessCode.length >= 8,
@@ -1153,47 +1338,64 @@ internal fun V2Cards(
                             shape = RoundedCornerShape(15.dp),
                             modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp).testTag("cards-join"),
                         ) {
-                            if (joining) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-                            else Text("Войти по коду и найти игрока", fontWeight = FontWeight.Bold)
+                            if (joining && visible) CircularProgressIndicator(color = Aurora.Night, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                            else Text("Продолжить", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
             } else {
                 val table = snapshot!!
                 fun play(action: String, card: String = "", target: Int? = null) {
-                    if (joining) return
+                    if (joining || !synchronized || dealing || snapshot?.tableId != table.tableId || snapshot?.revision != table.revision) return
+                    val permitted = when (action) {
+                        "ready" -> table.gamePhase == "ready" && table.canReady
+                        "attack" -> table.gamePhase == "playing" && table.attacker == table.seat && table.canAttack
+                        "defend" -> table.gamePhase == "playing" && table.attacker != table.seat && table.canDefend
+                        "take" -> table.gamePhase == "playing" && table.attacker != table.seat && table.canTake
+                        "pass" -> table.gamePhase == "playing" && table.attacker == table.seat && table.canPass
+                        else -> false
+                    }
+                    if (!permitted || table.ticket.isBlank()) return
+                    val generation = session.generation
                     joining = true
                     error = null
+                    actionError = null
                     scope.launch {
-                        repository.action(table.ticket, action, card, target, table.revision.takeIf { table.hasLegalActions })
-                            .onSuccess { result ->
-                                if (result.revision >= (snapshot?.revision ?: 0L)) {
-                                    snapshot = result.copy(ticket = result.ticket.ifBlank { table.ticket })
+                        try {
+                            repository.action(table.ticket, action, card, target, table.revision)
+                                .onSuccess { result -> if (generation == session.generation) rememberTable(result, table.ticket) }
+                                .onFailure { failure ->
+                                    if (generation == session.generation) {
+                                        if ((failure as? com.quantumvpn.cards.CardTableRequestException)?.statusCode in setOf(400, 409, 429)) {
+                                            actionError = failure.message
+                                        }
+                                        connectionFailed(failure)
+                                        if (snapshot?.tableId == table.tableId) repository.state(table.ticket)
+                                            .onSuccess { refreshed -> if (generation == session.generation) rememberTable(refreshed, table.ticket) }
+                                            .onFailure { refreshFailure -> if (generation == session.generation) connectionFailed(refreshFailure) }
+                                    }
                                 }
-                            }
-                            .onFailure { failure ->
-                                error = failure.message ?: "Не удалось выполнить ход"
-                                repository.state(table.ticket).onSuccess { refreshed ->
-                                    if (refreshed.revision >= (snapshot?.revision ?: 0L)) snapshot = refreshed.copy(ticket = refreshed.ticket.ifBlank { table.ticket })
-                                }
-                            }
-                        joining = false
+                        } finally {
+                            if (generation == session.generation) joining = false
+                        }
                     }
                 }
                 V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = if (table.ready) Aurora.Mint else Color(0xFFC395FF)) {
                     Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (table.gamePhase != "playing") {
-                            Text(if (table.ready) "♠  Стол готов" else "♠  Ожидаем игрока", color = if (table.ready) Aurora.Mint else Color(0xFFCDA4FF), fontSize = 21.sp, fontWeight = FontWeight.Bold)
-                            Text("Привет, ${table.name}!", color = Aurora.Text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            Text(when (table.gamePhase) { "ready" -> "Оба игрока подключились"; "finished" -> "Партия завершена"; "unavailable" -> "Комната недоступна"; else -> "Ждём второго игрока…" }, color = Aurora.Mint, fontSize = 21.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
                             Text(table.message, color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 12.sp)
+                        }
+                        if (table.gamePhase == "waiting" || table.gamePhase == "ready") {
+                            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                V2PlayerBadge(table.name, if (table.gamePhase == "ready" && !table.canReady) "Готов" else "Вы в комнате", Modifier.weight(1f).padding(horizontal = 4.dp))
+                                V2PlayerBadge(table.opponentName.ifBlank { "Место свободно" }, if (table.opponentName.isBlank()) "1 из 2 игроков" else "Подключился", Modifier.weight(1f).padding(horizontal = 4.dp), available = table.opponentName.isNotBlank())
+                            }
                         }
                         if (table.stakeQCoins > 0 && table.gamePhase != "finished") {
                             Text("Виртуальная ставка: ${table.stakeQCoins} Q-coins с игрока", color = Color(0xFFFFD36E), fontSize = 11.sp)
                         }
                         if (table.opponentName.isNotBlank()) {
-                            if (table.gamePhase != "playing") Surface(color = Aurora.Mint.copy(alpha = .12f), shape = RoundedCornerShape(14.dp)) {
-                                Text("Ваш соперник: ${table.opponentName}", color = Aurora.Mint, modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp), fontWeight = FontWeight.SemiBold)
-                            }
                             when (table.gamePhase) {
                                 "ready" -> {
                                     Text(
@@ -1204,11 +1406,19 @@ internal fun V2Cards(
                                     )
                                     Button(
                                         onClick = { play("ready") },
-                                        enabled = table.canReady && !joining,
+                                        enabled = table.canReady && !joining && synchronized,
                                         colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
+                                        shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
                                     ) { Text(if (table.canReady) "Готов к раздаче" else "Ждём второго игрока") }
                                 }
-                                "playing" -> V2DurakTablePreview(table = table, busy = joining,
+                                "playing" -> if (dealing) {
+                                    Text("Новая партия готова", color = Aurora.Text, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                                    Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), horizontalArrangement = Arrangement.Center) {
+                                        repeat(table.hand.size.coerceAtMost(6)) { V2DurakCardBack(Modifier.padding(horizontal = 2.dp).size(38.dp, 55.dp)) }
+                                    }
+                                    Text("Сервер раздал ${table.hand.size} карт", color = Aurora.Mint, fontSize = 14.sp)
+                                    Text("Новая колода для каждой партии", color = Aurora.Muted, fontSize = 11.sp)
+                                } else V2DurakTablePreview(table = table, busy = joining || !synchronized,
                                     onAction = { action, card -> play(action, card) },
                                     onDefendTarget = { card, target -> play("defend", card, target) })
                                 "finished" -> {
@@ -1220,20 +1430,25 @@ internal fun V2Cards(
                                         textAlign = TextAlign.Center,
                                         fontWeight = FontWeight.SemiBold,
                                     )
-                                    TextButton(onClick = { snapshot = null; error = null }, enabled = !joining) {
-                                        Text("Новая партия", color = Aurora.Mint)
+                                    Text("Следующая партия — новая колода. Введите код доступа снова, чтобы найти игрока.", color = Aurora.Muted, fontSize = 11.sp, textAlign = TextAlign.Center)
+                                    Button(onClick = { forgetRoom() }, enabled = !joining, modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night)) {
+                                        Text("Новая партия", color = Aurora.Night, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
-                        } else {
-                            CircularProgressIndicator(color = Color(0xFFCDA4FF), strokeWidth = 3.dp, modifier = Modifier.size(34.dp))
-                            Text("Проверяем стол каждые 5 секунд", color = Aurora.Muted, fontSize = 11.sp)
+                        } else if (table.gamePhase == "waiting") {
+                            if (visible) CircularProgressIndicator(color = Aurora.Mint, strokeWidth = 3.dp, modifier = Modifier.size(30.dp))
+                            Text("Можно вернуться на главную. Комната сохранится; партия начнётся после готовности обоих игроков.", color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 11.sp)
+                        }
+                        if (table.state == "expired") {
+                            TextButton(onClick = { forgetRoom() }, enabled = !joining) { Text("Войти по коду", color = Aurora.Mint) }
                         }
                         Text("Стол #${table.tableId.uppercase()}", color = Aurora.Muted, fontSize = 11.sp)
                     }
                 }
             }
-            error?.let { message ->
+            (error ?: actionError)?.let { message ->
                 V2GlassPanel(modifier = Modifier.fillMaxWidth(), accent = Aurora.Danger) {
                     Text(message, color = Aurora.Danger, fontSize = 12.sp, modifier = Modifier.padding(14.dp))
                 }
@@ -1252,97 +1467,165 @@ internal fun V2DurakTablePreview(
     onDefendTarget: (String, Int) -> Unit = { card, _ -> onAction("defend", card) },
 ) {
     var selectedTarget by remember(table.tableId, table.revision) { mutableStateOf<Int?>(null) }
+    var selectedCard by remember(table.tableId, table.revision) { mutableStateOf<String?>(null) }
+    val active = table.gamePhase == "playing"
+    val attacking = active && table.attacker == table.seat
+    val defending = active && table.attacker != table.seat
+    val attackCards = if (table.hasLegalActions) table.legalAttackCards else {
+        val ranks = table.tableCards.flatMap { listOf(it.attack, it.defense) }.filter(String::isNotBlank).map { it.dropLast(1) }.toSet()
+        if (table.tableCards.size >= table.boutLimit) emptyList() else table.hand.filter { ranks.isEmpty() || it.dropLast(1) in ranks }
+    }
+    val defenseChoices = if (table.hasLegalActions) table.legalDefenses else buildList {
+        table.tableCards.forEachIndexed { index, pair ->
+            if (pair.defense.isBlank()) table.hand.filter { durakCardBeats(it, pair.attack, table.trump) }
+                .forEach { add(com.quantumvpn.cards.CardDefense(it, index)) }
+        }
+    }
+    val selectedDefense = defenseChoices.firstOrNull { it.card == selectedCard && (selectedTarget == null || it.target == selectedTarget) }
+    val canTake = defending && table.canTake && table.tableCards.isNotEmpty()
+    val canPass = attacking && table.canPass && table.tableCards.isNotEmpty() && table.tableCards.all { it.defense.isNotBlank() }
+    val uncovered = table.tableCards.any { it.defense.isBlank() }
+    val turnMessage = when {
+        busy -> "Обновляем стол…"
+        defending && table.tableCards.isNotEmpty() && !uncovered -> "Карты отбиты · ход соперника"
+        defending && canTake -> "Ваш ход · отбейтесь"
+        attacking && canPass -> "Ваш ход · подкиньте или отбой"
+        attacking && table.canAttack -> "Ваш ход · атакуйте"
+        else -> "Ход соперника"
+    }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("Дурак с друзьями", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-        Text(if (table.canAttack) "Ваш ход: атакуйте" else if (table.canDefend) "Ваш ход: отбейте карту" else "Ход соперника",
-            color = if (table.canAttack || table.canDefend) Aurora.Mint else Aurora.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-        V2PlayerBadge(table.opponentName, "${table.opponentCards} карт", Modifier.padding(top = 12.dp))
+        V2PlayerBadge(table.opponentName, "${table.opponentCards} карт · соперник", Modifier.padding(top = 4.dp))
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 8.dp, bottom = 2.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            repeat(table.opponentCards.coerceIn(0, 12)) { V2DurakCardBack(Modifier.size(34.dp, 49.dp)) }
+            if (table.opponentCards > 12) Text("+${table.opponentCards - 12}", color = Aurora.Muted, modifier = Modifier.padding(8.dp))
+        }
         Box(Modifier.fillMaxWidth().heightIn(min = 196.dp).padding(vertical = 9.dp).testTag("cards-table"), contentAlignment = Alignment.Center) {
             Canvas(Modifier.matchParentSize()) {
-                drawOval(Brush.radialGradient(listOf(Color(0xFF155D61), Color(0xFF073437))), topLeft = Offset(0f, 0f), size = size)
-                drawOval(Color(0xFF38C3B8).copy(alpha = .55f), topLeft = Offset(1.dp.toPx(), 1.dp.toPx()),
-                    size = androidx.compose.ui.geometry.Size(size.width - 2.dp.toPx(), size.height - 2.dp.toPx()), style = Stroke(1.dp.toPx()))
+                drawOval(Brush.radialGradient(listOf(Color(0xFF14726A), Color(0xFF073F3B), Color(0xFF042A2D))), topLeft = Offset(0f, 0f), size = size)
+                drawOval(Color(0xFFC3A373).copy(alpha = .72f), topLeft = Offset(2.dp.toPx(), 2.dp.toPx()),
+                    size = androidx.compose.ui.geometry.Size(size.width - 4.dp.toPx(), size.height - 4.dp.toPx()), style = Stroke(3.dp.toPx()))
+                drawOval(Color(0xFF40C9BA).copy(alpha = .45f), topLeft = Offset(8.dp.toPx(), 8.dp.toPx()),
+                    size = androidx.compose.ui.geometry.Size(size.width - 16.dp.toPx(), size.height - 16.dp.toPx()), style = Stroke(1.dp.toPx()))
             }
-            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Surface(color = Color(0xFF15334A), shape = RoundedCornerShape(8.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF93B6CB)),
-                            modifier = Modifier.size(40.dp, 55.dp)) { Box(contentAlignment = Alignment.Center) { Text("Q", color = Aurora.Mint, fontSize = 23.sp, fontWeight = FontWeight.Bold) } }
-                        Text("Колода ${table.deckCount}", color = Color(0xFFB6D8D6), fontSize = 9.sp, modifier = Modifier.padding(top = 4.dp))
-                        Text("♠ Отбой ${table.discardCount}", color = Aurora.Muted, fontSize = 10.sp,
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 20.dp), horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.width(60.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (table.deckCount > 0) {
+                        V2DurakCardBack(Modifier.size(42.dp, 61.dp))
+                        } else Surface(color = Color.Transparent, shape = RoundedCornerShape(6.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF8BADA8)), modifier = Modifier.size(42.dp, 61.dp)) {
+                            Box(contentAlignment = Alignment.Center) { Text("0", color = Color(0xFFB6D8D6), fontSize = 20.sp) }
+                        }
+                        Text("Колода ${table.deckCount}", color = Color(0xFFD2ECE9), fontSize = 10.sp, modifier = Modifier.padding(top = 5.dp))
+                        Text("♠ Отбой ${table.discardCount}", color = Color(0xFFD2ECE9), fontSize = 10.sp,
                             modifier = Modifier.padding(top = 5.dp).testTag("cards-discard"))
                     }
-                    if (table.trump.isNotBlank()) Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        V2DurakCard(table.trump, false) {}
-                        Text("Козырь", color = Color(0xFFB6D8D6), fontSize = 9.sp, modifier = Modifier.padding(top = 3.dp))
-                    }
-                }
-                if (table.tableCards.isEmpty()) Text("Стол свободен", color = Color(0xFFB6D8D6), fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp))
-                else Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                if (table.tableCards.isEmpty()) Text("Стол свободен", color = Color(0xFFB6D8D6), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.weight(1f).padding(vertical = 12.dp))
+                else Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     table.tableCards.forEachIndexed { index, pair ->
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            V2DurakCard(pair.attack, !busy && table.canDefend && pair.defense.isBlank()) { selectedTarget = index }
+                            Box(Modifier.width(if (pair.defense.isBlank()) 57.dp else 74.dp).height(if (pair.defense.isBlank()) 82.dp else 114.dp)) {
+                            V2DurakCard(pair.attack, !busy && defending && table.canDefend && pair.defense.isBlank(), selected = selectedTarget == index) {
+                                selectedTarget = index
+                                if (selectedCard != null && defenseChoices.none { it.card == selectedCard && it.target == index }) selectedCard = null
+                            }
+                            if (pair.defense.isNotBlank()) Box(Modifier.align(Alignment.BottomEnd)) { V2DurakCard(pair.defense, false) {} }
+                            }
                             if (selectedTarget == index) Text("Отбить эту", color = Aurora.Mint, fontSize = 9.sp)
-                            if (pair.defense.isNotBlank()) V2DurakCard(pair.defense, false) {}
                         }
                     }
                 }
+                if (table.trump.isNotBlank()) Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    V2DurakCard(table.trump, false) {}
+                    Text("Козырь", color = Color(0xFFB6D8D6), fontSize = 9.sp, modifier = Modifier.padding(top = 3.dp))
+                }
             }
         }
+        Surface(color = if (attacking || defending && canTake) Aurora.Mint.copy(alpha = .13f) else Aurora.Glass,
+            shape = RoundedCornerShape(999.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Mint.copy(alpha = .65f))) {
+            Text(turnMessage, color = Aurora.Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+        }
+        Spacer(Modifier.height(12.dp))
         V2PlayerBadge(table.name, "Вы · ${table.hand.size} карт")
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 8.dp, bottom = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             table.hand.forEach { card ->
-                val defense = table.legalDefenses.firstOrNull { it.card == card && (selectedTarget == null || it.target == selectedTarget) }
-                val legal = if (!table.hasLegalActions) table.canAttack || table.canDefend
-                    else (table.canAttack && card in table.legalAttackCards) || (table.canDefend && defense != null)
-                V2DurakCard(card, !busy && legal) {
-                    if (table.canAttack) onAction("attack", card)
-                    else if (defense != null) onDefendTarget(card, defense.target)
-                    else onAction("defend", card)
+                val defense = defenseChoices.firstOrNull { it.card == card && (selectedTarget == null || it.target == selectedTarget) }
+                val legal = (attacking && table.canAttack && card in attackCards) || (defending && table.canDefend && defense != null)
+                V2DurakCard(card, !busy && legal, selected = selectedCard == card) {
+                    if (attacking) onAction("attack", card)
+                    else if (defense != null) selectedCard = card
                 }
             }
         }
         Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onAction("take", "") }, enabled = !busy && table.canTake, shape = RoundedCornerShape(14.dp),
+            if (defending) Button(onClick = { selectedDefense?.let { onDefendTarget(it.card, it.target) } },
+                enabled = !busy && table.canDefend && selectedDefense != null, shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
-                modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Беру", fontWeight = FontWeight.Bold) }
-            Button(onClick = { onAction("pass", "") }, enabled = !busy && table.canPass, shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Aurora.Violet, contentColor = Color.White),
-                modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("cards-pass")) { Text("Отбой", fontWeight = FontWeight.Bold) }
+                modifier = Modifier.weight(1f).heightIn(min = 50.dp).testTag("cards-defend")) { Text("Отбиться", fontWeight = FontWeight.Bold) }
+            Button(onClick = { onAction("take", "") }, enabled = !busy && canTake, shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF393322), contentColor = Color(0xFFFFD577)),
+                modifier = Modifier.weight(1f).heightIn(min = 50.dp)) { Text("Беру", fontWeight = FontWeight.Bold) }
         }
-        Text(if (table.canTake && table.hasLegalActions && table.legalDefenses.isEmpty()) "Нет карты для защиты — нажмите «Беру»."
-            else "Нажмите доступную карту. Для защиты можно сначала выбрать атаку на столе.", color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 10.sp, modifier = Modifier.padding(top = 8.dp))
+        Button(onClick = { onAction("pass", "") }, enabled = !busy && canPass, shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp).heightIn(min = 50.dp).testTag("cards-pass")) { Text("Отбой", fontWeight = FontWeight.Bold) }
+        Text(if (canTake && uncovered && defenseChoices.isEmpty()) "Нет карты для защиты — нажмите «Беру»."
+            else if (defending && table.tableCards.isNotEmpty() && !uncovered) "Все карты отбиты. Ждём подкидку или отбой соперника."
+            else if (defending && table.tableCards.isEmpty()) "Ждём первую карту соперника."
+            else if (defending) "Выберите атаку и подходящую карту, затем нажмите «Отбиться»."
+            else "После раунда — добор до шести, пока есть колода.", color = Aurora.Muted, textAlign = TextAlign.Center, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
     }
 }
 
 @Composable
-private fun V2PlayerBadge(name: String, detail: String, modifier: Modifier = Modifier) {
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Surface(color = Aurora.Violet.copy(alpha = .22f), shape = CircleShape, border = androidx.compose.foundation.BorderStroke(2.dp, Aurora.Mint),
-            modifier = Modifier.size(43.dp)) {
-            Box(contentAlignment = Alignment.Center) { Text(name.take(1).uppercase().ifBlank { "?" }, color = Aurora.Text, fontSize = 22.sp, fontWeight = FontWeight.Bold) }
+private fun V2PlayerBadge(name: String, detail: String, modifier: Modifier = Modifier, available: Boolean = true) {
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Surface(color = Aurora.Mint.copy(alpha = if (available) .12f else .04f), shape = CircleShape,
+            border = androidx.compose.foundation.BorderStroke(2.dp, if (available) Aurora.Mint else Aurora.Border), modifier = Modifier.size(49.dp)) {
+            Box(contentAlignment = Alignment.Center) { Text(if (available) name.take(1).uppercase().ifBlank { "?" } else "?", color = if (available) Aurora.Mint else Aurora.Muted, fontSize = 23.sp, fontWeight = FontWeight.Bold) }
         }
-        Text(name, color = Aurora.Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(detail, color = Aurora.Muted, fontSize = 10.sp)
+        Column(Modifier.weight(1f).padding(start = 8.dp)) {
+            Text(name, color = Aurora.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(detail, color = Aurora.Muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 
 @Composable
-private fun V2DurakCard(card: String, enabled: Boolean, onClick: () -> Unit) {
+private fun V2DurakCard(card: String, enabled: Boolean, selected: Boolean = false, onClick: () -> Unit) {
     val label = durakCardLabel(card)
     val rank = card.dropLast(1).ifBlank { "?" }
     val suit = label.takeLast(1)
     val red = suit == "♥" || suit == "♦"
     val ink = if (red) Color(0xFFC7385C) else Color(0xFF13212F)
     Surface(onClick = onClick, enabled = enabled, color = Color(0xFFF4F8FC), shape = RoundedCornerShape(8.dp),
-        border = androidx.compose.foundation.BorderStroke(if (enabled) 2.dp else 1.dp, if (enabled) Aurora.Mint else Color(0xFFB8CDDD)),
-        modifier = Modifier.size(width = 54.dp, height = 77.dp).semantics { contentDescription = "Карта $label" }) {
+        border = androidx.compose.foundation.BorderStroke(if (selected) 3.dp else if (enabled) 2.dp else 1.dp, if (enabled || selected) Aurora.Mint else Color(0xFFB8CDDD)),
+        modifier = Modifier.size(width = 57.dp, height = 82.dp).semantics { contentDescription = "Карта $label" }) {
         Box(Modifier.padding(5.dp)) {
-            Text(rank, color = ink, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.align(Alignment.TopStart))
-            Text(suit, color = ink, fontWeight = FontWeight.Bold, fontSize = 27.sp, modifier = Modifier.align(Alignment.Center))
+            Text(rank, color = ink, fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.align(Alignment.TopStart))
+            Text(suit, color = ink, fontWeight = FontWeight.Bold, fontSize = 29.sp, modifier = Modifier.align(Alignment.Center))
             Text(rank, color = ink, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.align(Alignment.BottomEnd))
         }
     }
+}
+
+@Composable
+private fun V2DurakCardBack(modifier: Modifier = Modifier) {
+    Surface(color = Color(0xFF113B65), shape = RoundedCornerShape(6.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFC8D9E8)), modifier = modifier) {
+        Box(Modifier.background(Brush.linearGradient(listOf(Color(0xFF163A65), Color(0xFF265B83), Color(0xFF0A294B)))), contentAlignment = Alignment.Center) {
+            Text("Q", color = Color(0xFF65E7F0), fontSize = 21.sp, fontWeight = FontWeight.Black)
+        }
+    }
+}
+
+private fun durakCardBeats(defense: String, attack: String, trump: String): Boolean {
+    if (defense.length < 2 || attack.length < 2 || trump.length < 2) return false
+    val ranks = listOf("6", "7", "8", "9", "10", "J", "Q", "K", "A")
+    val defenseRank = ranks.indexOf(defense.dropLast(1))
+    val attackRank = ranks.indexOf(attack.dropLast(1))
+    if (defenseRank < 0 || attackRank < 0) return false
+    return if (defense.last() == attack.last()) defenseRank > attackRank
+        else defense.last() == trump.last() && attack.last() != trump.last()
 }
 
 private fun durakCardLabel(card: String): String {
@@ -1635,6 +1918,7 @@ internal fun V2Settings(
     onConnectSound: (Boolean) -> Unit = {},
     initialNotificationsOpen: Boolean = false,
     communityNetworkEnabled: Boolean = true,
+    onDisplayName: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1651,6 +1935,12 @@ internal fun V2Settings(
     var accessibilityOpen by rememberSaveable { mutableStateOf(false) }
     var resourcesOpen by rememberSaveable { mutableStateOf(false) }
     var selectedGroup by rememberSaveable { mutableStateOf<String?>(null) }
+    var nameOpen by rememberSaveable { mutableStateOf(false) }
+    if (nameOpen) {
+        AuroraNameDialog2026(uiSettings.displayName,
+            onSave = { name -> onDisplayName(name); nameOpen = false },
+            onDismiss = { nameOpen = false })
+    }
     if (resourcesOpen) {
         ResourceStatusDialog((LocalContext.current.applicationContext as QuantumVpnApplication).container.appResourceRepository) { resourcesOpen = false }
     }
@@ -1815,6 +2105,7 @@ internal fun V2Settings(
                     if (logStatus.isNotBlank()) Text(logStatus, color = Aurora.Muted, fontSize = 11.sp)
                 }
                 else -> {
+                    V2SettingsHubRow("Q", uiSettings.displayName.ifBlank { "Ваше имя" }, "Изменить имя в приложении", "settings-name") { nameOpen = true }
                     V2SettingsHubRow("⌁", "Подключение", "Протоколы, автоподключение, защита сети", "settings-connection") { selectedGroup = "Подключение" }
                     V2SettingsHubRow("♧", "Уведомления", "Статус соединения, звуки, важные события", "settings-notifications") { selectedGroup = "Уведомления" }
                     V2SettingsHubRow("◉", "Оформление", "Темы, фон, анимации и доступность", "settings-appearance") { appearanceOpen = true }

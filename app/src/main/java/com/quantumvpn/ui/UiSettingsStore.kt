@@ -82,6 +82,8 @@ data class UiSettings(
         tunMtuMode = TunMtuMode.CoreDefault,
     ),
     val onboardingCompleted: Boolean = false,
+    /** Local greeting only; sent to the game solely when the user joins a room. */
+    val displayName: String = "",
     val blockNonVpnTraffic: Boolean = false,
     val sortServersByPing: Boolean = true,
     val powerMode: PowerMode = PowerMode.Balanced,
@@ -221,6 +223,7 @@ class UiSettingsStore(
                         ?: TunMtuMode.CoreDefault,
                 ),
                 onboardingCompleted = preferences[ONBOARDING_COMPLETED] ?: false,
+                displayName = preferences[DISPLAY_NAME]?.let(::normalizeAuroraDisplayName).orEmpty(),
                 blockNonVpnTraffic = preferences[BLOCK_NON_VPN_TRAFFIC] ?: true,
                 sortServersByPing = preferences[SORT_SERVERS_BY_PING] ?: true,
                 powerMode = preferences[POWER_MODE]
@@ -408,6 +411,19 @@ class UiSettingsStore(
 
     suspend fun setOnboardingCompleted(completed: Boolean) {
         dataStore.edit { it[ONBOARDING_COMPLETED] = completed }
+    }
+
+    suspend fun completeNamedOnboarding(displayName: String) {
+        val name = requireNotNull(normalizeAuroraDisplayName(displayName)) { "Введите имя: от 2 до 24 символов" }
+        dataStore.edit {
+            it[DISPLAY_NAME] = name
+            it[ONBOARDING_COMPLETED] = true
+        }
+    }
+
+    suspend fun setDisplayName(displayName: String) {
+        val name = requireNotNull(normalizeAuroraDisplayName(displayName)) { "Введите имя: от 2 до 24 символов" }
+        dataStore.edit { it[DISPLAY_NAME] = name }
     }
 
     suspend fun setBlockNonVpnTraffic(enabled: Boolean) {
@@ -825,6 +841,7 @@ class UiSettingsStore(
             booleanPreferencesKey("vpn_hiding_neutral_session_name")
         val VPN_HIDING_TUN_MTU_MODE = stringPreferencesKey("vpn_hiding_tun_mtu_mode")
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
+        val DISPLAY_NAME = stringPreferencesKey("display_name")
         val BLOCK_NON_VPN_TRAFFIC = booleanPreferencesKey("block_non_vpn_traffic")
         val SORT_SERVERS_BY_PING = booleanPreferencesKey("sort_servers_by_ping")
         val POWER_MODE = stringPreferencesKey("power_mode")

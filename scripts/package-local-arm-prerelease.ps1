@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory)][ValidateRange(1,2147483647)][long]$VersionCode,
     [Parameter(Mandatory)][DateTimeOffset]$PublishAt,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedSigner,
+    [switch]$Immediate,
     [string]$PhysicalDeviceVerification = 'pending',
     [string]$UiVerification = 'pending'
 )
@@ -14,7 +15,9 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $folder = Join-Path $projectRoot "artifacts/$Version"
 $publication = $PublishAt.ToOffset([TimeSpan]::FromHours(3))
-if ($publication.TimeOfDay.Ticks -ne 0) { throw 'Release must be at Moscow midnight' }
+if ($Immediate) {
+    if ($Version -ceq '5.11.2' -or $VersionCode -le 501103099) { throw 'Immediate release must exceed the 5.11.3 versionCode' }
+} elseif ($publication.TimeOfDay.Ticks -ne 0) { throw 'Release must be at Moscow midnight' }
 function Read-Properties([string]$Path) {
     $out = @{}
     foreach ($line in [IO.File]::ReadAllLines($Path)) {
@@ -69,6 +72,7 @@ if ($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$') { throw 'Build 
 $dirty = @(& git -C $projectRoot status --porcelain --untracked-files=no).Count -gt 0
 $metadata = [ordered]@{ schema=2; version_name=$Version; version_code=$VersionCode; application_id='com.quantumvpn.debug'; core_tag=$core['CORE_TAG']; core_commit=$core['CORE_COMMIT']; core_patch_sha256=$core['CORE_PATCH_SHA256']; signer_sha256=$ExpectedSigner; artifacts=$artifacts }
 $build = [ordered]@{ version_name=$Version; version_code=$VersionCode; git_commit=$commit; dirty_at_build=$dirty; core_commit=$core['CORE_COMMIT']; local_build=$true; physical_device_verification=$PhysicalDeviceVerification; ui_verification=$UiVerification; publish_at_epoch=$PublishAt.ToUnixTimeSeconds(); artifacts=$artifacts }
+if ($Immediate) { $build['publication_mode'] = 'immediate' }
 foreach ($entry in @(@('release-metadata.json',$metadata), @('build-info.json',$build))) {
     [IO.File]::WriteAllText((Join-Path $folder $entry[0]), ($entry[1] | ConvertTo-Json -Depth 10) + "`n", [Text.UTF8Encoding]::new($false))
 }

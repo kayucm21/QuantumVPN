@@ -1,7 +1,9 @@
 #requires -Version 7.2
 <#
 Read-only by default. -Publish is the only mutation and is forbidden before
-the verified PublishAt midnight. The default preserves v5.11.2; later versions
+the verified PublishAt. Scheduled publication requires Moscow midnight;
+-Immediate explicitly permits a new locally packaged immediate bundle.
+The default preserves v5.11.2; later versions
 must carry an identical publish_at_epoch in their local build metadata.
 Only the existing verified draft is published after both production ABI APIs agree.
 Credentials are read in memory from the existing Git Credential Manager;
@@ -11,6 +13,7 @@ GitHub CLI flags: https://cli.github.com/manual/gh_release_edit
 [CmdletBinding()]
 param(
     [switch]$Publish,
+    [switch]$Immediate,
     [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '5.11.2',
     [ValidateRange(1,2147483647)][long]$VersionCode = 501102099,
     [DateTimeOffset]$PublishAt = '2026-10-04T00:00:00+03:00'
@@ -25,7 +28,11 @@ $script:Version = $Version
 $script:VersionCode = $VersionCode
 $script:Deadline = $PublishAt.ToUnixTimeSeconds()
 $script:PublishAt = $PublishAt.ToOffset([TimeSpan]::FromHours(3))
-if ($script:PublishAt.TimeOfDay.Ticks -ne 0) { throw 'Release must be at Moscow midnight' }
+if ($Immediate) {
+    if (-not $PSBoundParameters.ContainsKey('Version') -or -not $PSBoundParameters.ContainsKey('VersionCode') -or -not $PSBoundParameters.ContainsKey('PublishAt')) { throw 'Immediate release requires explicit version, versionCode and PublishAt' }
+    if ($Version -ceq '5.11.2' -or $VersionCode -le 501103099) { throw 'Immediate release must exceed the 5.11.3 versionCode' }
+} elseif ($script:PublishAt.TimeOfDay.Ticks -ne 0) { throw 'Release must be at Moscow midnight' }
+$script:Immediate = [bool]$Immediate
 if ($Version -ceq '5.11.2' -and ($VersionCode -ne 501102099 -or $script:Deadline -ne 1791061200)) { throw 'Legacy release identity and deadline are immutable' }
 if ($Version -cne '5.11.2' -and $VersionCode -le 501102099) { throw 'New release versionCode must exceed the published 5.11.2 versionCode' }
 $script:Signer = '4cb9e0871e8f54000da71d6e11ebb4b19c8dec4ea6737c8e266d4d000706851d'
@@ -122,6 +129,10 @@ function Get-VerifiedLocalRelease {
     $build = Convert-PrivateJson ([IO.File]::ReadAllText($buildPath)) 'local build metadata'
     if ($script:Version -ne '5.11.2') {
         Assert-ReleaseCondition ((Get-OptionalProperty $build 'publish_at_epoch') -eq $script:Deadline) 'Publication time differs from verified build schedule'
+    }
+    if ($script:Immediate) {
+        Assert-ReleaseCondition ((Get-OptionalProperty $build 'publication_mode') -ceq 'immediate') 'Immediate publication requires an explicitly packaged immediate build'
+        Assert-ReleaseCondition ((Get-OptionalProperty $build 'dirty_at_build') -eq $false) 'Immediate publication requires a committed build'
     }
     Assert-ReleaseCondition ($metadata.schema -eq 2 -and $metadata.version_name -ceq $script:Version `
         -and $metadata.version_code -eq $script:VersionCode -and $metadata.application_id -ceq 'com.quantumvpn.debug' `

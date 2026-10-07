@@ -277,7 +277,7 @@ class MainActivity : FragmentActivity() {
                     delay(750)
                 }
             }
-            val darkTheme = if (!splashDone) {
+            val darkTheme = if (!splashDone || !state.settings.onboardingCompleted || state.settings.displayName.isBlank()) {
                 true
             } else {
                 when (state.settings.themeMode) {

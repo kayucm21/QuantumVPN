@@ -32,13 +32,23 @@ try {
     [IO.File]::WriteAllText($propertiesFixture, 'sdk.dir=\\\\server\\Android SDK' + "`n")
     Assert-Test ((Read-Properties $propertiesFixture)['sdk.dir'] -ceq '\\server\Android SDK') 'UNC path decoding preserves leading double slash'
     Assert-Throws { . $packager -Version '5.11.3' -VersionCode 501103099 -PublishAt ([DateTimeOffset]'2026-10-06T00:00:00.500+03:00') -ExpectedSigner $signerFixture } 'Moscow midnight'
+    $immediateFixture = [DateTimeOffset]'2026-10-07T15:42:31+03:00'
+    Assert-Throws { . $packager -Immediate -Version '5.11.3' -VersionCode 501103099 -PublishAt $immediateFixture -ExpectedSigner $signerFixture } 'must exceed'
+    . $packager -Immediate -Version '5.11.4' -VersionCode 501104099 -PublishAt $immediateFixture -ExpectedSigner $signerFixture
+    Assert-Test ($publication -eq $immediateFixture) 'Explicit immediate packaging accepts a non-midnight timestamp'
 
     . $publisher
     Assert-Test ($script:Version -ceq '5.11.2' -and $script:VersionCode -eq 501102099 -and $script:Deadline -eq 1791061200) 'Legacy defaults unchanged'
     Assert-Throws { . $publisher -Version '5.11.2' -VersionCode 501102099 -PublishAt ([DateTimeOffset]'2026-10-03T00:00:00+03:00') } 'immutable'
     Assert-Throws { . $publisher -Version '5.11.3' -VersionCode 501103099 -PublishAt ([DateTimeOffset]'2026-10-06T00:00:00.001+03:00') } 'Moscow midnight'
     Assert-Throws { . $publisher -Version '5.11.3' -VersionCode 501102099 -PublishAt $timeFixture } 'must exceed'
+    Assert-Throws { . $publisher -Immediate } 'requires explicit'
+    Assert-Throws { . $publisher -Immediate -Version '5.11.3' -VersionCode 501103099 -PublishAt $immediateFixture } 'must exceed'
+    Assert-Throws { . $publisher -Immediate -Version '5.11.2' -VersionCode 501104099 -PublishAt $immediateFixture } 'must exceed'
+    . $publisher -Immediate -Version '5.11.4' -VersionCode 501104099 -PublishAt $immediateFixture
+    Assert-Test ($script:Immediate -and $script:Deadline -eq $immediateFixture.ToUnixTimeSeconds()) 'Explicit immediate publisher binds exact non-midnight timestamp'
     . $publisher -Version '5.11.3' -VersionCode 501103099 -PublishAt $timeFixture
+    Assert-Test (-not $script:Immediate) 'Scheduled publisher remains the default'
     Assert-Test ($script:VersionCode -eq 501103099 -and $script:VersionCode -gt 501102099) 'Explicit monotonic code, no derived formula'
     Assert-Test ($script:Deadline -eq $timeFixture.ToUnixTimeSeconds() -and $script:Tag -ceq 'v5.11.3') 'New release binds exact deadline and tag'
     $script:ArtifactRoot = $fixtureDirectory
@@ -163,6 +173,51 @@ try {
     $result = Invoke-Quantum2Publication -Publish
     Assert-Test ($result.Status -ceq 'AlreadyPublished' -and $script:EditCalls -eq 1 -and $script:HeadCalls -eq 2) 'Concurrent publication also verifies both downloads'
     Assert-Test ([Environment]::GetEnvironmentVariable('GH_TOKEN', 'Process') -ceq 'existing-offline-fixture') 'Private token restored after all paths'
+    # Immediate publication must verify a new, clean, explicitly packaged bundle.
+    # Keep all hashing, asset and VDS guards active in the same publisher path.
+    $fixtureFunctions = @{}
+    foreach ($functionName in @('Get-UtcEpoch', 'Get-TransientGitCredential', 'Get-GitHubTextAsset', 'Get-GitHubRelease', 'Invoke-PrivateProcess')) {
+        $fixtureFunctions[$functionName] = (Get-Item "Function:$functionName").ScriptBlock
+    }
+    . $publisher -Immediate -Version '5.11.4' -VersionCode 501104099 -PublishAt $immediateFixture
+    foreach ($functionName in $fixtureFunctions.Keys) { Set-Item "Function:$functionName" $fixtureFunctions[$functionName] }
+    $script:ArtifactRoot = $fixtureDirectory
+    $script:TestArtifacts = @()
+    foreach ($abi in @('arm64-v8a', 'armeabi-v7a')) {
+        $name = "QuantumVPN-5.11.4-operator-debug-$abi.apk"
+        $path = Join-Path $fixtureDirectory $name
+        [IO.File]::WriteAllText($path, "Immediate checksum-only APK fixture $abi", [Text.Encoding]::ASCII)
+        $sha = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText($path + '.sha256', "$sha  $name`n", [Text.Encoding]::ASCII)
+        $script:TestArtifacts += [pscustomobject]@{ abi=$abi; apk_file=$name; apk_sha256=$sha; apk_size=(Get-Item -LiteralPath $path).Length }
+    }
+    $script:TestMetadata.version_name = '5.11.4'
+    $script:TestMetadata.version_code = 501104099
+    $script:TestMetadata.artifacts = $script:TestArtifacts
+    $script:TestBuild.version_name = '5.11.4'
+    $script:TestBuild.version_code = 501104099
+    $script:TestBuild.publish_at_epoch = $script:Deadline
+    $script:TestBuild.artifacts = $script:TestArtifacts
+    Save-FixtureMetadata
+    Assert-Throws { Get-VerifiedLocalRelease } 'explicitly packaged immediate build'
+    $script:TestBuild['publication_mode'] = 'immediate'
+    Save-FixtureMetadata
+    Assert-Throws { Get-VerifiedLocalRelease } 'committed build'
+    $script:TestBuild['dirty_at_build'] = $true
+    Save-FixtureMetadata
+    Assert-Throws { Get-VerifiedLocalRelease } 'committed build'
+    $script:TestBuild['dirty_at_build'] = $false
+    Save-FixtureMetadata
+    $local = Get-VerifiedLocalRelease
+    Assert-Test ($local.Files.Count -eq 6) 'Immediate bundle verifies both APKs, checksums and metadata'
+    $script:TestDraft = $true
+    $script:PublishRace = $false
+    $script:TestClock = $script:Deadline
+    $previousEdits = $script:EditCalls
+    $result = Invoke-Quantum2Publication
+    Assert-Test ($result.Status -ceq 'ReadyToPublish' -and $script:EditCalls -eq $previousEdits) 'Immediate mode remains read-only without Publish'
+    $result = Invoke-Quantum2Publication -Publish
+    Assert-Test ($result.Status -ceq 'Published' -and $script:EditCalls -eq $previousEdits + 1) 'Explicit immediate publication retains verification guards'
     [pscustomobject]@{ Status='Passed'; Assertions=$script:testCount; NetworkCalls=0; ExternalMutations=0 } | ConvertTo-Json
 } finally {
     [Environment]::SetEnvironmentVariable('GH_TOKEN', $originalToken, 'Process')

@@ -95,6 +95,8 @@ val prepareQuantumUiReview by tasks.registering(Sync::class) {
     from("src/androidTest/java") {
         include("com/quantumvpn/ui/Quantum2InstrumentedTest.kt")
         include("com/quantumvpn/ui/Aurora2026InstrumentedTest.kt")
+        include("com/quantumvpn/ui/AuroraOnboardingInstrumentedTest.kt")
+        include("com/quantumvpn/cards/CardTableSessionInstrumentedTest.kt")
     }
     into(layout.buildDirectory.dir("quantum2-ui-review-sources"))
 }

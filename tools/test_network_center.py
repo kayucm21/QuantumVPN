@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from tools.quantumvpn_control_quality import explain_route
+from tools.quantumvpn_target_scan import catalog_dialog, scan_dialog
 from tools import quantumvpn_network_center as network_center
 from tools.quantumvpn_network_center import (
     NETWORK_VIEWS,
@@ -395,6 +396,75 @@ class NetworkCenterTests(unittest.TestCase):
         self.assertNotIn("<img>", page)
         self.assertIn("&lt;script&gt;bad&lt;/script&gt;", page)
         self.assertNotIn("value=rollback", page)
+
+    def catalog_fragment(self, source="production", view="routes", can_write=True):
+        fields = (f'<input type=hidden name=csrf value="catalog-token">'
+                  f'<input type=hidden name=return_tab value=network>'
+                  f'<input type=hidden name=return_view value={view}>'
+                  f'<input type=hidden name=policy_source value={source}>')
+        scanner = ('<form id=routing-scan-form method=post action=/operator/routing>'
+                   '<input type=hidden name=action value=scan>' + fields
+                   + '<textarea name=routing_scan_targets></textarea><button '
+                   + ("disabled" if not can_write else "") + '>Проверить</button></form>')
+        findings = [{"target": "2606:4700:4700::1111", "kind": "ip", "status": "ok", "latency_ms": 40}]
+        results = scan_dialog(findings, "fresh-evidence-token", "catalog-token", can_write=can_write)
+        # HTTP owner supplies context on the existing apply form, not the hub.
+        results = results.replace('</form>', fields.replace('<input type=hidden name=csrf value="catalog-token">', '') + '</form>')
+        return scanner + catalog_dialog("catalog-token", can_write=can_write) + results
+
+    def test_trusted_catalog_is_adjacent_to_lab_without_nested_or_duplicate_forms(self):
+        for view in ("overview", "routes", "dns"):
+            with self.subTest(view=view):
+                fragment = self.catalog_fragment(view="dns" if view == "dns" else "routes")
+                page = render_network_hub({}, "hub-token", payload=self.policy(), active=view,
+                                          panel_html={"catalog": fragment})
+                parser = FormParser()
+                parser.feed(page)
+                self.assertFalse(parser.nested)
+                self.assertIn('type=button class=secondary data-catalog-open', page)
+                self.assertIn("Найти и сканировать цели", page)
+                self.assertIn("IPv4 · IPv6 · домены", page)
+                self.assertIn("это не список всех адресов Интернета", page)
+                self.assertIn("2606:4700:4700::1111", page)
+                self.assertIn(fragment, page)
+                for identifier in ('id=routing-scan-form', 'id="routing-catalog-dialog"', 'id="routing-scan-dialog"'):
+                    self.assertEqual(page.count(identifier), 1)
+                self.assertGreater(page.index('network-catalog-tools'), page.index('action=/operator/network/lab'))
+
+    def test_catalog_context_is_preserved_for_scans_and_reviewed_apply(self):
+        for source in ("production", "draft", "staging"):
+            for view in ("routes", "dns"):
+                with self.subTest(source=source, view=view):
+                    page = render_network_hub({}, "hub-token", payload=self.policy(), active=view,
+                                              policy_source=source, panel_html={"catalog": self.catalog_fragment(source, view)})
+                    parser = FormParser()
+                    parser.feed(page)
+                    catalog_forms = [form for form in parser.forms if form["fields"].get("action") in {"scan", "apply_scan"}]
+                    self.assertEqual(len(catalog_forms), 2)
+                    for form in catalog_forms:
+                        self.assertEqual(form["action"], "/operator/routing")
+                        for key, value in (("csrf", "catalog-token"), ("return_tab", "network"),
+                                           ("return_view", view), ("policy_source", source)):
+                            self.assertEqual(form["fields"].get(key), value)
+
+    def test_catalog_appears_only_on_route_lab_views_and_is_optional(self):
+        for view in NETWORK_VIEWS:
+            with self.subTest(view=view):
+                page = render_network_hub({}, "hub-token", payload=self.policy(), active=view,
+                                          panel_html={"catalog": "<div>trusted-catalog-marker</div>"})
+                self.assertEqual("trusted-catalog-marker" in page, view in {"overview", "routes", "dns"})
+                absent = render_network_hub({}, "hub-token", payload=self.policy(), active=view)
+                self.assertNotIn("data-catalog-open", absent)
+
+    def test_viewer_can_open_catalog_search_but_supplied_scan_writes_are_disabled(self):
+        page = render_network_hub({}, "hub-token", payload=self.policy(), active="routes", can_write=False,
+                                  panel_html={"catalog": self.catalog_fragment(can_write=False)})
+        self.assertIn('type=button class=secondary data-catalog-open', page)
+        self.assertIn('data-can-write="0"', page)
+        self.assertIn('id="routing-catalog-search"', page)
+        self.assertIn('id="routing-catalog-file" accept=".txt,text/plain" disabled', page)
+        self.assertIn('id="routing-catalog-scan" disabled', page)
+        self.assertIn('<button disabled>Проверить</button>', page)
 
 
 if __name__ == "__main__":

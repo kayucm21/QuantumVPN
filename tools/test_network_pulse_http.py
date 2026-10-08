@@ -45,6 +45,58 @@ def hidden_fields(page):
     return parser.fields
 
 
+class _NetworkMarkup(HTMLParser):
+    """Inspect rendered DOM controls, not matching IDs inside JavaScript strings."""
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self, page):
+        super().__init__()
+        self.stack = []
+        self.ids = {}
+        self.forms = {}
+        self.form_field_names = {}
+        self.elements = []
+        self.nested_forms = []
+        self.feed(page)
+
+    def handle_starttag(self, tag, pairs):
+        attrs = dict(pairs)
+        parents = list(self.stack)
+        forms = [parent for parent in parents if parent[0] == "form"]
+        form_id = attrs.get("id") if tag == "form" else forms[-1][1].get("id") if forms else None
+        hidden = any("hidden" in parent_attrs or "display:none" in parent_attrs.get("style", "").replace(" ", "").lower()
+                     for _, parent_attrs in [*parents, (tag, attrs)])
+        disabled = "disabled" in attrs or any(parent_tag == "fieldset" and "disabled" in parent_attrs
+                                               for parent_tag, parent_attrs in parents)
+        item = {"tag": tag, "attrs": attrs, "form": form_id, "hidden": hidden, "disabled": disabled}
+        self.elements.append(item)
+        if attrs.get("id"):
+            self.ids.setdefault(attrs["id"], []).append(item)
+        if tag == "form":
+            if forms:
+                self.nested_forms.append((forms[-1][1].get("id"), attrs.get("id")))
+            if form_id:
+                self.forms[form_id] = {}
+                self.form_field_names[form_id] = []
+        elif tag == "input" and form_id in self.forms and attrs.get("type") == "hidden" and attrs.get("name"):
+            self.forms[form_id][attrs["name"]] = attrs.get("value", "")
+            self.form_field_names[form_id].append(attrs["name"])
+        if tag not in self.VOID:
+            self.stack.append((tag, attrs))
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
+
+    def one(self, element_id):
+        items = self.ids.get(element_id, [])
+        if len(items) != 1:
+            raise AssertionError(f"Expected one {element_id}, found {len(items)}")
+        return items[0]
+
+
 class NetworkPulseHTTPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -91,6 +143,12 @@ class NetworkPulseHTTPTests(unittest.TestCase):
             db.execute("delete from audit")
             db.commit()
         self.cookie = self.make_cookie("owner-test")
+        # A real browser retains the exact signed cookie across the scan POST
+        # and redirect GET. Reissuing it with a new expiry second would change
+        # its session-bound CSRF and invalidate evidence in the test fixture.
+        self.role_cookies = {"owner-test": self.cookie,
+                             "operator-test": self.make_cookie("operator-test"),
+                             "viewer-test": self.make_cookie("viewer-test")}
         self.csrf = self.csrf_for(self.cookie)
         self.secret = "dd" + "ab" * 16
         self.links = {
@@ -125,7 +183,7 @@ class NetworkPulseHTTPTests(unittest.TestCase):
             return json.dumps([list(row) for row in db.execute("select action,detail from audit")], ensure_ascii=False)
 
     def request(self, path, data=None, *, user=None, headers=None, raw=None):
-        cookie = self.make_cookie(user) if user else self.cookie
+        cookie = self.role_cookies[user] if user else self.cookie
         request_headers = {"Cookie": cookie, "Host": urlsplit(ORIGIN).netloc}
         if data is not None or raw is not None:
             request_headers.update({"Origin": ORIGIN, "Sec-Fetch-Site": "same-origin",
@@ -140,7 +198,7 @@ class NetworkPulseHTTPTests(unittest.TestCase):
             return response.status, dict(response.headers), response.read().decode("utf-8", errors="replace")
 
     def form(self, user=None, **values):
-        cookie = self.make_cookie(user) if user else self.cookie
+        cookie = self.role_cookies[user] if user else self.cookie
         return {"csrf": self.csrf_for(cookie), **values}
 
     def assert_network_redirect(self, status, headers, view):
@@ -178,6 +236,175 @@ class NetworkPulseHTTPTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertNotIn(secret, body)
                 self.assertNotIn("otpauth://", body)
+
+    def test_catalog_has_one_live_scanner_and_dialog_set_without_nested_forms(self):
+        for user in ("owner-test", "operator-test", "viewer-test"):
+            writable = user != "viewer-test"
+            for view in ("overview", "routes", "dns"):
+                with self.subTest(user=user, view=view):
+                    status, _, page = self.request("/operator?tab=network&network_view=" + view, user=user)
+                    self.assertEqual(status, 200)
+                    markup = _NetworkMarkup(page)
+                    self.assertEqual(markup.nested_forms, [])
+                    for element_id in ("routing-scan-form", "routing-scan-dialog", "routing-catalog-dialog"):
+                        self.assertFalse(markup.one(element_id)["hidden"])
+                    catalog = markup.one("routing-catalog-dialog")
+                    self.assertEqual(catalog["attrs"]["data-can-write"], "1" if writable else "0")
+                    self.assertFalse(markup.one("routing-catalog-search")["disabled"])
+                    self.assertEqual(markup.one("routing-catalog-select-all")["disabled"], not writable)
+                    self.assertEqual(markup.one("routing-catalog-file")["disabled"], not writable)
+                    self.assertEqual(markup.one("routing-catalog-import")["disabled"], not writable)
+                    textarea = [item for item in markup.elements if item["tag"] == "textarea"
+                                and item["form"] == "routing-scan-form"]
+                    self.assertEqual(len(textarea), 1)
+                    self.assertEqual(textarea[0]["disabled"], not writable)
+                    self.assertTrue(markup.one("routing-scan-confirm")["disabled"])
+                    launch = [item for item in markup.elements if "data-catalog-open" in item["attrs"] and not item["hidden"]]
+                    self.assertEqual(len(launch), 1)
+                    source = markup.forms["routing-scan-form"]
+                    self.assertEqual(source["action"], "scan")
+                    self.assertEqual(source["csrf"], self.csrf_for(self.role_cookies[user]))
+                    self.assertEqual(source["return_tab"], "network")
+                    self.assertEqual(source["return_view"], "dns" if view == "dns" else "routes")
+                    self.assertEqual(source["policy_source"], "draft")
+                    for name in ("csrf", "return_tab", "return_view", "policy_source"):
+                        self.assertEqual(markup.form_field_names["routing-scan-form"].count(name), 1)
+
+    def test_unrelated_network_views_have_no_active_catalog_or_scanner(self):
+        for view in ("nodes", "ai", "mtproto"):
+            with self.subTest(view=view):
+                status, _, page = self.request("/operator?tab=network&network_view=" + view)
+                self.assertEqual(status, 200)
+                markup = _NetworkMarkup(page)
+                self.assertEqual(markup.nested_forms, [])
+                for element_id in ("routing-scan-form", "routing-scan-dialog", "routing-catalog-dialog"):
+                    self.assertFalse(any(not item["hidden"] for item in markup.ids.get(element_id, [])))
+                self.assertFalse(any("data-catalog-open" in item["attrs"] and not item["hidden"] for item in markup.elements))
+
+    def scanned_network_page(self, view="routes", targets="example.com\nmedia.example.com\n2606:4700:4700::1111", user=None):
+        status, _, page = self.request("/operator?tab=network&network_view=" + view, user=user)
+        self.assertEqual(status, 200)
+        fields = _NetworkMarkup(page).forms["routing-scan-form"]
+        with mock.patch.object(self.panel, "_routing_scan_addresses", side_effect=lambda kind, target: [target] if kind == "ip" else ["1.1.1.1"]), \
+                mock.patch.object(self.panel, "_routing_tcp_latency_ms", return_value=19):
+            status, headers, _ = self.request("/operator/routing", {**fields, "routing_scan_targets": targets}, user=user)
+        query = self.assert_network_redirect(status, headers, view)
+        self.assertEqual(query["policy_source"], ["draft"])
+        status, _, page = self.request(headers["Location"], user=user)
+        self.assertEqual(status, 200)
+        return page
+
+    def test_selected_scan_returns_to_network_with_refreshed_token_and_no_policy_write(self):
+        old_token = ""
+        for view in ("routes", "dns"):
+            with self.subTest(view=view):
+                before = self.settings()
+                targets = f"{view}.example.com\nmedia.example.com\n2606:4700:4700::1111"
+                page = self.scanned_network_page(view, targets, user="operator-test")
+                markup = _NetworkMarkup(page)
+                token = markup.forms["routing-scan-apply"]["scan_token"]
+                self.assertTrue(token)
+                self.assertNotEqual(token, old_token)
+                old_token = token
+                self.assertEqual(markup.one("routing-scan-dialog")["attrs"]["data-auto-open"], "1")
+                self.assertIn("open", markup.one("routing-scan-dialog")["attrs"])
+                self.assertFalse(markup.one("routing-scan-confirm")["disabled"])
+                for text in ("Подтвердить и добавить в черновик", "Публичный IPv6", "2606:4700:4700::1111 · 19 мс"):
+                    self.assertTrue(text in page, f"Missing scan evidence: {text}")
+                apply_fields = markup.forms["routing-scan-apply"]
+                self.assertEqual(apply_fields["return_tab"], "network")
+                self.assertEqual(apply_fields["return_view"], view)
+                self.assertEqual(apply_fields["policy_source"], "draft")
+                after = self.settings()
+                self.assertEqual(self.panel.routing_payload(after), self.panel.routing_payload(before))
+                self.assertEqual(after["routing_draft_payload"], before["routing_draft_payload"])
+                self.assertEqual(after["routing_staging_payload"], before["routing_staging_payload"])
+                findings = json.loads(after["routing_last_scan"])
+                self.assertEqual([item["target"] for item in findings], targets.splitlines())
+                self.assertTrue(all(item["status"] == "ok" and item["latency_ms"] == 19 for item in findings))
+
+    def test_network_scan_confirmation_adds_selected_targets_to_draft_only(self):
+        before = self.settings()
+        page = self.scanned_network_page("dns", user="operator-test")
+        fields = _NetworkMarkup(page).forms["routing-scan-apply"]
+        # Merely scanning, opening or submitting no selection never edits rules.
+        status, headers, _ = self.request("/operator/routing", fields, user="operator-test")
+        query = self.assert_network_redirect(status, headers, "dns")
+        self.assertTrue(query["flash"][0].startswith("Не сохранено:"))
+        self.assertEqual(self.settings()["routing_draft_payload"], before["routing_draft_payload"])
+        selected = {**fields, "scan_selected": ["0", "1", "2"],
+                    "scan_direction_0": "proxy", "scan_direction_1": "block", "scan_direction_2": "direct"}
+        state = self.settings()
+        status, _, _ = self.request("/operator/routing", {**selected, "csrf": "wrong"}, user="operator-test")
+        self.assertEqual(status, 403)
+        self.assertEqual(self.settings(), state)
+        with mock.patch.object(self.panel, "_routing_scan_addresses", side_effect=lambda kind, target: [target] if kind == "ip" else ["1.1.1.1"]), \
+                mock.patch.object(self.panel, "_routing_tcp_latency_ms", return_value=20):
+            status, headers, _ = self.request("/operator/routing", selected, user="operator-test")
+        query = self.assert_network_redirect(status, headers, "dns")
+        self.assertEqual(query["policy_source"], ["draft"])
+        self.assertTrue(query["flash"][0].startswith("Добавлено в черновик: 3"))
+        after = self.settings()
+        draft = json.loads(after["routing_draft_payload"])
+        self.assertIn("example.com", draft["rules"]["proxy_domains"])
+        self.assertIn("media.example.com", draft["rules"]["block_domains"])
+        self.assertIn("2606:4700:4700::1111/128", draft["rules"]["direct_cidrs"])
+        self.assertEqual(self.panel.routing_payload(after), self.panel.routing_payload(before))
+        self.assertEqual(after["routing_staging_payload"], before["routing_staging_payload"])
+        self.assertEqual(after["routing_scan_token"], "")
+        self.assertNotIn("routing:publish", self.audit_text())
+        self.assertNotIn("control:apply", self.audit_text())
+        status, headers, _ = self.request("/operator/routing", selected, user="operator-test")
+        query = self.assert_network_redirect(status, headers, "dns")
+        self.assertIn("уже использована", query["flash"][0])
+        self.assertEqual(self.settings()["routing_draft_payload"], after["routing_draft_payload"])
+
+    def test_network_catalog_scan_and_confirmation_retain_role_origin_and_csrf_guards(self):
+        before = self.settings()
+        for action in ("scan", "apply_scan"):
+            values = self.form(action=action, return_tab="network", return_view="routes", policy_source="draft",
+                               routing_scan_targets="example.com", scan_token="forged", scan_selected=["0"])
+            for headers in ({"Origin": "https://evil.example"}, {"Sec-Fetch-Site": "cross-site"}):
+                with self.subTest(action=action, headers=headers):
+                    status, _, _ = self.request("/operator/routing", values, headers=headers)
+                    self.assertEqual(status, 403)
+            status, _, _ = self.request("/operator/routing", {**values, "csrf": "wrong"})
+            self.assertEqual(status, 403)
+            status, _, _ = self.request("/operator/routing", {**values, "csrf": self.csrf_for(self.role_cookies["viewer-test"])}, user="viewer-test")
+            self.assertEqual(status, 403)
+        self.assertEqual(self.settings(), before)
+
+    def test_local_ai_persists_only_known_error_reason_and_success_clears_it(self):
+        with mock.patch.object(self.panel, "ai_operations_snapshot", return_value={}), \
+                mock.patch.object(self.panel, "network_guard_snapshot", return_value={}), \
+                mock.patch.object(self.panel.autopilot, "plan_actions", return_value={"allowed_actions": []}), \
+                mock.patch.object(self.panel, "operations_status_snapshot", return_value={}), \
+                mock.patch.object(self.panel.bot_status, "fact_alert", return_value={"fingerprint": "test-only", "should_notify": False}), \
+                mock.patch.object(self.panel, "telegram_send") as telegram, \
+                mock.patch.object(self.panel, "run_autopilot_step") as autopilot:
+            with closing(self.panel.conn()) as db:
+                self.panel.set_settings(db, {"ai_advisor_enabled": "1", "ai_autopilot_enabled": "0",
+                                             "ai_telegram_enabled": "0", "telegram_alerts_enabled": "0"})
+                db.commit()
+                for reason, expected in (("recommendation_not_allowed", "recommendation_not_allowed"), ("private-untrusted-output", "")):
+                    with self.subTest(reason=reason), mock.patch.object(self.panel.llama, "analyze", side_effect=self.panel.llama.LlamaError(
+                            "invalid_response", reason=reason)):
+                        result = self.panel._run_ai_analysis(db, self.panel.settings(db), "isolated-unit-test")
+                        self.assertFalse(result["ok"])
+                        state = self.panel.settings(db)
+                        self.assertEqual(state["ai_last_error"], "invalid_response")
+                        self.assertEqual(state["ai_last_error_reason"], expected)
+                        self.assertNotIn("private-untrusted-output", json.dumps(state))
+                self.panel.set_settings(db, {"ai_last_error_reason": "recommendation_not_allowed"})
+                db.commit()
+                with mock.patch.object(self.panel.llama, "analyze", return_value={
+                        "advice": "Проверки завершены.", "snapshot": {}, "analysis": {"recommendations": []}}):
+                    result = self.panel._run_ai_analysis(db, self.panel.settings(db), "isolated-unit-test")
+                self.assertTrue(result["ok"])
+                self.assertEqual(self.panel.settings(db)["ai_last_error"], "")
+                self.assertEqual(self.panel.settings(db)["ai_last_error_reason"], "")
+            telegram.assert_not_called()
+            autopilot.assert_not_called()
 
     def test_lab_normalizes_target_and_preserves_all_settings(self):
         before = self.settings()

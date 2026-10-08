@@ -2,51 +2,83 @@
 from __future__ import annotations
 
 import html
+import ipaddress
+from datetime import datetime, timedelta, timezone
+
+
+def _ip_label(value) -> str:
+    """Derive address family from actual numeric evidence, not a claimed flag."""
+    try:
+        address = ipaddress.ip_address(value)
+    except (TypeError, ValueError):
+        return "IP: тип неизвестен"
+    return f"IPv{address.version}"
+
+
+def _checked_label(value) -> str:
+    if type(value) is not int or value <= 0:
+        return "Время замера не указано"
+    try:
+        return datetime.fromtimestamp(value, timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M:%S МСК")
+    except (ValueError, OverflowError, OSError):
+        return "Время замера не указано"
 
 
 def scan_dialog(findings: list[dict], token: str, csrf: str, *, auto_open: bool = False,
                 can_write: bool = True, reserve_available: bool = False, limit: int = 24) -> str:
     escape = lambda value: html.escape(str(value), quote=True)
+    limit = min(24, max(1, limit)) if type(limit) is int else 24
     labels = {"proxy": "Через VPN", "direct": "Напрямую", "block": "Блок-лист", "observe": "Решение оператора"}
     statuses = {"ok": "Доступна", "timeout": "TCP/443 не ответил", "unresolved": "Нет публичного DNS-адреса",
                 "budget": "Истёк лимит времени"}
-    rows = []
+    rows, checked_times, any_ready = [], [], False
     for index, item in enumerate(findings[:limit]):
         if not isinstance(item, dict):
             continue
         kind = item.get("kind")
         target = str(item.get("target") or "")[:253]
         latency = item.get("latency_ms")
-        latency_label = f"{latency} мс" if isinstance(latency, int) and latency > 0 else "Не измерена"
-        ready = item.get("status") == "ok" and bool(token) and can_write
+        measured_target = type(latency) is int and 0 < latency <= 60_000
+        latency_label = f"{latency} мс" if measured_target else "Не измерена"
+        ready = kind in ("domain", "ip") and item.get("status") == "ok" and measured_target and bool(token) and can_write
+        any_ready = any_ready or ready
+        checked_at = item.get("checked_at")
+        checked_label = _checked_label(checked_at)
+        if checked_label != "Время замера не указано":
+            checked_times.append(checked_at)
         recommendation = item.get("recommendation")
         default_direction = recommendation if recommendation in {"proxy", "direct", "block"} else "proxy"
         directions = ("proxy", "direct", "block") if kind == "domain" else ("proxy", "direct")
         options = "".join(f'<option value="{direction}" {"selected" if direction == default_direction else ""}>{labels[direction]}</option>'
                           for direction in directions)
         samples = []
-        for sample in (item.get("addresses") or [])[:3]:
+        addresses = item.get("addresses")
+        for sample in addresses[:3] if isinstance(addresses, list) else []:
             if not isinstance(sample, dict):
                 continue
             measured = sample.get("latency_ms")
-            samples.append(escape(sample.get("address") or "") + " · " +
-                           (f"{measured} мс" if isinstance(measured, int) and measured > 0 else "нет TCP-ответа"))
+            address = str(sample.get("address") or "")[:253]
+            samples.append(escape(address) + " · " +
+                           (f"{measured} мс" if type(measured) is int and 0 < measured <= 60_000 else "нет TCP-ответа") +
+                           f'<small>{escape(_ip_label(address))} · TCP/443 с VDS · {escape(checked_label)}</small>')
+        target_label = ("Домен / поддомен" if kind == "domain" else
+                        ("Публичный " + _ip_label(target) if kind == "ip" else "Диапазон, не отдельный сервер"))
         backup = ("При сбое VPN проверить профиль «Резерв TLS» в APK; его путь здесь не измерялся."
                   if reserve_available else "Резерв TLS не настроен или выключен; запасной путь не измерялся.")
         rows.append(
             '<tr><td><label class="scan-pick">'
             f'<input type="checkbox" name="scan_selected" value="{index}" aria-label="Выбрать {escape(target)}" {"" if ready else "disabled"}>'
-            f'<span><b>{escape(target)}</b><small>{"Домен / поддомен" if kind == "domain" else "Публичный IP"}</small></span></label></td>'
+            f'<span><b>{escape(target)}</b><small>{escape(target_label)}</small></span></label></td>'
             f'<td><span class="{"ok" if ready else "warn"}">{escape(statuses.get(item.get("status"), "Нет данных"))}</span>'
-            f'<small>TCP/443 с VDS: {escape(latency_label)}</small></td>'
+            f'<small>TCP/443 с VDS: {escape(latency_label)}</small><small>Замер: {escape(checked_label)}</small></td>'
             f'<td class="scan-addresses">{"<br>".join(samples) or "Адрес не получен"}</td>'
             f'<td><b>{escape(labels.get(recommendation, labels["observe"]))}</b><small>{escape(item.get("reason") or "")}</small>'
             f'<small class="scan-backup">{escape(backup)}</small></td>'
             f'<td><label>В черновик<select name="scan_direction_{index}" aria-label="Направление для {escape(target)}" {"" if ready else "disabled"}>{options}</select></label></td></tr>'
         )
-    checked = max((int(item.get("checked_at") or 0) for item in findings if isinstance(item, dict)), default=0)
+    checked = max(checked_times, default=0)
     table = ("".join(rows) or '<tr><td colspan="5">Введите конкретные цели и запустите проверку.</td></tr>')
-    ready = bool(token) and can_write and any(item.get("status") == "ok" for item in findings if isinstance(item, dict))
+    ready = any_ready
     return f'''<dialog id="routing-scan-dialog" class="routing-scan-dialog" aria-labelledby="routing-scan-title" data-auto-open="{1 if auto_open else 0}" {"open" if auto_open else ""}>
       <header class="scan-dialog-head"><div><h2 id="routing-scan-title">Результаты проверки целей</h2><p>Домены, поддомены и публичные IP · до {limit} целей за запуск</p></div><button type="button" class="secondary" data-scan-close aria-label="Закрыть результаты">Закрыть</button></header>
       <p id="routing-scan-progress" class="scan-progress" role="status" aria-live="polite">{"Проверка завершена. Выберите цели и направления для черновика." if findings else "Готов к проверке."}</p>
@@ -147,7 +179,7 @@ def catalog_dialog(csrf: str, *, can_write: bool = True) -> str:
     return f'''<dialog id="routing-catalog-dialog" class="routing-catalog-dialog" aria-labelledby="routing-catalog-title" data-can-write="{1 if can_write else 0}">
       <header class="scan-dialog-head"><div><h2 id="routing-catalog-title">Каталог целей</h2><p>Все известные цели из ваших правил, списков и проверок — без повторов</p></div><button type="button" class="secondary" data-catalog-close aria-label="Закрыть каталог">Закрыть</button></header>
       <p class="muted">Это каталог подключённых списков, а не всех доменов Интернета. Поиск не сканирует сеть. Для замера выберите до 24 доменов, поддоменов или публичных IP.</p>
-      <div class="catalog-search"><label>Поиск домена, поддомена или IP<input type="search" id="routing-catalog-search" maxlength="160" placeholder="Домен, поддомен или IP…" autocomplete="off"></label><label>Тип<select id="routing-catalog-kind"><option value="">Все типы</option><option value="domain">Домены и поддомены</option><option value="ip">Публичные IP</option><option value="cidr">IP-сети (CIDR)</option></select></label></div>
+      <div class="catalog-search"><label>Поиск домена, поддомена или IP<input type="search" id="routing-catalog-search" maxlength="160" placeholder="Домен, поддомен или IPv4 / IPv6…" autocomplete="off"></label><label>Тип<select id="routing-catalog-kind"><option value="">Все типы</option><option value="domain">Домены и поддомены</option><option value="ip">Публичные IP (все)</option><option value="ipv4">Публичные IPv4</option><option value="ipv6">Публичные IPv6</option><option value="cidr">IP-сети (CIDR)</option></select></label></div>
       <p id="routing-catalog-status" class="scan-progress" role="status" aria-live="polite">Откройте каталог для загрузки списка.</p>
       <div class="catalog-pickbar"><label class="scan-select-all"><input type="checkbox" id="routing-catalog-select-all" {disabled}> Выбрать доступные на странице</label><button type="button" id="routing-catalog-clear" class="secondary" {disabled}>Снять выбор</button></div>
       <div class="scan-table-wrap"><table class="catalog-table"><thead><tr><th>Цель</th><th>Тип</th><th>Источник</th><th>TCP/443 с VDS</th></tr></thead><tbody id="routing-catalog-rows"><tr><td colspan="4">Список пока не загружен.</td></tr></tbody></table></div>
@@ -179,6 +211,8 @@ def catalog_dialog_script() -> str:
       let current = [], offset = 0, matched = 0, total = 0, maxScan = 24;
       let sequence = 0, controller = null, debounce = null, loading = false, importing = false, scanAvailable = true;
       const labels = {domain:'Домен / поддомен',ip:'Публичный IP',cidr:'IP-сеть (CIDR)'};
+      const familyLabel = item => item.ip_version === 4 || item.ip_version === 6 ? 'IPv' + item.ip_version : 'IP';
+      const typeLabel = item => item.kind === 'ip' ? 'Публичный ' + familyLabel(item) : (item.kind === 'cidr' ? familyLabel(item) + '-сеть (CIDR)' : (labels[item.kind] || 'Неизвестный тип'));
       const statusLabels = {ok:'Доступна',timeout:'TCP/443 не ответил',unresolved:'Нет публичного DNS',budget:'Истёк лимит проверки'};
       const sourceLabels = {policy:'Действующие правила',draft:'Черновик',manual:'Введено вручную',scan:'Проверенная цель',dns:'DNS проверенных целей',import:'Импорт TXT'};
       const sourceLabel = value => sourceLabels[value] || (String(value).startsWith('seed:') ? 'Каталог: ' + String(value).slice(5) : String(value));
@@ -227,9 +261,9 @@ def catalog_dialog_script() -> str:
             measured.append(node('span', item.latency_ms + ' мс', 'ok'));
           else measured.append(node('span', statusLabels[item.status] || 'Не измерено', item.status ? 'warn' : 'muted'));
           if (Number.isFinite(item.checked_at) && item.checked_at > 0)
-            measured.append(node('small', 'Замер: ' + new Date(item.checked_at * 1000).toLocaleString('ru-RU')));
+            measured.append(node('small', 'Замер: ' + new Date(item.checked_at * 1000).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'}) + ' МСК'));
           measured.append(node('small', 'Источник замера: VDS · TCP/443'));
-          row.append(targetCell, node('td', labels[item.kind] || 'Неизвестный тип'), sourceCell, measured);
+          row.append(targetCell, node('td', typeLabel(item)), sourceCell, measured);
           rows.append(row);
         });
         get('page').textContent = matched ? (offset + 1) + '–' + Math.min(offset + current.length, matched) + ' из ' + matched.toLocaleString('ru-RU') : '0 результатов';

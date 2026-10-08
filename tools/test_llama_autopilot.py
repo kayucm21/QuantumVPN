@@ -59,12 +59,33 @@ class LlamaAdapterTests(unittest.TestCase):
         self.assertEqual(self.body['max_tokens'], 400)
         self.assertEqual(self.body['response_format']['type'], 'json_object')
         self.assertEqual(self.body['response_format']['schema']['additionalProperties'], False)
+        schema = self.body['response_format']['schema']['properties']
+        self.assertEqual(schema['recommendations']['maxItems'], 0)
+        for key in ('summary', 'risk', 'next_step'):
+            self.assertEqual(schema[key]['minLength'], 1)
+            self.assertEqual(schema[key]['maxLength'], 400)
         self.assertNotIn('secret-token', json.dumps(self.body))
         self.assertNotIn('unsafe shell', json.dumps(self.body))
         self.assertNotIn('private-user', json.dumps(self.body))
         self.assertNotIn(PRIMARY, json.dumps(self.body))
         self.assertEqual(value['model'], llama.MODEL)
         self.assertEqual(value['usage'], {'completion_tokens': 100})
+
+    def test_generation_schema_contains_exact_allowed_pairs_not_cross_product(self):
+        allowed = [{'node_id': autopilot.node_id(PRIMARY), 'action': 'observe'},
+                   {'node_id': autopilot.node_id(RESERVE), 'action': 'select_reserve'}]
+        value = {**self.snapshot(), 'nodes': [{'target': PRIMARY}, {'target': RESERVE}]}
+        with patch.object(llama, '_opener') as opener:
+            opener.return_value.open.return_value = self.response(self.valid(allowed))
+            result = llama.analyze(value, allowed_actions=allowed + [{'node_id': 'invented', 'action': 'observe'}])
+        request = json.loads(opener.return_value.open.call_args.args[0].data)
+        schema = request['response_format']['schema']['properties']['recommendations']
+        self.assertEqual(schema['maxItems'], 4)
+        self.assertEqual(schema['items']['enum'], allowed)
+        self.assertEqual(result['analysis']['recommendations'], allowed)
+        with self.assertRaises(llama.LlamaError) as error:
+            llama.validate_analysis(self.valid([{'node_id': allowed[0]['node_id'], 'action': allowed[1]['action']}]), allowed)
+        self.assertEqual(error.exception.reason, 'recommendation_not_allowed')
 
     def test_disables_proxy_and_redirect_handlers(self):
         with patch.object(llama, 'build_opener') as build:
@@ -94,11 +115,50 @@ class LlamaAdapterTests(unittest.TestCase):
             self.assertEqual(value['snapshot']['nodes'][0]['node_id'], autopilot.node_id(canonical))
 
     def test_toolcalls_and_truncation_rejected(self):
-        for choice in ({'finish_reason': 'length'}, {'message': {'content': '{}', 'tool_calls': [{'name': 'shell'}]}}):
+        for choice, reason in (({'finish_reason': 'length'}, 'output_truncated'),
+                               ({'message': {'content': '{}', 'tool_calls': [{'name': 'shell'}]}}, 'tool_calls')):
             with patch.object(llama, '_opener') as opener:
                 opener.return_value.open.return_value = self.response(**choice)
-                with self.assertRaises(llama.LlamaError):
+                with self.assertRaises(llama.LlamaError) as error:
                     llama.analyze(self.snapshot())
+                self.assertEqual(error.exception.code, 'invalid_response')
+                self.assertEqual(error.exception.reason, reason)
+
+    def test_typed_response_reasons_never_contain_raw_output(self):
+        cases = (({'choices': []}, 'response_shape'),
+                 ({'choices': [{'finish_reason': 'error', 'message': {'content': '{}'}}]}, 'finish_reason'),
+                 ({'choices': [{'finish_reason': 'stop', 'message': {'content': {}}}]}, 'content_type'),
+                 ({'choices': [{'finish_reason': 'stop', 'message': {'content': 'x' * 8193}}]}, 'content_size'))
+        for response, reason in cases:
+            with patch.object(llama, '_opener') as opener:
+                opener.return_value.open.return_value = io.BytesIO(json.dumps(response).encode())
+                with self.assertRaises(llama.LlamaError) as error:
+                    llama.analyze(self.snapshot())
+            self.assertEqual(error.exception.code, 'invalid_response')
+            self.assertEqual(error.exception.reason, reason)
+        for raw, reason in ((b'private-secret invalid JSON', 'response_json'),
+                            (json.dumps({'choices': [{'finish_reason': 'stop', 'message': {'content': 'private-secret invalid JSON'}}]}).encode(), 'content_json')):
+            with patch.object(llama, '_opener') as opener:
+                opener.return_value.open.return_value = io.BytesIO(raw)
+                with self.assertRaises(llama.LlamaError) as error:
+                    llama.analyze(self.snapshot())
+            self.assertEqual(error.exception.code, 'unavailable')
+            self.assertEqual(error.exception.reason, reason)
+            self.assertNotIn('private-secret', str(error.exception))
+        for untrusted in ('private-secret', {'private': 'secret'}):
+            self.assertEqual(llama.LlamaError('invalid_response', reason=untrusted).reason, 'unknown')
+
+    def test_typed_validation_reasons_preserve_strict_boundaries(self):
+        for changed, reason in (({'extra': True}, 'analysis_shape'), ({'status': []}, 'status_value'),
+                                ({'summary': {}}, 'text_type'), ({'summary': ''}, 'text_length'),
+                                ({'summary': 'я' * 401}, 'text_length'), ({'summary': 'a\nline'}, 'text_controls'),
+                                ({'summary': '\ud800'}, 'text_encoding'), ({'recommendations': {}}, 'recommendations_shape'),
+                                ({'recommendations': [{'node_id': 'invented', 'action': 'observe'}]}, 'recommendation_not_allowed')):
+            with self.assertRaises(llama.LlamaError) as error:
+                llama.validate_analysis({**self.valid(), **changed}, [])
+            self.assertEqual(error.exception.code, 'invalid_response')
+            self.assertEqual(error.exception.reason, reason)
+        self.assertEqual(llama.validate_analysis({**self.valid(), 'summary': 'я' * 400}, [])['summary'], 'я' * 400)
 
     def test_resources_skip_without_request(self):
         value = self.snapshot()
@@ -113,6 +173,7 @@ class LlamaAdapterTests(unittest.TestCase):
             with self.assertRaises(llama.LlamaError) as error:
                 llama.analyze(self.snapshot())
         self.assertNotIn('private-token', str(error.exception))
+        self.assertEqual(error.exception.reason, 'transport')
         llama._INFERENCE_LOCK.acquire()
         try:
             with self.assertRaisesRegex(llama.LlamaError, 'busy'):
@@ -131,8 +192,9 @@ class LlamaAdapterTests(unittest.TestCase):
     def test_oversized_response_and_malformed_fields_rejected(self):
         with patch.object(llama, '_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(b'x' * (llama.MAX_RESPONSE + 1))
-            with self.assertRaisesRegex(llama.LlamaError, 'too_large'):
+            with self.assertRaisesRegex(llama.LlamaError, 'too_large') as error:
                 llama.analyze(self.snapshot())
+            self.assertEqual(error.exception.reason, 'response_size')
         for changed in ({'summary': {'object': True}}, {'status': []}, {'summary': '\ud800'}, {'summary': 'a\nline'}):
             with self.assertRaises(llama.LlamaError):
                 llama.validate_analysis({**self.valid(), **changed}, [])

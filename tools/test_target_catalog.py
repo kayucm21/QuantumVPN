@@ -81,6 +81,49 @@ class TargetCatalogTests(unittest.TestCase):
         self.assertEqual(catalog.page(self.db, kind="ip")["matched"], 1)
         self.assertEqual(catalog.page(self.db, offset=999)["items"], [])
 
+    def test_ip_family_filters_are_existing_hosts_only_and_keep_cidr_unselectable(self):
+        catalog.import_entries(self.db, "example.com\n8.8.8.8\n1.1.1.1\n2606:4700:4700::1111\n8.8.0.0/16\n2606:4700::/32")
+        self.db.execute("update routing_target_catalog set addresses='8.8.8.8\n2606:4700:4700::1111' where kind='domain'")
+        hosts4 = catalog.page(self.db, kind="ipv4")
+        hosts6 = catalog.page(self.db, kind="ipv6")
+        self.assertEqual([item["target"] for item in hosts4["items"]], ["1.1.1.1", "8.8.8.8"])
+        self.assertEqual([item["target"] for item in hosts6["items"]], ["2606:4700:4700::1111"])
+        self.assertEqual(hosts4["kind"], "ipv4")
+        self.assertTrue(all(item["kind"] == "ip" and item["ip_version"] == 4 and item["selectable"] for item in hosts4["items"]))
+        self.assertEqual(hosts6["items"][0]["ip_version"], 6)
+        self.assertEqual(catalog.page(self.db, kind="ipv4", query="2606:")["matched"], 0)
+        self.assertEqual(catalog.page(self.db, kind="ipv6", query="2606:4700:4700:0:0:0:0:1111")["matched"], 1)
+        self.assertEqual(catalog.page(self.db, kind="domain", query="8.8.8.8")["matched"], 1)
+        self.assertIsNone(catalog.page(self.db, kind="domain")["items"][0]["ip_version"])
+        networks = catalog.page(self.db, kind="cidr")["items"]
+        self.assertEqual({item["ip_version"] for item in networks}, {4, 6})
+        self.assertTrue(all(not item["selectable"] for item in networks))
+        self.assertEqual(catalog.page(self.db, kind="ip")["matched"], 3)
+        self.assertEqual(catalog.page(self.db)["total"], 6)  # CIDRs have not become host rows.
+
+    def test_large_ip_family_pages_filter_in_sql_without_python_catalog_expansion(self):
+        raw = "\n".join(f"8.8.{index // 250}.{index % 250 + 1}" for index in range(1000))
+        raw += "\n" + "\n".join(f"2606:4700::{index + 1:x}" for index in range(1000))
+        catalog.import_entries(self.db, raw + "\n8.8.0.0/16\n2606:4700::/32")
+        self.db.commit()
+        statements = []
+        self.db.set_trace_callback(statements.append)
+        # page() must not validate/expand every catalog row in Python.
+        with mock.patch.object(catalog, "_normal_entry", side_effect=AssertionError("Unbounded catalog materialisation")), \
+             mock.patch.object(catalog.ipaddress, "ip_network", side_effect=AssertionError("CIDR expansion")):
+            first = catalog.page(self.db, kind="ipv6")
+            second = catalog.page(self.db, kind="ipv6", offset=50)
+            tail = catalog.page(self.db, kind="ipv4", offset=950)
+        self.assertEqual(first["matched"], 1000)
+        self.assertEqual(tail["matched"], 1000)
+        self.assertEqual([len(value["items"]) for value in (first, second, tail)], [50, 50, 50])
+        self.assertFalse({item["target"] for item in first["items"]} & {item["target"] for item in second["items"]})
+        page_reads = [statement for statement in statements if "select c.target,c.kind" in statement]
+        self.assertEqual(len(page_reads), 3)
+        self.assertTrue(all("c.kind='ip'" in statement and "instr(c.target,':')" in statement and "limit 50 offset" in statement for statement in page_reads))
+        self.assertTrue(all(statement.lstrip().lower().startswith("select") for statement in statements))
+        self.assertFalse(self.db.in_transaction)
+
     def test_search_is_parameterized_wildcards_literal_and_read_only(self):
         catalog.import_entries(self.db, "example.com\nmedia.example.com")
         self.db.commit()

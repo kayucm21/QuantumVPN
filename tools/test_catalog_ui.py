@@ -6,7 +6,7 @@ import unittest
 from html.parser import HTMLParser
 
 from quantumvpn_target_scan import (
-    catalog_dialog, catalog_dialog_css, catalog_dialog_script, scan_dialog_script,
+    catalog_dialog, catalog_dialog_css, catalog_dialog_script, scan_dialog, scan_dialog_script,
 )
 
 
@@ -47,7 +47,9 @@ class CatalogUITests(unittest.TestCase):
         self.assertIn("выбор сети для TCP-проверки недоступен", page)
         self.assertIn("до 24", page)
         self.assertNotIn('action="/operator/routing"', page)
-        self.assertEqual(parsed.options["routing-catalog-kind"], ["", "domain", "ip", "cidr"])
+        self.assertEqual(parsed.options["routing-catalog-kind"], ["", "domain", "ip", "ipv4", "ipv6", "cidr"])
+        self.assertIn("Публичные IPv4", page)
+        self.assertIn("Публичные IPv6", page)
         self.assertEqual(parsed.elements["routing-catalog-search"][1]["maxlength"], "160")
 
     def test_csrf_is_escaped_and_viewer_cannot_enable_writes(self):
@@ -86,6 +88,37 @@ class CatalogUITests(unittest.TestCase):
         self.assertNotIn("action:'publish'", script)
         self.assertIn("box.addEventListener('cancel'", script)
         self.assertIn(".join('\\n')", script)
+
+    def test_scan_numeric_samples_show_actual_family_fixed_port_and_dated_vds_measurement(self):
+        result = scan_dialog([
+            {"target": "media.example.com", "kind": "domain", "status": "ok", "latency_ms": 19,
+             "checked_at": 1_790_000_000,
+             "addresses": [{"address": "1.1.1.1", "latency_ms": 19, "port": 22, "family": 6},
+                           {"address": "2606:4700:4700::1111", "latency_ms": 24, "port": 80, "family": 4}]},
+            {"target": "2606:4700:4700::1111", "kind": "ip", "status": "ok", "latency_ms": 24,
+             "checked_at": 1_790_000_000, "addresses": []},
+        ], "token", "csrf")
+        self.assertIn("1.1.1.1 · 19 мс<small>IPv4 · TCP/443 с VDS", result)
+        self.assertIn("2606:4700:4700::1111 · 24 мс<small>IPv6 · TCP/443 с VDS", result)
+        self.assertIn("Публичный IPv6", result)
+        self.assertIn("21.09.2026 17:13:20 МСК", result)
+        self.assertIn("Это не ICMP-пинг и не задержка телефона через VPN", result)
+        self.assertNotIn("TCP/22", result)
+        self.assertNotIn("TCP/80", result)
+
+    def test_scan_render_bounds_targets_addresses_and_keeps_networks_unselectable(self):
+        finding = {"target": "example.com", "kind": "domain", "status": "ok", "latency_ms": 19,
+                   "checked_at": "not a timestamp", "addresses": [{"address": "1.1.1.1", "latency_ms": True}] * 9}
+        result = scan_dialog([finding] * 50, "token", "csrf", limit=1000)
+        self.assertEqual(result.count('name="scan_selected"'), 24)
+        self.assertEqual(result.count("IPv4 · TCP/443 с VDS"), 24 * 3)
+        self.assertIn("до 24 целей", result)
+        self.assertIn("Время замера не указано", result)
+        self.assertNotIn("True мс", result)
+        result = scan_dialog([{**finding, "target": "1.1.1.0/24", "kind": "cidr"},
+                              {**finding, "kind": "ip", "latency_ms": True}], "token", "csrf")
+        self.assertIn('aria-label="Выбрать 1.1.1.0/24" disabled', result)
+        self.assertIn('id="routing-scan-confirm" disabled', result)
 
     def test_scan_disables_previous_evidence_when_new_scan_starts(self):
         script = scan_dialog_script()
@@ -145,10 +178,14 @@ class CatalogUITests(unittest.TestCase):
           calls.push({url,options});
           if (options.method === 'POST') return {ok:true,json:async () => ({ok:true,added:2,duplicates:1,rejected:1})};
           const q = new URL('http://local' + url).searchParams;
-          assert.ok(['','domain','ip','cidr'].includes(q.get('kind')), 'Backend rejects unsupported kind filter');
+          assert.ok(['','domain','ip','ipv4','ipv6','cidr'].includes(q.get('kind')), 'Backend rejects unsupported kind filter');
           const searched = q.get('q'), start = Number(q.get('offset'));
           const response = value => ({ok:true,json:async () => value});
           const result = {total:120,matched:120,offset:start,limit:50,max_scan:24,workers:2,items:Array.from({length:Math.min(50,120 - start)},(_,i) => entry(start + i, i === 49 ? 'cidr' : 'domain'))};
+          if (q.get('kind') === 'ipv4' || q.get('kind') === 'ipv6') {
+            const family = q.get('kind') === 'ipv4' ? 4 : 6;
+            return response({...result,matched:1,offset:0,items:[{...entry(1,'ip'),target:family === 4 ? '1.1.1.1' : '2606:4700:4700::1111',ip_version:family,status:'ok',latency_ms:19,checked_at:1790000000}]});
+          }
           if (searched === 'old') return await new Promise(resolve => delayedResolve = () => resolve(response({...result,matched:1,offset:0,items:[{...entry(1),target:'old.example'}]})));
           if (searched === 'overloaded') return response({...result,scan_available:false,scan_warning:'VDS перегружен. Повторите позже.'});
           if (searched) return response({...result,matched:1,offset:0,items:[{...entry(1),target:searched + '.example'}]});
@@ -171,6 +208,14 @@ class CatalogUITests(unittest.TestCase):
           elements.prev.fire('click'); await flush();
           inputs = elements.rows.querySelectorAll(); assert.equal(inputs[0].checked,true);
           elements.clear.fire('click'); assert.match(elements.selection.textContent,/0 \/ 24/);
+          elements.kind.value = 'ipv6'; elements.kind.fire('change'); await flush();
+          assert.equal(elements.rows.children.length,1); assert.equal(elements.rows.children[0].children[1].textContent,'Публичный IPv6');
+          assert.match(elements.rows.children[0].children[3].children[1].textContent,/Замер:.*МСК/);
+          assert.match(elements.rows.children[0].children[3].children[2].textContent,/VDS.*TCP\/443/);
+          elements.kind.value = 'ipv4'; elements.kind.fire('change'); await flush();
+          assert.equal(elements.rows.children[0].children[1].textContent,'Публичный IPv4');
+          assert.ok(calls.some(call => call.url.includes('kind=ipv6'))); assert.ok(calls.some(call => call.url.includes('kind=ipv4')));
+          elements.kind.value = '';
           elements.search.value = 'old'; elements.kind.fire('change'); await flush();
           elements.search.value = 'new'; elements.kind.fire('change'); await flush();
           assert.equal(elements.rows.children[0].children[0].children[0].children[1].children[0].textContent,'new.example');

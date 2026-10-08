@@ -1,6 +1,6 @@
 # Quantum Pulse / Network center
 
-Panel build: `2.3.0-pulse.1`. This is a panel-only change; Android version,
+Panel build: `2.3.0-pulse.2`. This is a panel-only change; Android version,
 release schedule, APK artifacts, subscriptions and existing VPN keys are not
 changed by its deployment.
 
@@ -24,12 +24,53 @@ signed publication and revision rollback handlers. Saving a draft does not
 publish it. Return links preserve the Network view and policy source. Missing
 drafts or staging revisions visibly fall back to production.
 
+### Search and selected target checks
+
+Overview, DNS and routes expose the existing owned target catalog in a modal.
+Search and IPv4/IPv6 filters use bounded SQL over existing catalog rows, not a
+network-wide scan. Domains, subdomains, public addresses and CIDRs retain their
+source provenance; CIDRs are not expanded into hosts. Pages contain at most 50
+records and a check contains at most 24 selected public hosts. Each selected
+result shows actual resolved IPv4/IPv6, TCP/443 and its timestamp in Moscow time.
+This is a point-in-time VDS connection measurement, not phone ICMP ping, proof
+of application login or an arbitrary port scan. Unknowns stay unknown.
+
+The Network forms preserve strict Origin/CSRF, one live scanner/dialog ID set,
+session-bound scan evidence and draft-only confirmation. Viewer accounts can
+search but cannot probe or apply recommendations. The check always uses the
+current routing draft (production fallback if none); it does not automatically
+publish rules or add a third-party service IP as a VPN node.
+
+Detector404 was inspected through its public documentation only. Its API uses
+an account Bearer token; its terms prohibit automated requests without
+permission. No API requests, scraping, scheduled importer or database copy
+were performed. An authorized export/integration requires appropriate access
+and permission. The documented monitored service URLs are not a promise of
+every Internet IPv4, IPv6 address or subdomain.
+
+Sources: https://detector404.ru/doc/api and https://detector404.ru/doc/legal.
+
 ## Bounded automation
 
 The model remains a local adviser. Typed, measured node automation is separate
 from model prose and only changes existing panel recommendations/quarantine.
 It neither allocates IPs nor provisions imaginary regional nodes, executes
 model-generated commands or switches active VPN sessions.
+
+The local llama adapter retains strict output validation. Generation now
+restricts recommendation objects to exact allowed node/action pairs (empty
+array when no actions are eligible), rather than allowing invented pairs and
+only rejecting them afterwards. Failures retain their existing category plus
+an allowlisted diagnostic reason, never raw model text or exception output.
+The bot formats that reason and explicitly separates an AI-analysis error from
+a confirmed VPN outage. Successful runs clear the previous reason; unchanged
+issues remain quiet. Limits remain 400 output tokens, 90 seconds, one analysis
+at a time and resource-pressure deferral.
+
+The reported historical failure was stored as `invalid_response`; its actual
+model text was not retained. Runtime crash, OOM and output truncation were not
+proven. Three bounded, read-only aggregate replays accepted the old contract,
+so the new enum reason is necessary to diagnose any recurrence precisely.
 
 Default policy: observe every 60 seconds, at least three consecutive checks,
 900 seconds between changes. Allowed intervals are 60–3600 seconds,
@@ -101,6 +142,35 @@ both ARM production API variants and HTTPS download HEAD responses, both WARP
 IP families and MTProto readiness. Diagnostic output is allowlist-redacted.
 
 ### Verified deployment
+
+On 8 October 2026, `2.3.0-pulse.2` passed the guarded source-only deployment
+and the extended live verification on `150.241.96.191`. Private source/database
+snapshot:
+`/var/lib/quantumvpn-operator/aurora-source-backups/aurora-2edd859326004b4bae610c69233c902c`.
+Configuration, release metadata and signing identity remained unchanged.
+The final focused offline suite passed 326 tests, including authenticated HTTP
+round-trips, draft-only scan confirmation, typed AI reason persistence, schema
+validation, JavaScript interaction, redaction and deployment/verifier gates.
+
+All six Network views returned 200/no-store without nested forms; overview,
+DNS and routes each have exactly one live scanner/dialog set. The catalog
+contained 2,894 deduplicated records: 2,885 domain records and 9 IPv4 host
+records; no standalone IPv6 host record was present at that snapshot. The
+IPv6 filter returned zero honestly, not invented addresses; IPv6 checks and
+user-imported public IPv6 targets are supported. YouTube search matched 169
+records, paginated 50 at a time. No Detector404 feed was imported.
+
+The new in-memory adapter source was also exercised against the installed
+llama runtime before deployment: empty allowed-actions grammar was accepted,
+with 123 completion tokens in 44.3 seconds. This was one read-only aggregate
+inference, not a fabricated database success or a speed measurement.
+
+Both panels and MTProto remained active (19 ready upstream targets). Both
+ARM legacy/updater APIs and TLS-verified APK HEAD probes still returned
+`5.11.4 / 501104099`; fixed WARP diagnostic traces remained healthy for IPv4
+and IPv6. These checks do not promise universal bypass or 50 ms client ping.
+
+#### Previous pulse.1 deployment
 
 On VDS `150.241.96.191`, build `2.3.0-pulse.1` was applied and the live
 read-only gate passed. Private source/database snapshot:

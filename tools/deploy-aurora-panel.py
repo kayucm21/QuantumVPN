@@ -52,7 +52,7 @@ VOLATILE = {
     'load_balancer_last_target', 'load_balancer_last_decision',
     'telegram_digest_last_attempt', 'telegram_digest_last_sent_date',
     'quality_subscription', 'ai_last_run', 'ai_last_status', 'ai_last_advice',
-    'ai_last_error', 'ai_last_notification_hash', 'ai_last_notification_at',
+    'ai_last_error', 'ai_last_error_reason', 'ai_last_notification_hash', 'ai_last_notification_at',
     'ai_autopilot_state', 'ai_autopilot_last_run', 'ai_autopilot_last_status', 'ai_autopilot_last_action',
 }
 

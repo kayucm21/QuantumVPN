@@ -32,6 +32,41 @@ _COMMAND_DESCRIPTIONS = (
 MAX_STATUS_CHARS = 3500
 _MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,79}\Z")
 _VERSION = re.compile(r"[0-9][A-Za-z0-9_.+-]{0,39}\Z")
+AI_ERROR_LABELS = {
+    "invalid_response": "ответ модели не прошёл проверку формата",
+    "truncated_response": "ответ модели обрезан лимитом генерации",
+    "busy": "предыдущий анализ ещё выполняется",
+    "resources": "анализ отложен из-за нагрузки VDS",
+    "too_large": "ответ или входные данные превысили безопасный лимит",
+    "unavailable": "локальный анализ не завершён; проверьте службу ИИ",
+}
+AI_ERROR_REASON_LABELS = {
+    "transport": "не удалось получить ответ локального сервера ИИ",
+    "request_size": "входные данные превысили безопасный лимит",
+    "response_size": "ответ сервера ИИ превысил безопасный лимит",
+    "response_json": "сервер ИИ вернул некорректный JSON",
+    "response_shape": "структура ответа сервера ИИ не соответствует контракту",
+    "output_truncated": "ответ модели обрезан лимитом генерации",
+    "finish_reason": "модель не завершила ответ штатно",
+    "tool_calls": "модель предложила запрещённый вызов инструмента",
+    "content_type": "текст ответа модели отсутствует",
+    "content_size": "текст ответа модели превысил безопасный лимит",
+    "content_json": "текст модели не является корректным JSON",
+    "analysis_shape": "поля отчёта модели не соответствуют схеме",
+    "status_value": "модель вернула неизвестный статус",
+    "text_type": "поля отчёта модели не являются текстом",
+    "text_length": "длина текста отчёта не соответствует схеме",
+    "text_controls": "в отчёте модели есть недопустимые управляющие символы",
+    "text_encoding": "кодировка отчёта модели некорректна",
+    "recommendations_shape": "список рекомендаций не соответствует схеме",
+    "recommendation_not_allowed": "модель предложила действие вне разрешённого списка",
+}
+
+
+def _ai_error_label(ai):
+    reason = _choice(ai.get("last_error_reason"), AI_ERROR_REASON_LABELS)
+    code = _choice(ai.get("last_error_code"), AI_ERROR_LABELS)
+    return AI_ERROR_REASON_LABELS[reason] if reason else AI_ERROR_LABELS[code] if code else ""
 
 
 def _integer(value, minimum=0, maximum=2**63 - 1):
@@ -181,6 +216,8 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
             "active_requests": _integer(runtime.get("active_ai_requests"), maximum=10000),
             "last_run": _integer(settings.get("ai_last_run")),
             "last_status": _choice(settings.get("ai_last_status"), {"готов", "ожидание", "выключен", "ошибка", "ожидание модели"}),
+            "last_error_code": _choice(settings.get("ai_last_error"), AI_ERROR_LABELS),
+            "last_error_reason": _choice(settings.get("ai_last_error_reason"), AI_ERROR_REASON_LABELS),
             "observations_30d": count,
             "succeeded_30d": success,
             "success_percent": round(success * 100 / count, 1) if count and success is not None else None,
@@ -325,6 +362,10 @@ def format_status(snapshot):
         "• Диалоги не ведутся; " + ("ключ не выводится в статус" if ai.get('provider') == 'gemini' else "API-ключи не используются"),
         "• ИИ не исполняет произвольные команды",
     ]
+    error_label = _ai_error_label(ai)
+    if last_status == "ошибка" and error_label:
+        lines.append("• Причина анализа: " + error_label)
+        lines.append("• Ошибка ИИ не доказывает сбой VPN; монитор нод работает отдельно")
     if automation.get("enabled") is not None:
         modes = {"observe": "наблюдение", "bounded": "действия по проверенным правилам"}
         lines.extend([
@@ -462,7 +503,8 @@ def _fact_issues(snapshot):
     if server.get("network_status") == "degraded":
         issues.append(("network_degraded", "Сеть: подтверждено повторное ухудшение серверных проверок"))
     if ai.get("enabled") is True and ai.get("last_status") == "ошибка":
-        issues.append(("analysis_error", "ИИ: последний анализ завершился ошибкой"))
+        reason = _ai_error_label(ai) or "последний анализ завершился ошибкой"
+        issues.append(("analysis_error", "ИИ: " + reason))
     if backup.get("hourly_enabled") is True:
         stamp = _integer(backup.get("ts"))
         if backup.get("exists") is False or generated and stamp and generated - stamp > 2 * 3600:
@@ -510,6 +552,8 @@ def fact_alert(snapshot, previous_fingerprint=""):
         lines.append("• Серверные службы, ресурсы и сетевые проверки снова в норме.")
     if any(key == "network_degraded" for key, _ in issues):
         lines.append("Проверки выполнены с VDS. Причина сбоя пока не установлена.")
+    if any(key == "analysis_error" for key, _ in issues):
+        lines.append("Это ошибка анализа ИИ, не подтверждение сбоя VPN. Монитор нод работает отдельно.")
     if should_notify:
         lines.append("/status — полный отчёт; подробный часовой отчёт приходит с резервной копией.")
     return {"fingerprint": digest, "should_notify": should_notify, "recovery": recovery, "issues": [key for key, _ in issues], "message": "\n".join(lines)[:1800] if should_notify else ""}

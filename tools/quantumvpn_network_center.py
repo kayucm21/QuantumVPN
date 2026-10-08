@@ -612,8 +612,11 @@ def render_network_hub(s: dict, csrf: str, *, payload: dict, lab_result: dict | 
     GET links use tab=network&network_view=<NETWORK_VIEWS>. The laboratory POST
     is /operator/network/lab with route_target, policy_source and csrf. All APK
     writes reuse /operator/routing. panel_html may contain trusted existing
-    rendered nodes/AI/MTProto or journal controls supplied by the HTTP owner;
-    never pass raw configuration or user-generated HTML in this mapping.
+    rendered nodes/AI/MTProto, journal controls, or a catalog scanner/dialog
+    fragment supplied by the HTTP owner. Catalog forms must carry their own
+    CSRF, selected policy_source and return_view, and obey the supplied role.
+    The host must render catalog/scan IDs only once. Never pass raw
+    configuration or user-generated HTML in this mapping.
     """
     active = active if active in NETWORK_VIEWS else "overview"
     policy_source = policy_source if policy_source in POLICY_SOURCES else "production"
@@ -632,6 +635,16 @@ def render_network_hub(s: dict, csrf: str, *, payload: dict, lab_result: dict | 
     options = "".join(f'<option value={name} {"selected" if policy_source == name else ""}>{label}</option>' for name, label in POLICY_SOURCES.items())
     lab = f'''<section class=network-card><h2>Лаборатория маршрутов</h2><p class=network-hint>Домен или публичный IPv4 / IPv6 → первое правило и возможные пересечения. APK и сервер проверяются отдельно.</p>
       <form method=post action=/operator/network/lab>{_csrf(csrf)}<fieldset {"disabled" if not can_write else ""}><div class=network-lab-input><label>Адрес<input name=route_target maxlength=1024 required value="{_esc((lab_result or {}).get('target', ''))}" placeholder="youtube.com или 8.8.8.8"></label><label>Политика APK<select name=policy_source>{options}</select></label></div><button class=secondary>Объяснить маршрут</button></fieldset></form>{render_lab_result(lab_result)}</section>'''
+    if active in {"overview", "routes", "dns"} and panel_html.get("catalog"):
+        # The known-target catalog and scanner are the existing bounded UI,
+        # not a second network crawler. Append after the laboratory's closing
+        # form so imports, scans and reviewed results never nest in a policy
+        # or lab form. A viewer can browse/search without enabling writes.
+        lab += '<section class="network-card network-catalog-tools"><div class=network-rule-title><h2>Каталог и проверка целей</h2><span>IPv4 · IPv6 · домены</span></div>'
+        lab += '<p class=network-hint>Все известные цели из подключённых списков, правил и импортов — без повторов. Поиск по доменам, поддоменам, IP и CIDR; это не список всех адресов Интернета.</p>'
+        lab += '<button type=button class=secondary data-catalog-open>Найти и сканировать цели</button>'
+        lab += '<p class=network-hint>Измеряются только выбранные публичные адреса. TCP/443 с VDS — не пинг телефона. Добавление создаёт черновик; публикация подтверждается отдельно.</p>'
+        lab += panel_html["catalog"] + '</section>'
     conflict_card = f'<section class=network-card><div class=network-rule-title><h2>Конфликты правил</h2><span>{len(conflicts["items"])}{ "+" if conflicts["truncated"] else ""}</span></div>{render_conflicts(conflicts)}</section>'
     return_view = "dns" if active == "dns" else "routes"
     journal = panel_html.get("journal", "") + _history(history or [], csrf, can_write, policy_source, return_view)

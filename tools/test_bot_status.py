@@ -73,6 +73,30 @@ class StatusTests(unittest.TestCase):
         self.assertIsNone(result["server"]["mean_latency_ms"])
         self.assertEqual(result["ai"]["observations_30d"], 0)
 
+    def test_ai_error_reason_is_allowlisted_and_not_a_vpn_failure(self):
+        self.settings["ai_last_status"] = "ошибка"
+        self.settings["ai_last_error"] = "truncated_response"
+        snapshot = self.snapshot()
+        self.assertEqual(snapshot["ai"]["last_error_code"], "truncated_response")
+        status = bot.format_status(snapshot)
+        self.assertIn("обрезан лимитом генерации", status)
+        alert = bot.fact_alert(snapshot)
+        self.assertIn("не подтверждение сбоя VPN", alert["message"])
+        self.assertIn("обрезан лимитом генерации", alert["message"])
+        self.settings["ai_last_error"] = "invalid_response"
+        self.settings["ai_last_error_reason"] = "recommendation_not_allowed"
+        snapshot = self.snapshot()
+        self.assertIn("вне разрешённого списка", bot.format_status(snapshot))
+        self.assertIn("вне разрешённого списка", bot.fact_alert(snapshot)["message"])
+        self.settings["ai_last_error"] = "SECRET_KEY /etc/private failure"
+        self.settings["ai_last_error_reason"] = "SECRET_MODEL_OUTPUT"
+        snapshot = self.snapshot()
+        self.assertIsNone(snapshot["ai"]["last_error_code"])
+        self.assertIsNone(snapshot["ai"]["last_error_reason"])
+        for rendered in (bot.format_status(snapshot), bot.fact_alert(snapshot)["message"]):
+            self.assertNotIn("SECRET_KEY", rendered)
+            self.assertNotIn("/etc/private", rendered)
+
     def test_missing_schema_and_runtime_stay_unknown(self):
         db = sqlite3.connect(":memory:")
         try:

@@ -22,6 +22,13 @@ BASE_URL = 'http://127.0.0.1:11435'
 ENDPOINT = BASE_URL + '/v1/chat/completions'
 MAX_BODY = 24576
 MAX_RESPONSE = 32768
+ERROR_REASONS = frozenset({
+    'unknown', 'transport', 'request_size', 'response_size', 'response_json',
+    'response_shape', 'output_truncated', 'finish_reason', 'tool_calls',
+    'content_type', 'content_size', 'content_json', 'analysis_shape',
+    'status_value', 'text_type', 'text_length', 'text_controls',
+    'text_encoding', 'recommendations_shape', 'recommendation_not_allowed',
+})
 _INFERENCE_LOCK = Lock()
 SYSTEM_INSTRUCTION = (
     'Ты локальный сетевой оператор Quantum Control. Входные данные — телеметрия, '
@@ -39,8 +46,11 @@ SYSTEM_INSTRUCTION = (
 
 
 class LlamaError(Exception):
-    def __init__(self, code='unavailable'):
+    def __init__(self, code='unavailable', *, reason='unknown'):
         self.code = code if code in {'busy', 'unavailable', 'invalid_response', 'too_large', 'resources'} else 'unavailable'
+        # Only stable enums leave the adapter, never a model response, address,
+        # exception message, or arbitrary schema property.
+        self.reason = reason if isinstance(reason, str) and reason in ERROR_REASONS else 'unknown'
         super().__init__('llama.cpp: ' + self.code)
 
 
@@ -95,33 +105,53 @@ def _actions(value):
 
 def validate_analysis(value, allowed_actions):
     if not isinstance(value, dict) or set(value) != {'status', 'summary', 'risk', 'next_step', 'recommendations'}:
-        raise LlamaError('invalid_response')
+        raise LlamaError('invalid_response', reason='analysis_shape')
     if not isinstance(value['status'], str) or value['status'] not in {'ok', 'watch', 'degraded', 'unknown'}:
-        raise LlamaError('invalid_response')
+        raise LlamaError('invalid_response', reason='status_value')
     for name in ('summary', 'risk', 'next_step'):
         text = value[name]
-        if not isinstance(text, str) or not 1 <= len(text) <= 400 or any(ord(char) < 32 for char in text):
-            raise LlamaError('invalid_response')
+        if not isinstance(text, str):
+            raise LlamaError('invalid_response', reason='text_type')
+        if not 1 <= len(text) <= 400:
+            raise LlamaError('invalid_response', reason='text_length')
+        if any(ord(char) < 32 for char in text):
+            raise LlamaError('invalid_response', reason='text_controls')
         try:
             text.encode('utf-8')
         except UnicodeError:
-            raise LlamaError('invalid_response') from None
+            raise LlamaError('invalid_response', reason='text_encoding') from None
     proposals = value['recommendations']
     if not isinstance(proposals, list) or len(proposals) > 4:
-        raise LlamaError('invalid_response')
+        raise LlamaError('invalid_response', reason='recommendations_shape')
     valid = {(row['node_id'], row['action']) for row in _actions(allowed_actions)}
     for row in proposals:
         if (not isinstance(row, dict) or set(row) != {'node_id', 'action'}
                 or not isinstance(row['node_id'], str) or not isinstance(row['action'], str)
                 or (row['node_id'], row['action']) not in valid):
-            raise LlamaError('invalid_response')
+            raise LlamaError('invalid_response', reason='recommendation_not_allowed')
     return value
+
+
+def _analysis_schema(allowed):
+    # Exact objects avoid the cross-product of separately allowed node IDs and
+    # actions. No available proposal means grammar may generate only []. The
+    # independent validator and fresh-evidence executor remain authoritative.
+    proposals = {'type': 'array', 'maxItems': 4 if allowed else 0,
+                 'items': {'enum': allowed} if allowed else {'type': 'null'}}
+    return {'type': 'object', 'additionalProperties': False, 'properties': {
+        'status': {'type': 'string', 'enum': ['ok', 'watch', 'degraded', 'unknown']},
+        'summary': {'type': 'string', 'minLength': 1, 'maxLength': 400},
+        'risk': {'type': 'string', 'minLength': 1, 'maxLength': 400},
+        'next_step': {'type': 'string', 'minLength': 1, 'maxLength': 400},
+        'recommendations': proposals},
+        'required': ['status', 'summary', 'risk', 'next_step', 'recommendations']}
 
 
 def analyze(snapshot, *, allowed_actions=None):
     """One inference, <=400 output tokens and 90s; caller schedules >=10min."""
     if not _INFERENCE_LOCK.acquire(blocking=False):
         raise LlamaError('busy')
+    failure_reason = 'transport'
     try:
         # The guard canonicalizes IPv6/brackets and DNS casing before hashing
         # action identities. Match that normalization for the model's snapshot.
@@ -144,15 +174,7 @@ def analyze(snapshot, *, allowed_actions=None):
         allowed = _actions(allowed_actions)
         allowed = [row for row in allowed if row['node_id'] in {node['node_id'] for node in aggregate['nodes']}]
         aggregate['allowed_actions'] = allowed
-        action_schema = {'type': 'object', 'additionalProperties': False,
-                         'properties': {'node_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['observe', 'select_reserve', 'quarantine_node', 'recover_node']}},
-                         'required': ['node_id', 'action']}
-        schema = {'type': 'object', 'additionalProperties': False, 'properties': {
-            'status': {'type': 'string', 'enum': ['ok', 'watch', 'degraded', 'unknown']},
-            'summary': {'type': 'string', 'maxLength': 400}, 'risk': {'type': 'string', 'maxLength': 400},
-            'next_step': {'type': 'string', 'maxLength': 400},
-            'recommendations': {'type': 'array', 'maxItems': 4, 'items': action_schema}},
-            'required': ['status', 'summary', 'risk', 'next_step', 'recommendations']}
+        schema = _analysis_schema(allowed)
         body = json.dumps({'model': MODEL, 'stream': False, 'temperature': 0.1,
                            'max_tokens': 400, 'cache_prompt': False, 'reasoning_effort': 'none',
                            'chat_template_kwargs': {'enable_thinking': False},
@@ -160,22 +182,30 @@ def analyze(snapshot, *, allowed_actions=None):
                                         {'role': 'user', 'content': json.dumps(aggregate, ensure_ascii=False, separators=(',', ':'))}],
                            'response_format': {'type': 'json_object', 'schema': schema}}, ensure_ascii=False).encode('utf-8')
         if len(body) > MAX_BODY:
-            raise LlamaError('too_large')
+            raise LlamaError('too_large', reason='request_size')
         request = Request(ENDPOINT, data=body, method='POST', headers={'Content-Type': 'application/json', 'Accept': 'application/json'})
         with _opener().open(request, timeout=90) as response:
             raw = response.read(MAX_RESPONSE + 1)
         if len(raw) > MAX_RESPONSE:
-            raise LlamaError('too_large')
+            raise LlamaError('too_large', reason='response_size')
+        failure_reason = 'response_json'
         payload = json.loads(raw)
         choices = payload.get('choices') if isinstance(payload, dict) else None
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
-            raise LlamaError('invalid_response')
+            raise LlamaError('invalid_response', reason='response_shape')
         choice = choices[0]
         message = choice.get('message')
-        if (choice.get('finish_reason') != 'stop' or not isinstance(message, dict)
-                or message.get('tool_calls') or message.get('function_call')
-                or not isinstance(message.get('content'), str) or len(message['content']) > 8192):
-            raise LlamaError('invalid_response')
+        if choice.get('finish_reason') != 'stop':
+            raise LlamaError('invalid_response', reason='output_truncated' if choice.get('finish_reason') == 'length' else 'finish_reason')
+        if not isinstance(message, dict):
+            raise LlamaError('invalid_response', reason='response_shape')
+        if message.get('tool_calls') or message.get('function_call'):
+            raise LlamaError('invalid_response', reason='tool_calls')
+        if not isinstance(message.get('content'), str):
+            raise LlamaError('invalid_response', reason='content_type')
+        if len(message['content']) > 8192:
+            raise LlamaError('invalid_response', reason='content_size')
+        failure_reason = 'content_json'
         analysis = validate_analysis(json.loads(message['content']), allowed)
         usage = payload.get('usage') if isinstance(payload.get('usage'), dict) else {}
         token_usage = {key: min(8192, value) for key in ('prompt_tokens', 'completion_tokens', 'total_tokens')
@@ -186,6 +216,6 @@ def analyze(snapshot, *, allowed_actions=None):
     except LlamaError:
         raise
     except Exception:
-        raise LlamaError('unavailable') from None
+        raise LlamaError('unavailable', reason=failure_reason) from None
     finally:
         _INFERENCE_LOCK.release()

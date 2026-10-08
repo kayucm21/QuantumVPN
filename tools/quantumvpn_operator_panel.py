@@ -142,7 +142,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.3.0-pulse.1"
+PANEL_BUILD = "2.3.0-pulse.2"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -3431,7 +3431,8 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
                 result["automation"] = run_autopilot_step(db, settings(db), proposals=analysis["analysis"]["recommendations"])
         except llama.LlamaError as exc:
             result = {"ok": False, "status": "ожидание модели" if exc.code == "resources" else "ошибка",
-                      "advice": "Анализ отложен из-за нагрузки VDS." if exc.code == "resources" else "llama.cpp не завершил анализ. Монитор нод продолжает работать.", "error": exc.code}
+                      "advice": "Анализ отложен из-за нагрузки VDS." if exc.code == "resources" else "llama.cpp не завершил анализ. Монитор нод продолжает работать.",
+                      "error": exc.code, "error_reason": getattr(exc, "reason", "unknown")}
     else:
         status = qwen_local_status(model)
         if not status.get("ready"):
@@ -3474,6 +3475,7 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
         "ai_last_status": str(result.get("status") or "ошибка")[:64],
         "ai_last_advice": advice,
         "ai_last_error": str(result.get("error") or "")[:280],
+        "ai_last_error_reason": result.get("error_reason") if result.get("error_reason") in bot_status.AI_ERROR_REASON_LABELS else "",
     }
     set_settings(db, values)
     factual = bot_status.fact_alert(operations_status_snapshot(db, {**settings(db), **values}),
@@ -3779,7 +3781,7 @@ def network_policy_payload(s, source="production"):
     return routing_payload(s)
 
 
-def render_network_pulse(s, csrf, actor_role, view="overview", target="", source="production", nodes=None):
+def render_network_pulse(s, csrf, actor_role, view="overview", target="", source="production", nodes=None, catalog_html=""):
     """Authenticated, compact hub; no network probes or secret reads on GET."""
     can_write = role_at_least(actor_role, "operator")
     source = source if source in network_center.POLICY_SOURCES else "production"
@@ -3845,7 +3847,7 @@ def render_network_pulse(s, csrf, actor_role, view="overview", target="", source
     nodes_html = f'<section class=network-card><h2>Ноды · фактические замеры</h2><div class=network-node-list>{node_html or "Нет зарегистрированных нод"}</div><p class=network-hint>TCP-задержка измерена с VDS, не с телефона пользователя.</p><a class=network-link href="/operator?tab=latency">Карта, ручные техработы и настройки нод →</a></section>'
     return notice + network_center.render_network_hub(s, csrf, payload=payload, lab_result=result,
                     xray_snapshot=xray, nodes=nodes, history=history, active=view, can_write=can_write,
-                    policy_source=source, panel_html={"ai":ai_html,"mtproto":mtproto_html,"nodes":nodes_html,"journal":journal_html})
+                    policy_source=source, panel_html={"ai":ai_html,"mtproto":mtproto_html,"nodes":nodes_html,"journal":journal_html,"catalog":catalog_html})
 
 
 def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None, actor_user="", control_csrf="", network_view="overview", network_target="", policy_source="production"):
@@ -4186,12 +4188,28 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         if isinstance(item, dict) and str(item.get('target') or '')
     ) or "<div class='routing-empty'>Добавьте домены и нажмите «Сканировать цели». Проверка выполняется TCP/443 с VDS.</div>"
     routing_scan_dialog_html = scan_dialog(
-        saved_scan, scan_token, control_csrf, auto_open=section == "routing" and flash.startswith("Проверено целей:"),
+        saved_scan, scan_token, control_csrf,
+        auto_open=(section == "routing" or (section == "network" and network_view in {"overview", "routes", "dns"})) and flash.startswith("Проверено целей:"),
         can_write=role_at_least(actor_role, "operator"),
         reserve_available=reserve_profile_ready and enabled(s, "reserve_profile_enabled", True),
         limit=MAX_ROUTING_SCAN_TARGETS,
     )
     routing_catalog_dialog_html = catalog_dialog(control_csrf, can_write=role_at_least(actor_role, "operator"))
+    network_catalog_html = ""
+    if section == "network" and network_view in {"overview", "routes", "dns"}:
+        scan_view = "dns" if network_view == "dns" else "routes"
+        scan_disabled = "" if role_at_least(actor_role, "operator") else "disabled"
+        return_fields = f'<input type=hidden name=return_tab value=network><input type=hidden name=return_view value={scan_view}><input type=hidden name=policy_source value=draft>'
+        network_scan_dialog = routing_scan_dialog_html.replace("</form>", return_fields + "</form>")
+        scanner = f'''<details class="network-card routing-scanner"><summary>Проверить свои цели · DNS и TCP/443</summary>
+          <p class=network-hint>До {MAX_ROUTING_SCAN_TARGETS} выбранных целей. IPv4 / IPv6 — фактические DNS-ответы и TCP на порт 443 с VDS, не ICMP-пинг телефона. Проверка и рекомендация используют текущий черновик; автоматической публикации нет.</p>
+          <form id=routing-scan-form method=post action=/operator/routing><input type=hidden name=action value=scan><input type=hidden name=csrf value="{html.escape(control_csrf, quote=True)}">{return_fields}<fieldset {scan_disabled}>
+          <label>Домены, поддомены или публичные IP<textarea name=routing_scan_targets rows=2 placeholder="youtube.com&#10;2606:4700:4700::1111">{html.escape(s.get('routing_scan_targets',''))}</textarea></label><button>Проверить введённые цели</button></fieldset></form>
+          <div class=routing-results>{routing_scan_compact_html}</div></details>'''
+        network_catalog_html = scanner + network_scan_dialog + routing_catalog_dialog_html
+        # Only one live scanner/dialog set may have the global JS IDs. Hidden
+        # legacy markup must not capture a new Network form submission.
+        routing_scan_dialog_html = routing_catalog_dialog_html = ""
     event_timeline = "".join(
         f"<div class='event-row'><span class='event-dot {'warn' if kind in ('error','incident') else 'ok'}'></span>"
         f"<time>{time.strftime('%H:%M', time.localtime(ts))}</time><b>{html.escape(device or 'Система')[:22]}</b>"
@@ -4231,7 +4249,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     navigation, subnavigation = aurora_navigation(section, actor_role)
     if section == "network":
         subnavigation = ""  # The compact hub already owns its six local tabs.
-    network_html = render_network_pulse(s, control_csrf, actor_role, network_view, network_target, policy_source, map_nodes) if section == "network" else ""
+    network_html = render_network_pulse(s, control_csrf, actor_role, network_view, network_target, policy_source, map_nodes, network_catalog_html) if section == "network" else ""
     current_missing_abis = scheduled_release_missing_abis(s.get('app_version', VERSION))
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <meta name=referrer content=same-origin><title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}{aurora_css()}{scan_dialog_css()}{catalog_dialog_css()}</style><body class=aurora-panel data-ui=Aurora2><main><div class=panel-shell>
@@ -4449,7 +4467,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
           <h2>Каталог и анализатор целей</h2><p class=routing-subtitle>Домены, поддомены, IP и сети из подключённых списков, правил и ваших импортов. Без повторов.</p>
           <button type=button class=routing-submit data-catalog-open>Сканировать цели · открыть каталог</button>
           <p class=muted>В каталоге доступны поиск и выбор нескольких целей. Проверяем только выбранные адреса, до {MAX_ROUTING_SCAN_TARGETS} за запуск; параллелизм зависит от нагрузки VDS.</p>
-          <form id=routing-scan-form method=post action=/operator/routing>
+          <form id={'routing-scan-form' if section != 'network' or not network_catalog_html else 'legacy-routing-scan-form'} method=post action=/operator/routing>
             <input type=hidden name=action value=scan>
             <input type=hidden name=csrf value="{html.escape(control_csrf, quote=True)}">
             <label class=target-field><textarea rows=3 maxlength=4096 name=routing_scan_targets aria-label="Домены, поддомены или IP для проверки" placeholder="youtube.com\ndiscord.com\nmedia.discordapp.net">{html.escape(routing_scan_targets)}</textarea></label>
@@ -6712,7 +6730,7 @@ class App(BaseHTTPRequestHandler):
             if getattr(self, "_network_return_view", None):
                 selected_source = form.get("policy_source", ["staging" if action == "promote" else "draft"])[0]
                 self._network_cancel_source = selected_source if selected_source in network_center.POLICY_SOURCES else "draft"
-                self._network_return_source = "draft" if action in {"save", "apply_scan"} else "staging" if action == "stage" else "production"
+                self._network_return_source = "draft" if action in {"save", "scan", "apply_scan"} else "staging" if action == "stage" else "production"
             try:
                 if action == "scan":
                     if not hmac.compare_digest(self.control_csrf(adm), form.get("csrf", [""])[0]):

@@ -365,10 +365,15 @@ def sync_policy(db, s, payload):
 
 
 def page(db, query="", kind="", offset=0, limit=50):
-    """Read a stable, deduplicated page. No schema writes, DNS or probes."""
+    """Read a stable, deduplicated page. No schema writes, DNS or probes.
+
+    ipv4/ipv6 are filters over existing concrete IP rows, not an invitation to
+    expand CIDRs. Canonical IP text makes a colon a reliable family marker;
+    filtering happens in SQLite before the bounded page is materialised.
+    """
     if not isinstance(query, str) or len(query) > 160 or any(ord(character) < 32 for character in query):
         raise ValueError("Поиск каталога: до 160 символов без управляющих знаков.")
-    if kind not in ("", "domain", "ip", "cidr"):
+    if kind not in ("", "domain", "ip", "ipv4", "ipv6", "cidr"):
         raise ValueError("Неизвестный тип цели каталога.")
     try:
         offset, limit = int(offset), int(limit)
@@ -386,7 +391,9 @@ def page(db, query="", kind="", offset=0, limit=50):
         pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         clauses.append("(c.target like ? escape '\\' or c.addresses like ? escape '\\')")
         parameters.extend((pattern, pattern))
-    if kind:
+    if kind in ("ipv4", "ipv6"):
+        clauses.append("c.kind='ip' and instr(c.target,':')" + ("=0" if kind == "ipv4" else ">0"))
+    elif kind:
         clauses.append("c.kind=?")
         parameters.append(kind)
     where = " where " + " and ".join(clauses) if clauses else ""
@@ -402,6 +409,7 @@ def page(db, query="", kind="", offset=0, limit=50):
             sources[target].append(source)
     return {"total": total, "matched": matched, "offset": offset, "limit": limit, "query": query, "kind": kind,
             "items": [{"target": target, "kind": row_kind, "sources": sources[target], "selectable": row_kind != "cidr",
+                       "ip_version": (6 if ":" in target else 4) if row_kind in ("ip", "cidr") else None,
                        "status": status, "latency_ms": latency, "checked_at": checked_at,
                        "addresses": addresses.splitlines() if addresses else []}
                       for target, row_kind, status, latency, checked_at, addresses in rows]}

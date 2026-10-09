@@ -48,6 +48,21 @@ class DeploymentGuardsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.deployer.build_config(self.args("--expected-old-quality-sha256", "b" * 64))
 
+    def test_bot_operations_is_explicit_fixed_allowlist_and_volatile_ledger(self):
+        config, payloads = self.deployer.build_config(self.args("--with-bot-operations", "--expected-old-ai-knowledge-sha256", "b" * 64))
+        self.assertTrue(config["with_bot_operations"])
+        self.assertTrue(set(self.deployer.BOT_OPERATIONS_MODULES) <= set(payloads))
+        self.assertEqual(config["files"]["quantumvpn_ai_knowledge.py"]["old_sha256"], "b" * 64)
+        self.assertIsNone(config["files"]["quantumvpn_bot_operations.py"]["old_sha256"])
+        with self.assertRaises(ValueError):
+            self.deployer.build_config(self.args("--expected-old-ai-knowledge-sha256", "b" * 64))
+        tree = ast.parse(self.deployer.REMOTE_SOURCE)
+        volatile = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == 'VOLATILE' for target in node.targets))
+        self.assertIn('bot_fact_state', volatile)
+        self.assertNotIn('ai_advisor_enabled', volatile)
+        self.assertNotIn('app_version', volatile)
+
     def test_default_never_adds_community_files(self):
         config, payloads = self.deployer.build_config(self.args())
         self.assertFalse(config["apply"])

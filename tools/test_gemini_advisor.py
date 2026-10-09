@@ -143,7 +143,9 @@ class NetworkAIIntegrationTests(unittest.TestCase):
             second = self.panel.monitor_network_health(self.db, self.s)
         self.assertEqual(len(first['alerts']), 1)
         self.assertEqual(second['alerts'], [])
-        self.assertEqual(send.call_count, 1)
+        # Network measurements journal one confirmed transition. Telegram is
+        # emitted only by the shared factual worker, not this raw target path.
+        self.assertEqual(send.call_count, 0)
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(before, dict(self.db.execute('select key,value from settings')))
         self.assertEqual(first['cause'], 'unconfirmed')

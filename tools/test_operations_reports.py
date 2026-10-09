@@ -89,6 +89,15 @@ class ReportIntegrationTests(unittest.TestCase):
         self.assertEqual(self.panel.autopilot_display({'ai_autopilot_last_status': 'stable', 'ai_autopilot_last_action': 'current_node_healthy'}), ('стабильно', 'текущая нода исправна'))
         self.assertEqual(self.panel.autopilot_display({'ai_autopilot_last_status': '<script>', 'ai_autopilot_last_action': 'bad'}), ('ожидание', 'собираются замеры'))
 
+    def test_model_isolation_report_is_measured_flag_not_string(self):
+        snapshot = {'generated_at': 1791287000, 'ai': {'engine': 'llama.cpp'},
+                    'operations': {'monitor_interval_seconds': 60, 'ai_isolation_verified': True}}
+        self.assertIn('непривилегированный, seccomp', self.panel.bot_status.format_status(snapshot))
+        snapshot['operations']['ai_isolation_verified'] = 'SECRET'
+        text = self.panel.bot_status.format_status(snapshot)
+        self.assertIn('Изоляция процесса ИИ: нет данных', text)
+        self.assertNotIn('SECRET', text)
+
     def test_cleanup_starts_after_cold_http_reads(self):
         with mock.patch.object(self.panel.time, 'sleep', side_effect=RuntimeError('test stop')) as sleep, \
                 mock.patch.object(self.panel.maintenance, 'cleanup_managed') as cleanup:
@@ -100,6 +109,9 @@ class ReportIntegrationTests(unittest.TestCase):
     def test_full_report_replies_to_archive_after_recording_delivery(self):
         archive = str(Path(self.temp.name) / 'report.zip.enc')
         with mock.patch.object(self.panel, 'operations_status_snapshot', return_value={'generated_at': 1791287000}) as snapshot, \
+                mock.patch.object(self.panel, 'validate_backup', return_value={'ok': True, 'checked_at': 1791287000, 'databases': ['operator.db', 'rospanel.db'], 'missing': []}), \
+                mock.patch('builtins.open', mock.mock_open(read_data=b'ciphertext')), \
+                mock.patch.object(self.panel, 'backup_key', return_value=b'k' * 32), \
                 mock.patch.object(self.panel, 'telegram_send_document', return_value=1234) as document, \
                 mock.patch.object(self.panel, 'telegram_send', return_value=True) as message:
             result = self.panel.send_backup_report(self.db, self.s, archive)
@@ -109,6 +121,42 @@ class ReportIntegrationTests(unittest.TestCase):
         event = self.db.execute("select detail from audit where action='hourly_backup'").fetchone()
         self.assertTrue(json.loads(event[0])['ok'])
         self.assertEqual(snapshot.call_count, 2)
+
+    def test_failed_verification_never_sends_archive(self):
+        with mock.patch.object(self.panel, 'validate_backup', side_effect=ValueError('SECRET')), \
+                mock.patch('builtins.open', mock.mock_open(read_data=b'corrupt')), \
+                mock.patch.object(self.panel, 'backup_key', return_value=b'k' * 32), \
+                mock.patch.object(self.panel, 'telegram_send_document') as document:
+            result = self.panel.send_backup_report(self.db, self.s, 'bad.zip.enc')
+        document.assert_not_called()
+        self.assertEqual(result, {'archive_sent': False, 'report_sent': False})
+        saved = self.panel.settings(self.db)['quality_backup']
+        self.assertNotIn('SECRET', saved)
+        self.assertFalse(json.loads(saved)['ok'])
+
+    def test_real_encrypted_archive_is_verified_before_delivery(self):
+        if self.panel.AESGCM is None:
+            self.skipTest('cryptography unavailable')
+        with mock.patch.object(self.panel, 'ROSPANEL_DB', str(Path(self.temp.name) / 'absent.db')):
+            archive = self.panel.create_backup_archive()
+        raw = Path(archive).read_bytes()
+        self.assertTrue(raw.startswith(b'QVBK1'))
+        self.assertFalse(Path(archive.removesuffix('.enc')).exists())
+        result = self.panel.validate_backup(raw, self.panel.backup_key(), self.panel.AESGCM)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['databases'], ['operator.db'])
+        with mock.patch.object(self.panel, 'operations_status_snapshot', return_value={}), \
+                mock.patch.object(self.panel, 'telegram_send_document', return_value=1234) as document, \
+                mock.patch.object(self.panel, 'telegram_send', return_value=True):
+            delivered = self.panel.send_backup_report(self.db, self.s, archive)
+        self.assertTrue(delivered['archive_sent'])
+        caption = document.call_args.args[2]
+        self.assertIn('AES-256-GCM', caption)
+        self.assertIn('не полный запуск', caption)
+        self.assertLessEqual(len(caption), 900)
+        corrupted = raw[:-1] + bytes([raw[-1] ^ 1])
+        with self.assertRaises(Exception):
+            self.panel.validate_backup(corrupted, self.panel.backup_key(), self.panel.AESGCM)
 
     def test_failed_document_does_not_claim_report_sent(self):
         with mock.patch.object(self.panel, 'operations_status_snapshot', return_value={}), \

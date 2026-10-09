@@ -71,8 +71,14 @@ except ModuleNotFoundError:
 
 try:
     import quantumvpn_bot_status as bot_status
+    import quantumvpn_bot_operations as bot_operations
+    import quantumvpn_ai_knowledge as ai_knowledge
+    import quantumvpn_proxy_monitor as proxy_monitor
 except ModuleNotFoundError:
     from tools import quantumvpn_bot_status as bot_status
+    from tools import quantumvpn_bot_operations as bot_operations
+    from tools import quantumvpn_ai_knowledge as ai_knowledge
+    from tools import quantumvpn_proxy_monitor as proxy_monitor
 
 try:
     import quantumvpn_gemini as gemini
@@ -148,7 +154,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.3.0-pulse.5"
+PANEL_BUILD = "2.3.0-pulse.6"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -164,7 +170,7 @@ _DB_READY = False
 _LAST_EVENT_CLEANUP = 0
 _RATE = defaultdict(deque)
 _RATE_LOCK = threading.Lock()
-_ALERT_STATE = {"last": {}, "lock": threading.Lock()}
+_ALERT_STATE = {"confirmation": {}, "lock": threading.Lock()}
 
 # The same registry drives navigation and page headings. Legacy URLs and POST
 # return_tab values remain unchanged; grouping is a presentation-only change.
@@ -2387,10 +2393,9 @@ def monitor_network_health(db, s):
         current_target=s.get("load_balancer_last_target", ""))
     for alert in result["alerts"][:8]:
         restored = alert["kind"] == "recovery"
-        message = "Доступность восстановлена" if restored else "Повторное ухудшение сети"
-        notice = f"[Quantum Control · сеть]\n{message}: {alert['target']} · {alert['stage'].upper()}\n{alert['message']}\nАктивные VPN-сессии не перезапускались."
-        sent = telegram_send(s, notice) if enabled(s, "telegram_alerts_enabled", False) else False
-        db.execute("insert into events values (?,?,?,?,?)", (now, "network_recovery" if restored else "network_deterioration", "network-guard", "", json.dumps({"target": alert["target"], "stage": alert["stage"], "cause": "unconfirmed", "telegram_sent": sent})))
+        # The unified factual worker reports transitions after confirmation;
+        # this measurement journal never sends raw target/model prose.
+        db.execute("insert into events values (?,?,?,?,?)", (now, "network_recovery" if restored else "network_deterioration", "network-guard", "", json.dumps({"target": alert["target"], "stage": alert["stage"], "cause": "unconfirmed", "telegram_sent": False})))
     state = result.pop("state")
     db.execute("insert into network_guard_state (id,state_json,report_json,updated_at,external_json,external_ts) values (1,?,?,?,?,?) on conflict(id) do update set state_json=excluded.state_json,report_json=excluded.report_json,updated_at=excluded.updated_at,external_json=excluded.external_json,external_ts=excluded.external_ts",
                (json.dumps(state, separators=(",", ":")), json.dumps(result, ensure_ascii=False, separators=(",", ":")), now, json.dumps(external, separators=(",", ":")), external_ts))
@@ -2845,14 +2850,51 @@ def operations_status_snapshot(db, s):
     runtime = bot_runtime_snapshot()
     runtime["network_guard"] = network_guard_snapshot(db)
     runtime["automation"] = autopilot_status_snapshot(db, s)
+    runtime["proxies"] = proxy_monitor.snapshot()
+    try:
+        verification = json.loads(s.get("quality_backup") or "{}")
+    except (ValueError, TypeError):
+        verification = {}
+    minimum = 600 if s.get("ai_engine") == "llama.cpp" else AI_MIN_INTERVAL_SECONDS
+    try:
+        ai_interval = max(minimum, min(AI_MAX_INTERVAL_SECONDS, int(s.get("ai_interval_seconds", "900"))))
+    except (ValueError, TypeError):
+        ai_interval = 900
+    runtime["operations"] = {"monitor_interval_seconds": 60, "confirm_samples": bot_operations.SAMPLES,
+                             "ai_interval_seconds": ai_interval,
+                             "ai_isolation_verified": runtime.get("ai_isolation_verified"),
+                             **bot_operations.backup_test_summary(verification)}
+    # Only a verification of this exact newest archive establishes encryption.
+    backup = runtime.get("backup", {})
+    if isinstance(verification, dict) and verification.get("name") == backup.get("name"):
+        backup["encrypted"] = verification.get("ok") if type(verification.get("ok")) is bool else None
     return bot_status.collect_status(db, s, runtime=runtime,
                                      local_model=bot_local_model_snapshot(s))
 
 
 def send_backup_report(db, s, archive, *, kind="hourly", actor="system", ip="127.0.0.1"):
     """Attach a factual report to the delivered archive, including this delivery."""
+    try:
+        with open(archive, "rb") as stream:
+            verification = validate_backup(stream.read(128 * 1024 * 1024 + 1), backup_key(), AESGCM)
+        verification["name"] = os.path.basename(archive)
+    except Exception:
+        verification = {"checked_at": int(time.time()), "ok": False,
+                        "name": os.path.basename(archive), "note": "Изолированная проверка копии не пройдена"}
+    set_settings(db, {"quality_backup": json.dumps(verification, ensure_ascii=False)})
+    audit(db, actor, ip, "quality:backup", {"ok": verification["ok"], "missing_count": len(verification.get("missing", []))})
+    db.commit()
+    if verification.get("ok") is not True:
+        # Never deliver an unverified or unauthenticated archive as a good copy.
+        audit(db, actor, ip, "hourly_backup" if kind == "hourly" else "backup_now", {"ok": False, "verification_failed": True})
+        db.commit()
+        return {"archive_sent": False, "report_sent": False}
+    s = settings(db)
     snapshot = operations_status_snapshot(db, s)
-    message_id = telegram_send_document(s, archive, bot_status.format_backup_caption(snapshot, kind), receipt=True)
+    tests = bot_operations.format_backup_tests(verification)
+    caption = bot_status.format_backup_caption(snapshot, kind)
+    caption = caption[:900 - len(tests) - 2] + "\n\n" + tests
+    message_id = telegram_send_document(s, archive, caption, receipt=True)
     ok = type(message_id) is int and message_id > 0
     audit(db, actor, ip, "hourly_backup" if kind == "hourly" else "backup_now",
           {"ok": ok, "file": os.path.basename(archive)})
@@ -3040,6 +3082,22 @@ def bot_runtime_snapshot():
         runtime["services"]["llama_cpp"] = result.stdout.strip() or "unknown"
     except (OSError, subprocess.TimeoutExpired):
         runtime["services"]["llama_cpp"] = "unknown"
+    runtime["ai_isolation_verified"] = None
+    if runtime["services"].get("llama_cpp") == "active":
+        try:
+            result = subprocess.run(["systemctl", "show", "--property=MainPID", "--value", "quantumvpn-llama"],
+                                    capture_output=True, text=True, timeout=3)
+            pid = result.stdout.strip()
+            if result.returncode == 0 and re.fullmatch(r"[1-9][0-9]{0,9}", pid):
+                with open(f"/proc/{pid}/status", encoding="ascii") as stream:
+                    fields = dict(line.strip().split(":", 1) for line in stream if ":" in line)
+                runtime["ai_isolation_verified"] = (
+                    fields.get("NoNewPrivs", "").strip() == "1" and fields.get("Seccomp", "").strip() == "2"
+                    and all(re.fullmatch(r"0{1,16}", fields.get(k, "").strip()) for k in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"))
+                    and len(fields.get("Uid", "").split()) == 4
+                    and all(value.isdecimal() and int(value) > 0 for value in fields["Uid"].split()))
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
     return runtime
 
 
@@ -3260,6 +3318,11 @@ def ai_operations_snapshot(db, s: dict) -> dict:
     measured = bot_runtime_snapshot()
     balancer = load_balancer_snapshot(db, s)
     backup = latest_backup_info()
+    proxy_state = proxy_monitor.snapshot().get("mtproto", {})
+    try:
+        backup_validation = json.loads(s.get("quality_backup") or "{}")
+    except (ValueError, TypeError):
+        backup_validation = {}
     latest = {}
     for row in db.execute(
         "select ts,target,ok,latency_ms,detail from server_health "
@@ -3311,7 +3374,12 @@ def ai_operations_snapshot(db, s: dict) -> dict:
             "created_at": int(backup.get("ts") or 0),
             "size_bytes": int(backup.get("size") or 0),
             "hourly_delivery_enabled": enabled(s, "telegram_backups_enabled", False),
+            "encrypted": backup_validation.get("ok") if isinstance(backup_validation, dict) and backup_validation.get("name") == backup.get("name") else None,
+            "validation": {"ok": bot_operations.backup_test_summary(backup_validation)["backup_verified"]},
         },
+        "mtproto": {"last_probe": {"ok": proxy_state.get("ready"),
+                                   "telegram_nonce_confirmed": proxy_state.get("ready"),
+                                   "checked_at": proxy_state.get("checked_at")}},
         "nodes": nodes,
         "network_guard": network_guard.model_network_snapshot(network_guard_snapshot(db)),
     }
@@ -3332,6 +3400,7 @@ def ai_prompt(snapshot: dict) -> str:
         "при ухудшении. Не давай shell-команды и не меняй порты или подписки. "
         "Ответь по-русски, максимум 900 символов, в трёх коротких частях: "
         "«Статус», «Риски», «Следующий ручной шаг». Если всё в норме, так и скажи.\n\n"
+        + ai_knowledge.compact_context(snapshot, now=int(time.time())) + "\n\n"
         + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
     )
 
@@ -3484,25 +3553,9 @@ def _run_ai_analysis(db, s: dict, trigger: str) -> dict:
         "ai_last_error_reason": result.get("error_reason") if result.get("error_reason") in bot_status.AI_ERROR_REASON_LABELS else "",
     }
     set_settings(db, values)
-    factual = bot_status.fact_alert(operations_status_snapshot(db, {**settings(db), **values}),
-                                   s.get("ai_last_notification_hash", ""))
-    digest = factual["fingerprint"]
-    try:
-        last_notice = int(s.get("ai_last_notification_at", "0") or 0)
-    except (TypeError, ValueError):
-        last_notice = 0
-    should_notify = (
-        enabled(s, "ai_telegram_enabled", True)
-        and enabled(s, "telegram_alerts_enabled", False)
-        and factual["should_notify"]
-        and now - last_notice >= 15 * 60
-    )
+    # Only the factual worker sends incident transitions. Reworded model prose
+    # or an inference failure must not create a second alert stream.
     sent = False
-    if should_notify:
-        sent = telegram_send(s, factual["message"])
-        if sent:
-            values.update({"ai_last_notification_hash": digest, "ai_last_notification_at": str(now)})
-    set_settings(db, values)
     db.execute(
         "insert into ai_observations(ts,trigger,status,advice,telegram_sent,before_json) values (?,?,?,?,?,?)",
         (now, trigger[:64], values["ai_last_status"], advice, int(sent),
@@ -3545,39 +3598,82 @@ def ai_worker():
         time.sleep(60)
 
 
+def send_factual_alert(db, *, now=None, snapshot=None):
+    """One delivery ledger; failed/cooldown-suppressed candidates remain unsent."""
+    moment = int(time.time() if now is None else now)
+    with _ALERT_STATE["lock"]:
+        s = settings(db)
+        if not enabled(s, "telegram_alerts_enabled", False):
+            return False
+        snap = operations_status_snapshot(db, s) if snapshot is None else snapshot
+        if not enabled(s, "ai_telegram_enabled", True):
+            snap = {**snap, "ai": {}}
+        previous = s.get("bot_fact_state") or None
+        try:
+            ledger = json.loads(previous) if previous else {}
+        except (ValueError, TypeError):
+            ledger = {}
+        opened = ledger.get("open", []) if isinstance(ledger, dict) else []
+        opened = [code for code in opened if code in bot_status.FACT_ISSUE_CODES] if isinstance(opened, list) else []
+        observation = bot_status.fact_observation(snap)
+        # Re-reading one cached nonce result does not constitute three probes.
+        proxies = snap.get("proxies") if isinstance(snap.get("proxies"), dict) else {}
+        observation["sample_timestamps"] = {
+            "proxy_" + name: (proxies.get(name) or {}).get("checked_at")
+            for name in ("mtproto", "native_tls", "web") if isinstance(proxies.get(name), dict)}
+        confirmation = bot_operations.confirmed_conditions(
+            observation, _ALERT_STATE.get("confirmation"), now=moment, open_issues=opened)
+        _ALERT_STATE["confirmation"] = confirmation["state"]
+        previous_hash = s.get("bot_fact_last_hash") or s.get("ai_last_notification_hash", "")
+        factual = bot_status.fact_alert(snap, previous_hash, previous_state=previous,
+                                       confirmed_issues=confirmation["bad"], confirmed_healthy=confirmation["healthy"])
+        def stamp(key):
+            try:
+                return max(0, int(s.get(key, "0") or 0))
+            except (TypeError, ValueError):
+                return 0
+        if not factual["should_notify"]:
+            # A delivered unchanged ledger may be safely materialised during
+            # legacy-hash migration; never store a changed suppressed candidate.
+            state = factual.get("state")
+            if isinstance(state, dict) and (factual["fingerprint"] == previous_hash or not previous_hash and not state.get("open")):
+                set_settings(db, {"bot_fact_state": json.dumps(state, separators=(",", ":")),
+                                  "bot_fact_last_hash": factual["fingerprint"]})
+                db.commit()
+            return False
+        if not bot_operations.delivery_due(factual, now=moment, last_attempt=stamp("bot_fact_last_attempt"),
+                                           last_sent=stamp("bot_fact_last_sent")):
+            return False
+        set_settings(db, {"bot_fact_last_attempt": str(moment)})
+        db.commit()
+        sent = telegram_send(s, factual["message"])
+        if sent:
+            state = factual.get("state")
+            values = {"bot_fact_last_hash": factual["fingerprint"], "bot_fact_last_sent": str(moment)}
+            if isinstance(state, dict):
+                values["bot_fact_state"] = json.dumps(state, separators=(",", ":"))
+            set_settings(db, values)
+        db.execute("insert into events values (?,?,?,?,?)", (moment, "bot_fact_delivery", "factual-monitor", "",
+                   json.dumps({"sent": sent, "transition": factual.get("transition"), "issues": factual.get("issues", [])})))
+        db.commit()
+        return sent
+
+
 def alert_worker():
     while True:
+        db = None
         try:
             db = conn()
             s = settings(db)
             if enabled(s, "telegram_alerts_enabled", False):
-                st = service_status()
-                up = probe_upstream()
-                now = int(time.time())
-                day_start = now - (now % 86400)
-                errors = db.execute(
-                    "select count(*) from events where kind='voluntary_diagnostic' and ts>?",
-                    (now - 3600,),
-                ).fetchone()[0]
-                checks = {
-                    "upstream": (not up.get("ok"), f"Upstream недоступен: {up.get('error')}"),
-                    "rospanel": (st["rospanel"] != "active", f"RosPanel status={st['rospanel']}"),
-                    "xray": (st["xray"] != "running", "Xray не запущен"),
-                    "disk": (st["disk_used_pct"] >= 90, f"Диск заполнен на {st['disk_used_pct']}%"),
-                    "errors": (errors >= 20, f"Диагностик за час: {errors}"),
-                }
-                with _ALERT_STATE["lock"]:
-                    for key, (bad, msg) in checks.items():
-                        last = _ALERT_STATE["last"].get(key, 0)
-                        if bad and now - last > 1800:
-                            if telegram_send(s, f"[Quantum Control] {msg}"):
-                                _ALERT_STATE["last"][key] = now
-                        elif not bad:
-                            _ALERT_STATE["last"].pop(key, None)
+                proxy_monitor.refresh()
+                send_factual_alert(db)
             maybe_send_daily_digest(db, s)
-            db.close()
         except Exception:
             pass
+        finally:
+            if db is not None:
+                db.close()
         time.sleep(60)
 
 

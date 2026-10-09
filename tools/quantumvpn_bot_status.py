@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import itertools
 import math
 import re
 import sqlite3
@@ -30,6 +31,9 @@ _COMMAND_DESCRIPTIONS = (
     ("start", "Открыть помощь бота"),
 )
 MAX_STATUS_CHARS = 3500
+OPERATIONS_KNOWLEDGE_VERSION = "quantum-control-facts-v1"
+_SERVICE_STATES = frozenset({"active", "inactive", "failed", "activating", "deactivating"})
+_PROXY_PROTOCOLS = {"mtproto": "mtproto_req_pq_multi", "native_tls": "mtproto_fake_tls_req_pq_multi", "web": "web_mtproto_req_pq_multi"}
 _MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+-]{0,79}\Z")
 _VERSION = re.compile(r"[0-9][A-Za-z0-9_.+-]{0,39}\Z")
 AI_ERROR_LABELS = {
@@ -106,6 +110,41 @@ def _choice(value, choices):
     return value if isinstance(value, str) and value in choices else None
 
 
+def _operations_status(value, engine, now):
+    value = value if isinstance(value, dict) else {}
+    return {
+        "monitor_interval_seconds": _integer(value.get("monitor_interval_seconds"), minimum=30, maximum=3600),
+        "confirm_samples": _integer(value.get("confirm_samples"), minimum=1, maximum=10),
+        "ai_interval_seconds": _integer(value.get("ai_interval_seconds"), minimum=600 if engine == "llama.cpp" else 300, maximum=86400),
+        "ai_isolation_verified": _flag(value.get("ai_isolation_verified")),
+        "knowledge_version": OPERATIONS_KNOWLEDGE_VERSION,
+        "backup_verified": _flag(value.get("backup_verified")),
+        "backup_checked_at": _integer(value.get("backup_checked_at"), minimum=1, maximum=now),
+        "backup_db_count": _integer(value.get("backup_db_count"), maximum=2),
+        "backup_missing_count": _integer(value.get("backup_missing_count"), maximum=6),
+    }
+
+
+def _proxy_status(value, now):
+    value = value if isinstance(value, dict) else {}
+    result = {}
+    for name, protocol in _PROXY_PROTOCOLS.items():
+        item = value.get(name) if isinstance(value.get(name), dict) else {}
+        checked = _integer(item.get("checked_at"), minimum=1, maximum=now)
+        method = _choice(item.get("protocol"), {protocol})
+        result[name] = {
+            "service": _choice(item.get("service"), _SERVICE_STATES),
+            "checked_at": checked,
+            "stage": _choice(item.get("stage"), {"not_checked", "tcp", "tls", "bridge", "telegram", "failed"}),
+            "protocol": method,
+            # A running process or TCP connection is not an MTProto nonce proof.
+            "ready": (True if item.get("ready") is True and item.get("stage") == "telegram" else
+                      False if item.get("ready") is False and item.get("stage") in {"tcp", "tls", "bridge", "telegram", "failed"} else None) if checked and method else None,
+            "isolation_verified": _flag(item.get("isolation_verified")),
+        }
+    return result
+
+
 def _maintenance(settings, now):
     manual = _flag(settings.get("maintenance"))
     scheduled = _flag(settings.get("maintenance_schedule_enabled"))
@@ -175,7 +214,10 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
 
     Runtime keys: cpu_percent, memory_percent, disk_percent, memory_total_bytes,
     services (operator/rospanel/xray/ollama systemd states), backup (exists/ts/
-    size), polling, webhook, active_ai_requests, system_instruction. Local model
+    size/encrypted), polling, webhook, active_ai_requests, system_instruction,
+    operations (bounded cadence/aggregate backup verification), proxies (three
+    fixed proxy kinds, service/probe/isolation evidence; never connection links).
+    Local model
     keys: ready (installed catalogue), loaded (resident), memory_bytes. Neither
     dictionary is echoed; unknown/raw error fields are deliberately discarded.
     """
@@ -251,6 +293,7 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
         "delivery": {"window_days": 7, **funnel},
         "backup": {
             "exists": _flag(backup.get("exists")),
+            "encrypted": _flag(backup.get("encrypted")),
             "ts": _integer(backup.get("ts")),
             "size_bytes": _integer(backup.get("size")),
             "hourly_enabled": _flag(settings.get("telegram_backups_enabled")),
@@ -271,6 +314,8 @@ def collect_status(db, settings, runtime=None, local_model=None, now=None):
             "last_action_at": _integer(automation.get("last_action_at")),
             "last_result": _choice(automation.get("last_result"), {"verified", "verifying", "rolled_back", "failed", "blocked"}),
         },
+        "operations": _operations_status(runtime.get("operations"), local_model.get("engine"), now),
+        "proxies": _proxy_status(runtime.get("proxies"), now),
     }
 
 
@@ -285,6 +330,10 @@ def _state(value):
 
 def _delivery(value):
     return "✅ успешно" if value is True else "❌ ошибка отправки" if value is False else "нет данных"
+
+
+def _encryption(value):
+    return "✅ подтверждено" if value is True else "❌ не подтверждено" if value is False else "нет данных"
 
 
 def _percent(value):
@@ -329,6 +378,9 @@ def format_status(snapshot):
         return snapshot.get(name) if isinstance(snapshot.get(name), dict) else {}
     ai, server, release = section("ai"), section("server"), section("release")
     automation = section("automation")
+    generated = _integer(snapshot.get("generated_at")) or 0
+    operations = _operations_status(section("operations"), ai.get("engine"), generated)
+    proxies = _proxy_status(section("proxies"), generated)
     delivery, backup, bot = section("delivery"), section("backup"), section("bot")
     model = _safe_name(ai.get("model"), _MODEL_NAME) or "нет данных"
     version = _safe_name(release.get("version"), _VERSION) or "нет данных"
@@ -361,6 +413,7 @@ def format_status(snapshot):
         f"• Системная инструкция: {_state(ai.get('instruction_present'))}",
         "• Диалоги не ведутся; " + ("ключ не выводится в статус" if ai.get('provider') == 'gemini' else "API-ключи не используются"),
         "• ИИ не исполняет произвольные команды",
+        "• CPU/RAM — ресурсы VDS, не процент прогресса ИИ",
     ]
     error_label = _ai_error_label(ai)
     if last_status == "ошибка" and error_label:
@@ -377,6 +430,16 @@ def format_status(snapshot):
             labels = {"recommendation_changed": "обновлена рекомендация", "node_quarantined": "нода временно исключена", "node_restored": "нода возвращена", "probe_failed": "проверка не пройдена", "rollback": "откат"}
             results = {"verified": "проверено", "verifying": "ожидаются контрольные проверки", "rolled_back": "откат выполнен", "failed": "ошибка", "blocked": "действие не применено"}
             lines.append(f"• Последнее действие: {labels[last_action]} · {results.get(_choice(automation.get('last_result'), results), 'результат неизвестен')}")
+    if any(operations[name] is not None for name in ("monitor_interval_seconds", "confirm_samples", "ai_interval_seconds")):
+        lines.extend([
+            f"• Монитор: каждые {_count(operations['monitor_interval_seconds'])} с · подтверждение {_count(operations['confirm_samples'])} замерами",
+            f"• Анализ модели: не чаще {_count(operations['ai_interval_seconds'])} с; монитор работает отдельно",
+            "• Правила отчёта: " + OPERATIONS_KNOWLEDGE_VERSION,
+        ])
+        if ai.get("engine") == "llama.cpp":
+            isolated = operations["ai_isolation_verified"]
+            lines.append("• Изоляция процесса ИИ: " + ("✅ непривилегированный, seccomp, без capabilities" if isolated is True else
+                         "❌ проверка не пройдена" if isolated is False else "нет данных"))
     lines.extend([
         "", "📊 Ресурсы VDS (реальный замер)",
         f"• CPU: {_bar(server.get('cpu_percent'))}",
@@ -390,6 +453,21 @@ def format_status(snapshot):
         "• Это проверки VDS, не пинг пользователей", "",
         f"• Сетевой монитор: { {'healthy': 'стабильные серверные проверки', 'degraded': 'повторное ухудшение', 'insufficient_data': 'недостаточно данных'}.get(_choice(server.get('network_status'), {'healthy', 'degraded', 'insufficient_data'}), 'нет данных')}",
         "• Причина ТСПУ не доказана; скорость VPN не измеряется", "",
+        "• Проверки ограничены по времени и нагрузке; замер не равен прогнозу", "",
+    ])
+    if any(any(item[field] is not None for field in ("service", "checked_at", "isolation_verified")) for item in proxies.values()):
+        lines.append("🔌 Telegram-прокси (последний серверный тест)")
+        stages = {"not_checked": "не проверялся", "tcp": "TCP", "tls": "TLS", "bridge": "HTTPS-мост", "telegram": "ответ Telegram", "failed": "не завершён"}
+        for name, label in (("mtproto", "MTProto · 3443"), ("native_tls", "Native TLS · 5443"), ("web", "WEB Proxy · 443")):
+            item = proxies[name]
+            ready = "✅ nonce подтверждён" if item["ready"] is True else "❌ nonce не подтверждён" if item["ready"] is False else "результат неизвестен"
+            isolation = "подтверждена" if item["isolation_verified"] is True else "не подтверждена" if item["isolation_verified"] is False else "нет данных"
+            lines.extend([
+                f"• {label}: {service_states.get(item['service'], 'нет данных')} · {ready}",
+                f"  Этап: {stages.get(item['stage'], 'нет данных')} · {_stamp(item['checked_at'])}; изоляция: {isolation}",
+            ])
+        lines.extend(["• Не тест входа в аккаунт и не доступность с телефона без VPN", ""])
+    lines.extend([
         "📦 APK и выпуск (хранилище VDS)",
         f"• Публичная версия: {version} · код {_count(release.get('version_code'))}",
         f"• Охват: {_percent(release.get('rollout_percent'))}",
@@ -414,9 +492,18 @@ def format_status(snapshot):
         "• Самоотчёты клиентов; открытие установщика ≠ установка", "",
         "🔐 Резервные копии",
         f"• Копия на VDS: {_state(backup.get('exists'))} · {_bytes(backup.get('size_bytes'))}",
+        f"• Шифрование архива: {_encryption(backup.get('encrypted'))}",
         f"• Последняя копия: {_stamp(backup.get('ts'))}",
         f"• Часовая отправка: {_state(backup.get('hourly_enabled'))}",
         f"• Последняя доставка: {_stamp(backup.get('last_delivery_at'))} · {_delivery(backup.get('last_delivery_ok'))}",
+    ])
+    if any(operations[name] is not None for name in ("backup_verified", "backup_checked_at", "backup_db_count", "backup_missing_count")):
+        verified = "✅ пройдена" if operations['backup_verified'] is True else "❌ не пройдена" if operations['backup_verified'] is False else "нет данных"
+        lines.extend([
+            f"• Проверка восстановления: {verified} · {_stamp(operations['backup_checked_at'])}",
+            f"• Баз проверено: {_count(operations['backup_db_count'])} · компонентов отсутствует: {_count(operations['backup_missing_count'])}",
+        ])
+    lines.extend([
         f"• Открытых обращений: {_count(section('support').get('open_threads'))}", "",
         "💡 Команды (только просмотр)",
         "/status — полный статус · /ai_status — ИИ",
@@ -433,6 +520,8 @@ def format_status(snapshot):
     # aggregate counters. Prefer dropping explanatory repetitions to cutting
     # a backup result or a command in the middle of its sentence.
     optional = (
+        "• CPU/RAM — ресурсы VDS, не процент прогресса ИИ\n",
+        "• Проверки ограничены по времени и нагрузке; замер не равен прогнозу\n",
         "• GitHub, MTProto и сторонние каналы не используются\n",
         "• Диалоги не ведутся; API-ключи не используются\n",
         "• Диалоги не ведутся; ключ не выводится в статус\n",
@@ -452,7 +541,7 @@ def format_status(snapshot):
 
 
 def format_backup_caption(snapshot, kind="hourly"):
-    """Short factual caption for the encrypted archive; full status follows it.
+    """Short factual archive caption; full status follows it.
 
     Telegram document captions are shorter than messages. Keep this below 900
     characters, include the report timestamp, and avoid model-generated prose.
@@ -469,67 +558,203 @@ def format_backup_caption(snapshot, kind="hourly"):
     lines = [
         f"🔐 Quantum Control · {title} резервная копия",
         f"Срез: {_stamp(snapshot.get('generated_at'))}",
-        f"📦 Зашифрованный архив: {_bytes(backup.get('size_bytes'))}",
+        f"📦 Архив: {_bytes(backup.get('size_bytes'))} · шифрование: {_encryption(backup.get('encrypted'))}",
         f"🧠 {model} · {_model_runtime(ai)}",
         f"📊 CPU {_percent(server.get('cpu_percent'))} · RAM {_percent(server.get('memory_percent'))} · диск {_percent(server.get('disk_percent'))}",
         f"🌐 Сеть: {status}",
         f"📱 Публичный APK: {version}",
         "Полный отчёт — в ответе к этому файлу.",
-        "Ключ расшифровки хранится отдельно от архива.",
+        "Формат и ключ архива не выводятся в сообщении.",
     ]
     return "\n".join(lines)[:900]
 
 
-def _fact_issues(snapshot):
-    """Return named observed failures; unknown telemetry is never a failure."""
+_ISSUE_LABELS = {
+    "cpu_percent": "CPU", "memory_percent": "RAM", "disk_percent": "Диск",
+    "service_operator": "Дополнительная панель", "service_rospanel": "Основная панель",
+    "service_xray": "VPN Xray", "service_ollama": "Локальный ИИ · Ollama",
+    "service_llama_cpp": "Локальный ИИ · llama.cpp", "network_degraded": "Серверные сетевые проверки",
+    "analysis_error": "Анализ ИИ", "backup_stale": "Свежая резервная копия",
+    "backup_delivery_failed": "Доставка копии в Telegram",
+    "proxy_mtproto": "MTProto · 3443", "proxy_native_tls": "Native TLS · 5443",
+    "proxy_web": "WEB Proxy · 443",
+}
+_GROUPS = (
+    ("📊 Ресурсы VDS", ("cpu_percent", "memory_percent", "disk_percent"),
+     "Проверьте процессы и место в панели. Не удаляйте базы, ключи и рабочие APK."),
+    ("🌐 Службы", ("service_operator", "service_rospanel", "service_xray"),
+     "Проверьте журнал указанных служб. Не перезапускайте активные VPN-сессии без проверки причины."),
+    ("📡 Сеть", ("network_degraded",),
+     "Откройте «Сеть → Ноды» и сравните серии DNS/TCP/TLS с резервным путём."),
+    ("🧠 ИИ", ("service_ollama", "service_llama_cpp", "analysis_error"),
+     "Проверьте службу и последний анализ ИИ. VPN и монитор нод проверяются отдельно."),
+    ("🔐 Резерв", ("backup_stale", "backup_delivery_failed"),
+     "Откройте «Резервные копии», проверьте архив и доставку; сохраните последнюю рабочую копию."),
+    ("📨 Telegram", ("proxy_mtproto", "proxy_native_tls", "proxy_web"),
+     "Откройте «Сеть → Telegram», проверьте протокол и затем путь с телефона без VPN. Не публикуйте ключи прокси."),
+)
+MAX_ALERT_CHARS = 3000
+FACT_ISSUE_CODES = tuple(_ISSUE_LABELS)
+
+
+def _fact_conditions(snapshot):
+    """Per-issue measured bad/healthy/unknown; AI prose never supplies evidence."""
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     def section(name):
         return snapshot.get(name) if isinstance(snapshot.get(name), dict) else {}
     server, ai, backup = section("server"), section("ai"), section("backup")
     generated = _integer(snapshot.get("generated_at"))
-    issues = []
+    conditions = {key: None for key in _ISSUE_LABELS}
+    labels = {}
     for name, label, threshold in (("cpu_percent", "CPU", 90), ("memory_percent", "RAM", 90), ("disk_percent", "диск", 85)):
         value = _number(server.get(name))
-        if value is not None and value >= threshold:
-            issues.append((name, f"{label}: {_percent(value)} · порог {threshold}%"))
+        if value is not None:
+            conditions[name] = value >= threshold
+            labels[name] = f"{label}: {_percent(value)} · порог {threshold}%"
     services = server.get("services") if isinstance(server.get("services"), dict) else {}
-    labels = {"operator": "Дополнительная панель", "rospanel": "Основная панель", "xray": "VPN Xray"}
+    service_labels = {"operator": "Дополнительная панель", "rospanel": "Основная панель", "xray": "VPN Xray"}
     if ai.get("enabled") is True and ai.get("provider") != "gemini":
-        labels["llama_cpp" if ai.get("engine") == "llama.cpp" else "ollama"] = "Локальный ИИ"
-    for key, label in labels.items():
+        service_labels["llama_cpp" if ai.get("engine") == "llama.cpp" else "ollama"] = "Локальный ИИ"
+    for key, label in service_labels.items():
         state = _choice(services.get(key), {"active", "inactive", "failed", "activating", "deactivating"})
+        code = "service_" + key
         if state in {"inactive", "failed"}:
-            issues.append(("service_" + key, label + (": служба остановлена" if state == "inactive" else ": ошибка службы")))
-    if server.get("network_status") == "degraded":
-        issues.append(("network_degraded", "Сеть: подтверждено повторное ухудшение серверных проверок"))
-    if ai.get("enabled") is True and ai.get("last_status") == "ошибка":
-        reason = _ai_error_label(ai) or "последний анализ завершился ошибкой"
-        issues.append(("analysis_error", "ИИ: " + reason))
+            conditions[code] = True
+            labels[code] = label + (": служба остановлена" if state == "inactive" else ": ошибка службы")
+        elif state == "active":
+            conditions[code] = False
+    network = _choice(server.get("network_status"), {"healthy", "degraded", "insufficient_data"})
+    if network in {"healthy", "degraded"}:
+        conditions["network_degraded"] = network == "degraded"
+        labels["network_degraded"] = "Сеть: подтверждено повторное ухудшение серверных проверок"
+    if ai.get("enabled") is True:
+        if ai.get("last_status") == "ошибка":
+            conditions["analysis_error"] = True
+            labels["analysis_error"] = "ИИ: " + (_ai_error_label(ai) or "последний анализ завершился ошибкой")
+        elif ai.get("last_status") == "готов":
+            conditions["analysis_error"] = False
     if backup.get("hourly_enabled") is True:
         stamp = _integer(backup.get("ts"))
-        if backup.get("exists") is False or generated and stamp and generated - stamp > 2 * 3600:
-            issues.append(("backup_stale", "Резервная копия: нет свежего архива за последние два часа"))
+        if backup.get("exists") is False:
+            conditions["backup_stale"] = True
+        elif backup.get("exists") is True and generated and stamp and 0 <= generated - stamp:
+            conditions["backup_stale"] = generated - stamp > 2 * 3600
+        labels["backup_stale"] = "Резервная копия: нет свежего архива за последние два часа"
         if backup.get("last_delivery_ok") is False:
-            issues.append(("backup_delivery_failed", "Резервная копия: последняя отправка в Telegram не удалась"))
-    return issues
+            conditions["backup_delivery_failed"] = True
+        elif backup.get("last_delivery_ok") is True:
+            conditions["backup_delivery_failed"] = False
+        labels["backup_delivery_failed"] = "Резервная копия: последняя отправка в Telegram не удалась"
+    proxies = _proxy_status(section("proxies"), generated or 0)
+    for name, item in proxies.items():
+        key = "proxy_" + name
+        if item["service"] in {"inactive", "failed"}:
+            conditions[key] = True
+            labels[key] = _ISSUE_LABELS[key] + (": служба остановлена" if item["service"] == "inactive" else ": ошибка службы")
+        elif item["service"] == "active" and item["checked_at"] and generated is not None and 0 <= generated - item["checked_at"] <= 900:
+            if item["ready"] is not None:
+                conditions[key] = not item["ready"]
+                labels[key] = _ISSUE_LABELS[key] + ": свежий тест протокола не подтвердил nonce Telegram"
+    return conditions, labels
+
+
+def _fact_issues(snapshot):
+    conditions, labels = _fact_conditions(snapshot)
+    return [(key, labels[key]) for key in _ISSUE_LABELS if conditions[key] is True]
+
+
+def fact_observation(snapshot):
+    """Typed measurement states for the caller's bounded confirmation counters.
+
+    No delivery state or prose is returned. Unknown is not a healthy sample.
+    Measurements here are facts, not an AI judgement or client-speed forecast.
+    """
+    conditions, _ = _fact_conditions(snapshot)
+    return {"schema": 1, "conditions": {
+        code: "bad" if state is True else "healthy" if state is False else "unknown"
+        for code, state in conditions.items()
+    }}
+
+
+def _confirmed_keys(value):
+    if value is None:
+        return None
+    if (not isinstance(value, (list, tuple, set, frozenset)) or len(value) > len(FACT_ISSUE_CODES)
+            or any(not isinstance(code, str) or code not in _ISSUE_LABELS for code in value)):
+        return set()
+    return set(value)
+
+
+def _issue_fingerprint(keys):
+    ordered = [key for key in _ISSUE_LABELS if key in keys]
+    return hashlib.sha256(json.dumps(ordered, separators=(",", ":")).encode("ascii")).hexdigest()
+
+
+def _legacy_recovery_verified(fingerprint, conditions):
+    """Match an old digest only to independently healthy measured issue kinds.
+
+    The old ledger had no component list. Missing proxy/AI/backup evidence must
+    not clear it. The search is bounded by the fixed code catalogue (15 codes),
+    not untrusted input; common one-component incidents match immediately.
+    """
+    healthy = [key for key in FACT_ISSUE_CODES if conditions[key] is False]
+    for count in range(1, len(healthy) + 1):
+        for group in itertools.combinations(healthy, count):
+            if _issue_fingerprint(group) == fingerprint:
+                return True
+    return False
+
+
+def _incident_state(value):
+    """Strict bounded ledger; never preserve caller text, measurements or keys."""
+    if isinstance(value, str):
+        if len(value) > 4096:
+            return None
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+    if (not isinstance(value, dict) or set(value) != {"schema", "open"}
+            or type(value.get("schema")) is not int or value["schema"] != 1):
+        return None
+    opened = value.get("open")
+    if (not isinstance(opened, list) or len(opened) > len(_ISSUE_LABELS)
+            or any(not isinstance(key, str) or key not in _ISSUE_LABELS for key in opened)
+            or len(set(opened)) != len(opened)):
+        return None
+    return set(opened)
 
 
 def notification_fingerprint(snapshot):
     """Stable digest of factual failure kinds, unaffected by an AI paraphrase."""
-    return hashlib.sha256(json.dumps([key for key, _ in _fact_issues(snapshot)], separators=(",", ":")).encode("ascii")).hexdigest()
+    return _issue_fingerprint({key for key, _ in _fact_issues(snapshot)})
 
 
-def fact_alert(snapshot, previous_fingerprint=""):
+def fact_alert(snapshot, previous_fingerprint="", *, previous_state=None,
+               confirmed_issues=None, confirmed_healthy=None):
     """Quiet while healthy/unchanged; announce observed failures or recovery.
 
-    The caller owns cadence, persistence and delivery. This function does not
-    execute actions or include raw model advice, keys, addresses or exceptions.
+    Caller owns bounded cadence and delivery. Pass the last successfully
+    delivered state {schema:1, open:[codes]} (dict or JSON), then persist state
+    and fingerprint ONLY after successful delivery. Never acknowledge a changed
+    unsent candidate during cooldown/failure. A quiet initial healthy baseline
+    can be saved, and an unchanged delivered legacy hash can migrate to state.
+    state=None means legacy history cannot safely migrate with missing evidence.
+    Optional confirmed_issues/confirmed_healthy contain only condition codes
+    whose bad/healthy samples the caller has confirmed. Unconfirmed conditions
+    become unknown; they cannot create an incident or imply recovery. None
+    preserves the backwards-compatible one-sample behavior.
     """
     snapshot = snapshot if isinstance(snapshot, dict) else {}
-    issues = _fact_issues(snapshot)
-    digest = notification_fingerprint(snapshot)
+    conditions, labels = _fact_conditions(snapshot)
+    confirmed_bad, confirmed_good = _confirmed_keys(confirmed_issues), _confirmed_keys(confirmed_healthy)
+    for key, value in conditions.items():
+        if (value is True and confirmed_bad is not None and key not in confirmed_bad
+                or value is False and confirmed_good is not None and key not in confirmed_good):
+            conditions[key] = None
+    issues = [key for key in _ISSUE_LABELS if conditions[key] is True]
+    digest = _issue_fingerprint(issues)
     previous = previous_fingerprint if isinstance(previous_fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", previous_fingerprint) else ""
-    changed = digest != previous
     # A missing runtime sample must not turn a previously observed failure into
     # a recovery message. Recovery needs complete service/resource evidence.
     server = snapshot.get("server") if isinstance(snapshot.get("server"), dict) else {}
@@ -537,6 +762,7 @@ def fact_alert(snapshot, previous_fingerprint=""):
     complete = all(_number(server.get(name)) is not None for name in ("cpu_percent", "memory_percent", "disk_percent")) and all(services.get(name) == "active" for name in ("operator", "rospanel", "xray")) and server.get("network_status") == "healthy"
     ai = snapshot.get("ai") if isinstance(snapshot.get("ai"), dict) else {}
     backup = snapshot.get("backup") if isinstance(snapshot.get("backup"), dict) else {}
+    complete = complete and type(ai.get("enabled")) is bool and type(backup.get("hourly_enabled")) is bool
     if ai.get("enabled") is True:
         complete = complete and ai.get("last_status") == "готов"
         if ai.get("provider") != "gemini":
@@ -544,19 +770,69 @@ def fact_alert(snapshot, previous_fingerprint=""):
     if backup.get("hourly_enabled") is True:
         stamp, generated = _integer(backup.get("ts")), _integer(snapshot.get("generated_at"))
         complete = complete and backup.get("exists") is True and backup.get("last_delivery_ok") is True and bool(stamp and generated and 0 <= generated - stamp <= 2 * 3600)
-    recovery = not issues and bool(previous) and previous != hashlib.sha256(b"[]").hexdigest() and complete
-    should_notify = changed and (bool(issues) or recovery)
-    lines = ["🚨 Quantum Control · требуется внимание" if issues else "✅ Quantum Control · проверки восстановились", f"Срез: {_stamp(snapshot.get('generated_at'))}"]
-    lines.extend("• " + label for _, label in issues)
-    if recovery:
+    prior = _incident_state(previous_state)
+    resolved, unverified = [], []
+    if prior is not None:
+        resolved = [key for key in _ISSUE_LABELS if key in prior and conditions[key] is False]
+        unverified = [key for key in _ISSUE_LABELS if key in prior and conditions[key] is None]
+        opened = set(issues) | set(unverified)
+        new = [key for key in issues if key not in prior]
+        digest = _issue_fingerprint(opened)
+        recovery = bool(prior) and not opened and bool(resolved)
+        should_notify = bool(new or resolved)
+        state = {"schema": 1, "open": [key for key in _ISSUE_LABELS if key in opened]}
+    else:
+        recovery = (not issues and bool(previous) and previous != _issue_fingerprint(())
+                    and complete and _legacy_recovery_verified(previous, conditions))
+        should_notify = digest != previous and (bool(issues) or recovery)
+        new = issues if should_notify and not recovery else []
+        # An opaque old hash cannot identify components. Keep it until a fully
+        # verified recovery or identical factual issue set makes migration safe.
+        migratable = not previous or previous == _issue_fingerprint(()) or previous == digest or recovery
+        state = {"schema": 1, "open": list(issues)} if migratable else None
+        if not issues and previous and not recovery and previous != _issue_fingerprint(()):
+            digest = previous
+    transition = "recovery" if recovery else "update" if resolved else "incident" if new else "quiet"
+    title = ("✅ Quantum Control · проверки восстановились" if recovery else
+             "🟡 Quantum Control · частичное восстановление" if resolved else
+             "🚨 Quantum Control · требуется внимание")
+    lines = [title, f"Срез: {_stamp(snapshot.get('generated_at'))}"]
+    if resolved:
+        lines.extend(["", "✅ Подтверждённое восстановление"])
+        for key in resolved:
+            detail = ("успешная доставка подтверждена" if key == "backup_delivery_failed" else
+                      "есть свежий архив" if key == "backup_stale" else
+                      "успешный анализ" if key == "analysis_error" else
+                      "свежий nonce Telegram подтверждён" if key.startswith("proxy_") else
+                      "повторные проверки в норме" if key == "network_degraded" else
+                      "служба active" if key.startswith("service_") else "замер ниже порога")
+            lines.append("• " + _ISSUE_LABELS[key] + ": " + detail)
+    elif recovery:
         lines.append("• Серверные службы, ресурсы и сетевые проверки снова в норме.")
-    if any(key == "network_degraded" for key, _ in issues):
-        lines.append("Проверки выполнены с VDS. Причина сбоя пока не установлена.")
-    if any(key == "analysis_error" for key, _ in issues):
+    for title, group, action in _GROUPS:
+        observed = [key for key in group if key in issues]
+        if observed:
+            lines.extend(["", title])
+            lines.extend("• " + labels[key] for key in observed)
+            lines.append("Действие: " + action)
+    if unverified and should_notify:
+        lines.extend(["", "⏳ Восстановление ещё не подтверждено"])
+        lines.append("• Нет нового результата: " + ", ".join(_ISSUE_LABELS[key] for key in unverified))
+    if "network_degraded" in issues or "network_degraded" in resolved:
+        lines.append("Проверки выполнены с VDS. Причина сбоя пока не установлена. Пинг телефона и скорость VPN не измерялись; ТСПУ не доказана.")
+    if "analysis_error" in issues or any(key in issues for key in ("service_ollama", "service_llama_cpp")):
         lines.append("Это ошибка анализа ИИ, не подтверждение сбоя VPN. Монитор нод работает отдельно.")
+    if any(key.startswith("proxy_") for key in issues + resolved):
+        lines.append("Nonce проверяет ответ протокола, не вход в аккаунт и не путь вашего оператора без VPN.")
+        if "proxy_mtproto" in issues and any(conditions[key] is False for key in ("proxy_native_tls", "proxy_web")):
+            lines.append("Резерв прошёл серверный тест: откройте «Сеть → Telegram → FakeTLS/WEB» и проверьте подключение с телефона.")
     if should_notify:
-        lines.append("/status — полный отчёт; подробный часовой отчёт приходит с резервной копией.")
-    return {"fingerprint": digest, "should_notify": should_notify, "recovery": recovery, "issues": [key for key, _ in issues], "message": "\n".join(lines)[:1800] if should_notify else ""}
+        lines.extend(["", "/status — полный отчёт; /backups — состояние копий.",
+                      "Инциденты сгруппированы; одинаковые факты повторно не отправляются."])
+    return {"fingerprint": digest, "state": state, "should_notify": should_notify,
+            "recovery": recovery, "issues": issues, "new_issues": new,
+            "resolved_issues": resolved, "unverified_issues": unverified,
+            "transition": transition, "message": "\n".join(lines)[:MAX_ALERT_CHARS] if should_notify else ""}
 
 
 def authorized_command(message, allowed_chat_id, allowed_user_ids=None, bot_username=None):

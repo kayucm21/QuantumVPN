@@ -185,7 +185,7 @@ class BotWorkerTests(unittest.TestCase):
     def test_xray_process_states_are_normalized_for_status(self):
         with mock.patch.object(self.panel, 'latest_backup_info', return_value={}), \
                 mock.patch.object(self.panel, 'cached_service_status', return_value={'operator': 'active', 'rospanel': 'active', 'xray': 'running'}), \
-                mock.patch.object(self.panel.subprocess, 'run', return_value=types.SimpleNamespace(stdout='active')):
+                mock.patch.object(self.panel.subprocess, 'run', return_value=types.SimpleNamespace(stdout='active', returncode=0)):
             snapshot = self.panel.bot_runtime_snapshot()
         self.assertEqual(snapshot['services']['xray'], 'active')
 

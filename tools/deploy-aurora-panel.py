@@ -24,6 +24,7 @@ REMOTE_ROOT = "/opt/quantumvpn-operator"
 COMPANIONS = ("quantumvpn_control_quality.py", "quantumvpn_resources.py")
 COMMUNITY_MODULES = ("quantumvpn_durak.py", "quantumvpn_community.py", "quantumvpn_control_next.py")
 BOT_STATUS_MODULE = "quantumvpn_bot_status.py"
+BOT_OPERATIONS_MODULES = ("quantumvpn_bot_operations.py", "quantumvpn_ai_knowledge.py", "quantumvpn_proxy_monitor.py")
 QUALITY_MODULE = "quantumvpn_control_quality.py"
 NETWORK_AI_MODULES = ("quantumvpn_gemini.py", "quantumvpn_network_guard.py", "quantumvpn_target_scan.py")
 LOCAL_AI_MODULES = ("quantumvpn_llama.py", "quantumvpn_autopilot.py", "quantumvpn_maintenance.py")
@@ -44,6 +45,7 @@ SERVICE = 'quantumvpn-operator'
 BASE_SOURCES = {'app.py', 'quantumvpn_aurora.py', 'assets/quantumvpn-world.svg'}
 COMMUNITY_SOURCES = {'quantumvpn_durak.py', 'quantumvpn_community.py', 'quantumvpn_control_next.py'}
 BOT_STATUS_SOURCES = {'quantumvpn_bot_status.py'}
+BOT_OPERATIONS_SOURCES = {'quantumvpn_bot_operations.py', 'quantumvpn_ai_knowledge.py', 'quantumvpn_proxy_monitor.py'}
 QUALITY_SOURCES = {'quantumvpn_control_quality.py'}
 NETWORK_AI_SOURCES = {'quantumvpn_gemini.py', 'quantumvpn_network_guard.py', 'quantumvpn_target_scan.py'}
 LOCAL_AI_SOURCES = {'quantumvpn_llama.py', 'quantumvpn_autopilot.py', 'quantumvpn_maintenance.py'}
@@ -56,6 +58,7 @@ VOLATILE = {
     'quality_subscription', 'ai_last_run', 'ai_last_status', 'ai_last_advice',
     'ai_last_error', 'ai_last_error_reason', 'ai_last_notification_hash', 'ai_last_notification_at',
     'ai_autopilot_state', 'ai_autopilot_last_run', 'ai_autopilot_last_status', 'ai_autopilot_last_action',
+    'bot_fact_state', 'bot_fact_last_hash', 'bot_fact_last_sent', 'bot_fact_last_attempt', 'quality_backup',
 }
 
 class CheckFailed(Exception):
@@ -153,6 +156,7 @@ def preflight(config):
     require(command(['systemctl', 'is-active', SERVICE]).strip() == b'active', 'service_inactive')
     allowed = (BASE_SOURCES | (COMMUNITY_SOURCES if config.get('with_community') else set())
                | (BOT_STATUS_SOURCES if config.get('with_bot_status') else set())
+               | (BOT_OPERATIONS_SOURCES if config.get('with_bot_operations') else set())
                | (QUALITY_SOURCES if config.get('with_quality') else set())
                | (NETWORK_AI_SOURCES if config.get('with_network_ai') else set())
                | (LOCAL_AI_SOURCES if config.get('with_local_ai') else set())
@@ -161,6 +165,7 @@ def preflight(config):
     require(set(config['files']) <= allowed and {'app.py', 'quantumvpn_aurora.py'} <= set(config['files']), 'source_allowlist')
     require(not config.get('with_community') or COMMUNITY_SOURCES <= set(config['files']), 'community_sources_missing')
     require(not config.get('with_bot_status') or BOT_STATUS_SOURCES <= set(config['files']), 'bot_status_source_missing')
+    require(not config.get('with_bot_operations') or BOT_OPERATIONS_SOURCES <= set(config['files']), 'bot_operations_sources_missing')
     require(not config.get('with_quality') or QUALITY_SOURCES <= set(config['files']), 'quality_source_missing')
     require(not config.get('with_network_ai') or NETWORK_AI_SOURCES <= set(config['files']), 'network_ai_sources_missing')
     require(not config.get('with_local_ai') or LOCAL_AI_SOURCES <= set(config['files']), 'local_ai_sources_missing')
@@ -454,6 +459,10 @@ def parser() -> argparse.ArgumentParser:
                         help="Also deploy only quantumvpn_bot_status.py; no dependency changes")
     result.add_argument("--expected-old-bot-status-sha256", type=sha256,
                         help="Existing bot status module SHA-256; omitted means the module must be absent")
+    result.add_argument("--with-bot-operations", action="store_true", help="Deploy only factual gates, trusted knowledge and read-only proxy monitor")
+    for name in ("bot-operations", "ai-knowledge", "proxy-monitor"):
+        result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
+                            help="Existing module SHA-256; omitted means the module must be absent")
     result.add_argument("--with-quality", action="store_true", help="Deploy only the read-only quality view helper; preserve settings, client consent and APK releases")
     result.add_argument("--expected-old-quality-sha256", type=sha256, help="Existing quality helper SHA-256; omitted means the helper must be absent")
     result.add_argument("--with-network-ai", action="store_true",
@@ -498,6 +507,12 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
         local[BOT_STATUS_MODULE] = ROOT / "tools" / BOT_STATUS_MODULE
     elif getattr(args, "expected_old_bot_status_sha256", None):
         raise ValueError("Bot status old hash requires --with-bot-status")
+    with_bot_operations = getattr(args, "with_bot_operations", False)
+    if with_bot_operations:
+        for name in BOT_OPERATIONS_MODULES:
+            local[name] = ROOT / "tools" / name
+    elif any(getattr(args, key, None) for key in ("expected_old_bot_operations_sha256", "expected_old_ai_knowledge_sha256", "expected_old_proxy_monitor_sha256")):
+        raise ValueError("Bot operations old hashes require --with-bot-operations")
     with_quality = getattr(args, "with_quality", False)
     if with_quality:
         local[QUALITY_MODULE] = ROOT / "tools" / QUALITY_MODULE
@@ -549,6 +564,10 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
                     "quantumvpn_control_next.py": getattr(args, "expected_old_control_next_sha256", None)})
     if with_bot_status:
         old[BOT_STATUS_MODULE] = getattr(args, "expected_old_bot_status_sha256", None)
+    if with_bot_operations:
+        for name in BOT_OPERATIONS_MODULES:
+            key = "expected_old_" + name.removeprefix("quantumvpn_").removesuffix(".py") + "_sha256"
+            old[name] = getattr(args, key, None)
     if with_quality:
         old[QUALITY_MODULE] = getattr(args, "expected_old_quality_sha256", None)
     if with_network_ai:
@@ -580,6 +599,7 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
             "companions": companions, "panel_build": builds[0],
             "with_community": with_community,
             "with_bot_status": with_bot_status,
+            "with_bot_operations": with_bot_operations,
             "with_quality": with_quality,
             "with_network_ai": with_network_ai,
             "with_local_ai": with_local_ai,

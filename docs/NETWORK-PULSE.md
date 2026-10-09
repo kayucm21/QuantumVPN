@@ -1,13 +1,13 @@
 # Quantum Pulse / Network center
 
-Panel build: `2.3.0-pulse.2`. This is a panel-only change; Android version,
+Panel build: `2.3.0-pulse.3`. This is a panel-only change; Android version,
 release schedule, APK artifacts, subscriptions and existing VPN keys are not
 changed by its deployment.
 
 ## Operator workflow
 
 Open `/operator?tab=network`. The consolidated section has six views:
-overview, nodes, DNS, routes, AI and Telegram MTProto. Existing detailed URLs
+overview, nodes, DNS, routes, AI and Telegram. Existing detailed URLs
 remain available. Cards use registered nodes and actual server measurements;
 server TCP RTT is not a user's phone ping or a VPN throughput measurement.
 
@@ -116,6 +116,49 @@ request and verifies the nonce in Telegram's `resPQ` response. This is stronger
 than an open TCP port, but is not a full Telegram account/RSA-login test.
 The proxy supports Telegram only; it does not route other applications.
 Automatic daily refresh of upstream Telegram configuration is not included.
+
+### Connection links and Telegram WEB Proxy
+
+The Telegram view contains separate MTProto and WEB cards. Owner-only reveal
+uses the existing strict Origin, session CSRF and bounded POST endpoint. With
+JavaScript it stays in the current view; without JavaScript a separate no-store
+page exposes the same controls. Links are validated as an exact matching native
+Telegram/t.me pair before HTML rendering. Each link can be copied, opened or
+visually hidden. Clipboard writes require a button click; clipboard content is
+never read, and links are never saved in browser storage or audit payloads.
+Hiding a revealed key is not revocation.
+
+WEB means Telegram's official `telegramdesktop/tproxy-server`, pinned at
+`c8adb8b7c6b7fc46c12ae3acb68be9070c26a8e8`, not an open HTTP/SOCKS browser
+proxy. The private installer is read-only by default. Its explicit
+`--apply --relay-only` mode creates only a new bounded loopback service; it does
+not take public ports, replace a web server, change VPN settings or run the
+upstream installer. No upstream source or binary is vendored or published.
+The pinned upstream repository has no LICENSE file; review licensing before
+redistribution.
+
+The owned production port 443 belongs to RosPanel's TLS front. It forwards TLS
+to Xray's VLESS inner listener; ordinary HTTPS falls back to RosPanel on 8080.
+The `Server: Caddy` response is a decoy banner, not a standalone Caddy server
+with a configuration API. Consequently an nginx location on the panel's
+loopback/8443 listener alone cannot activate WEB on public 443. This deployment
+does not change the main front, Xray configuration or active VPN sessions.
+The WEB card remains **not connected** until a separately approved persistent
+HTTPS-prefix integration is installed and verified. Do not present a prepared
+UI or a loopback process as a working public proxy.
+
+The WEB helper verifies public TLS, the authentic bridge/session contract and
+Telegram's matching resPQ nonce through the actual carrier, closes its disposable
+session, and records only typed results. Public connection links require a
+successful public proof within five minutes; a local probe cannot enable them.
+Service controls invalidate the proof. Clients need Telegram with WEB support;
+universal Android/iOS compatibility and a minimum stable Android version are not
+claimed. The protocol is not a full Telegram account authorization test.
+
+Primary upstream contracts:
+https://github.com/telegramdesktop/tproxy-server and its pinned `PROTOCOL.md`
+and `BASE_PATH.md` (native and HTTPS link formats, fixed HTTPS port, base-path
+co-hosting and preservation of bridge security headers).
 
 ## Verification and deployment
 

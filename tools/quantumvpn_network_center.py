@@ -626,7 +626,7 @@ def render_network_hub(s: dict, csrf: str, *, payload: dict, lab_result: dict | 
     # draft to DNS would load the published lists into hidden fields, and the
     # next DNS save would unintentionally replace the draft's pending rules.
     local_url = lambda view: f"/operator?tab=network&amp;network_view={view}&amp;policy_source={policy_source}"
-    nav = "".join(f'<a href="{local_url(name)}" {"aria-current=page" if active == name else ""}>{label}</a>' for name, label in (("overview", "Обзор"), ("nodes", "Ноды"), ("dns", "DNS"), ("routes", "Маршруты"), ("ai", "AI"), ("mtproto", "MTProto")))
+    nav = "".join(f'<a href="{local_url(name)}" {"aria-current=page" if active == name else ""}>{label}</a>' for name, label in (("overview", "Обзор"), ("nodes", "Ноды"), ("dns", "DNS"), ("routes", "Маршруты"), ("ai", "AI"), ("mtproto", "Telegram")))
     rules, node_rows = _policy_rules(payload), nodes or []
     conflicts = signed_policy_conflicts(payload)
     staging = s.get("routing_staging_enabled") == "1"

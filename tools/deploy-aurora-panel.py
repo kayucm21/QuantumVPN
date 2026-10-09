@@ -26,7 +26,7 @@ COMMUNITY_MODULES = ("quantumvpn_durak.py", "quantumvpn_community.py", "quantumv
 BOT_STATUS_MODULE = "quantumvpn_bot_status.py"
 NETWORK_AI_MODULES = ("quantumvpn_gemini.py", "quantumvpn_network_guard.py", "quantumvpn_target_scan.py")
 LOCAL_AI_MODULES = ("quantumvpn_llama.py", "quantumvpn_autopilot.py", "quantumvpn_maintenance.py")
-PULSE_MODULES = ("quantumvpn_network_center.py", "quantumvpn_ai_journal.py", "quantumvpn_mtproto.py")
+PULSE_MODULES = ("quantumvpn_network_center.py", "quantumvpn_ai_journal.py", "quantumvpn_mtproto.py", "quantumvpn_proxy_links.py", "quantumvpn_webproxy.py")
 CATALOG_SOURCES = ("quantumvpn_target_catalog.py", "assets/routing-catalog-seed.json", "assets/routing-catalog-seed.LICENSE.txt")
 
 # Keep the remote operation self-contained; importing app would run writable
@@ -45,7 +45,7 @@ COMMUNITY_SOURCES = {'quantumvpn_durak.py', 'quantumvpn_community.py', 'quantumv
 BOT_STATUS_SOURCES = {'quantumvpn_bot_status.py'}
 NETWORK_AI_SOURCES = {'quantumvpn_gemini.py', 'quantumvpn_network_guard.py', 'quantumvpn_target_scan.py'}
 LOCAL_AI_SOURCES = {'quantumvpn_llama.py', 'quantumvpn_autopilot.py', 'quantumvpn_maintenance.py'}
-PULSE_SOURCES = {'quantumvpn_network_center.py', 'quantumvpn_ai_journal.py', 'quantumvpn_mtproto.py'}
+PULSE_SOURCES = {'quantumvpn_network_center.py', 'quantumvpn_ai_journal.py', 'quantumvpn_mtproto.py', 'quantumvpn_proxy_links.py', 'quantumvpn_webproxy.py'}
 CATALOG_SOURCES = {'quantumvpn_target_catalog.py', 'assets/routing-catalog-seed.json', 'assets/routing-catalog-seed.LICENSE.txt'}
 VOLATILE = {
     'node_quarantine', 'latency_state', 'latency_last_probe', 'latency_best_ms',
@@ -461,8 +461,8 @@ def parser() -> argparse.ArgumentParser:
         result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
                             help="Existing module SHA-256; omitted means the module must be absent")
     result.add_argument("--with-pulse", action="store_true",
-                        help="Also deploy only the network center, AI journal and MTProto control modules; no proxy installation, service or configuration changes")
-    for name in ("network-center", "ai-journal", "mtproto"):
+                        help="Also deploy only network center, AI journal, Telegram proxy controls and link UI; no proxy installation, service or configuration changes")
+    for name in ("network-center", "ai-journal", "mtproto", "proxy-links", "webproxy"):
         result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
                             help="Existing Pulse module SHA-256; omitted means the module must be absent")
     result.add_argument("--apply", action="store_true", help="Upload, back up, replace and verify; default is read-only")
@@ -508,7 +508,7 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
     if with_pulse:
         for name in PULSE_MODULES:
             local[name] = ROOT / "tools" / name
-    elif any(getattr(args, key, None) for key in ("expected_old_network_center_sha256", "expected_old_ai_journal_sha256", "expected_old_mtproto_sha256")):
+    elif any(getattr(args, key, None) for key in ("expected_old_network_center_sha256", "expected_old_ai_journal_sha256", "expected_old_mtproto_sha256", "expected_old_proxy_links_sha256", "expected_old_webproxy_sha256")):
         raise ValueError("Pulse old hashes require --with-pulse")
     with_catalog = getattr(args, "with_catalog", False)
     if with_catalog:
@@ -549,7 +549,9 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
     if with_pulse:
         old.update({"quantumvpn_network_center.py": getattr(args, "expected_old_network_center_sha256", None),
                     "quantumvpn_ai_journal.py": getattr(args, "expected_old_ai_journal_sha256", None),
-                    "quantumvpn_mtproto.py": getattr(args, "expected_old_mtproto_sha256", None)})
+                    "quantumvpn_mtproto.py": getattr(args, "expected_old_mtproto_sha256", None),
+                    "quantumvpn_proxy_links.py": getattr(args, "expected_old_proxy_links_sha256", None),
+                    "quantumvpn_webproxy.py": getattr(args, "expected_old_webproxy_sha256", None)})
     if with_catalog:
         old.update({"quantumvpn_target_catalog.py": getattr(args, "expected_old_catalog_sha256", None),
                     "assets/routing-catalog-seed.json": getattr(args, "expected_old_catalog_seed_sha256", None),

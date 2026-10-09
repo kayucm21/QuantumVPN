@@ -4,6 +4,7 @@ No real proxy, DNS lookup, service operation or VDS connection is used. The
 production request handler and SQLite database are exercised through HTTP.
 """
 from contextlib import closing
+import base64
 import hashlib
 from html.parser import HTMLParser
 import importlib.util
@@ -21,6 +22,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from tools import quantumvpn_control_next as controls
 from tools import quantumvpn_network_center as network_center
+from tools import quantumvpn_webproxy as webproxy
 from tools.test_control_next import ORIGIN
 
 
@@ -55,6 +57,7 @@ class _NetworkMarkup(HTMLParser):
         self.ids = {}
         self.forms = {}
         self.form_field_names = {}
+        self.form_items = {}
         self.elements = []
         self.nested_forms = []
         self.feed(page)
@@ -73,6 +76,9 @@ class _NetworkMarkup(HTMLParser):
         if attrs.get("id"):
             self.ids.setdefault(attrs["id"], []).append(item)
         if tag == "form":
+            item["fields"] = {}
+            item["field_names"] = []
+            self.form_items[id(attrs)] = item
             if forms:
                 self.nested_forms.append((forms[-1][1].get("id"), attrs.get("id")))
             if form_id:
@@ -81,6 +87,10 @@ class _NetworkMarkup(HTMLParser):
         elif tag == "input" and form_id in self.forms and attrs.get("type") == "hidden" and attrs.get("name"):
             self.forms[form_id][attrs["name"]] = attrs.get("value", "")
             self.form_field_names[form_id].append(attrs["name"])
+        if tag == "input" and forms and attrs.get("type") == "hidden" and attrs.get("name"):
+            parent_form = self.form_items[id(forms[-1][1])]
+            parent_form["fields"][attrs["name"]] = attrs.get("value", "")
+            parent_form["field_names"].append(attrs["name"])
         if tag not in self.VOID:
             self.stack.append((tag, attrs))
 
@@ -157,12 +167,23 @@ class NetworkPulseHTTPTests(unittest.TestCase):
         self.status = {"installed": True, "service": "active", "status": "active", "port": 3443,
                        "server": "150.241.96.191", "stats_loopback_only": True, "secret_available": True,
                        "protocol_health": {"ok": True, "status": "confirmed"}, "upstream_ready": True}
+        self.web_provider = getattr(self.panel, "webproxy", webproxy)
+        self.web_secret = base64.urlsafe_b64encode(b"\x70" + bytes.fromhex("ac" * 16)).decode().rstrip("=")
+        web_query = urlencode({"server": "pecaocek.ignorelist.com/quantum_test", "secret": self.web_secret})
+        self.web_links = {"telegram": "tg://webproxy?" + web_query, "https": "https://t.me/webproxy?" + web_query}
+        self.web_status = {"installed": True, "managed": True, "service": "active", "status": "active",
+                           "public_host": "pecaocek.ignorelist.com", "public_port": 443,
+                           "relay_port": 18082, "admin_port": 18083, "loopback_only": True,
+                           "runtime_ready": True, "config_valid": True, "base_path": "quantum_test",
+                           "carrier_mode": "https", "protocol_health": {"ok": True, "status": "confirmed"}}
         self.snapshot = network_center.sanitize_xray_config({
             "inbounds": [{"tag": "vless-in"}],
             "outbounds": [{"tag": "direct", "protocol": "freedom"}, {"tag": "warp", "protocol": "wireguard"}],
             "routing": {"rules": [{"type": "field", "domain": ["domain:video.example"], "outboundTag": "warp"}]}})
-        for target, value in ((self.panel.mtproto, "snapshot"), (self.panel.network_center, "read_xray_snapshot")):
-            patch = mock.patch.object(target, value, return_value=self.status if value == "snapshot" else self.snapshot)
+        for target, value, result in ((self.panel.mtproto, "snapshot", self.status),
+                                      (self.web_provider, "snapshot", self.web_status),
+                                      (self.panel.network_center, "read_xray_snapshot", self.snapshot)):
+            patch = mock.patch.object(target, value, return_value=result)
             patch.start()
             self.addCleanup(patch.stop)
 
@@ -508,6 +529,168 @@ class NetworkPulseHTTPTests(unittest.TestCase):
             links.assert_not_called()
             control.assert_not_called()
             probe.assert_not_called()
+
+    def test_both_proxy_cards_are_get_safe_with_owner_only_inline_reveal_forms(self):
+        with mock.patch.object(self.panel.mtproto, "owner_connection_links", return_value=self.links) as mt_links, \
+                mock.patch.object(self.panel.mtproto, "control") as mt_control, \
+                mock.patch.object(self.panel.mtproto, "health_probe") as mt_probe, \
+                mock.patch.object(self.web_provider, "owner_connection_links", return_value=self.web_links) as web_links, \
+                mock.patch.object(self.web_provider, "control") as web_control, \
+                mock.patch.object(self.web_provider, "health_probe") as web_probe:
+            for user in ("owner-test", "operator-test", "viewer-test"):
+                with self.subTest(user=user):
+                    status, headers, page = self.request("/operator?tab=network&network_view=mtproto", user=user)
+                    self.assertEqual(status, 200)
+                    self.assertTrue("MTProto" in page)
+                    self.assertTrue("WEB Proxy" in page)
+                    self.assertNotIn(self.secret, page)
+                    self.assertNotIn(self.web_secret, page)
+                    self.assertNotIn("tg://webproxy?", page)
+                    self.assertIn("no-store", headers.get("Cache-Control", ""))
+                    markup = _NetworkMarkup(page)
+                    self.assertEqual(markup.nested_forms, [])
+                    forms = [item for item in markup.elements if item["tag"] == "form"
+                             and "data-proxy-reveal" in item["attrs"] and not item["hidden"]]
+                    self.assertEqual(len(forms), 2 if user == "owner-test" else 0)
+                    for form in forms:
+                        attrs = form["attrs"]
+                        self.assertEqual(attrs["action"], "/operator/network/mtproto")
+                        self.assertEqual(attrs["method"].lower(), "post")
+                        self.assertIn(form["fields"]["action"], {"links", "web_links"})
+                        kind = "web" if form["fields"]["action"] == "web_links" else "mtproto"
+                        self.assertEqual(form["fields"]["csrf"], self.csrf_for(self.role_cookies[user]))
+                        self.assertEqual(form["field_names"].count("csrf"), 1)
+                        self.assertEqual(form["field_names"].count("action"), 1)
+                        for key in ("data-proxy-container", "data-proxy-status"):
+                            self.assertRegex(attrs[key], r"^proxy-(mtproto|web)-[a-z0-9-]{1,48}$")
+                            self.assertTrue(attrs[key].startswith(f"proxy-{kind}-"))
+                            self.assertFalse(markup.one(attrs[key])["hidden"])
+            for helper in (mt_links, mt_control, mt_probe, web_links, web_control, web_probe):
+                helper.assert_not_called()
+
+    def test_web_proxy_all_actions_require_owner_without_helper_calls(self):
+        with mock.patch.object(self.web_provider, "owner_connection_links", return_value=self.web_links) as links, \
+                mock.patch.object(self.web_provider, "control") as control, \
+                mock.patch.object(self.web_provider, "health_probe") as probe:
+            for user in ("operator-test", "viewer-test"):
+                for action in ("web_links", "web_probe", "web_start", "web_stop", "web_restart"):
+                    with self.subTest(user=user, action=action):
+                        status, _, page = self.request("/operator/network/mtproto", self.form(user, action=action, confirm="yes"), user=user)
+                        self.assertEqual(status, 403)
+                        self.assertNotIn(self.web_secret, page)
+            links.assert_not_called()
+            control.assert_not_called()
+            probe.assert_not_called()
+
+    def test_proxy_reveal_json_is_negotiated_explicitly_and_no_store_without_audit_leaks(self):
+        before = self.settings()
+        with mock.patch.object(self.panel.mtproto, "owner_connection_links", return_value=self.links), \
+                mock.patch.object(self.web_provider, "owner_connection_links", return_value=self.web_links):
+            for kind, action, value in (("mtproto", "links", self.secret), ("web", "web_links", self.web_secret)):
+                for negotiation in ({}, {"Accept": "application/json"}, {"X-QV-Request": "1"},
+                                    {"Accept": "application/json", "X-QV-Request": "1"}):
+                    with self.subTest(kind=kind, negotiation=negotiation):
+                        status, headers, page = self.request("/operator/network/mtproto", self.form(action=action), headers=negotiation)
+                        self.assertEqual(status, 200)
+                        json_requested = negotiation == {"Accept": "application/json", "X-QV-Request": "1"}
+                        if json_requested:
+                            self.assertTrue(headers.get("Content-Type", "").startswith("application/json"))
+                            data = json.loads(page)
+                            self.assertEqual(set(data), {"html"})
+                            fragment = data["html"]
+                            self.assertNotIn("<script", fragment)
+                            self.assertNotIn("<form", fragment)
+                        else:
+                            self.assertTrue(headers.get("Content-Type", "").startswith("text/html"))
+                            self.assertTrue("<!doctype html>" in page.lower())
+                            fragment = page
+                        self.assertIn(value, fragment)
+                        markup = _NetworkMarkup(fragment)
+                        for variant in ("telegram", "https"):
+                            item = markup.one(f"proxy-{kind}-{variant}-link")
+                            self.assertEqual(item["tag"], "textarea")
+                            self.assertIn("readonly", item["attrs"])
+                        self.assertIn("no-store", headers.get("Cache-Control", ""))
+                        self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+                        self.assertIn("noindex", headers.get("X-Robots-Tag", ""))
+        self.assertEqual(self.settings(), before)
+        audit = self.audit_text()
+        for value in (self.secret, self.web_secret, "tg://", "https://t.me", "quantum_test"):
+            self.assertNotIn(value, audit)
+        with closing(self.panel.conn()) as db:
+            records = list(db.execute("select detail from audit where action like 'network:%'"))
+        self.assertTrue(records)
+        for row in records:
+            detail = json.loads(row[0])
+            self.assertTrue(detail and all(type(value) is bool for value in detail.values()))
+
+    def test_web_proxy_origin_session_csrf_and_typed_actions_fail_without_mutation(self):
+        before = self.settings()
+        with mock.patch.object(self.web_provider, "owner_connection_links") as links, \
+                mock.patch.object(self.web_provider, "control") as control, \
+                mock.patch.object(self.web_provider, "health_probe") as probe:
+            for action in ("web_links", "web_probe", "web_start", "web_stop", "web_restart"):
+                for override in ({"Origin": "https://evil.example"}, {"Origin": ""},
+                                 {"Sec-Fetch-Site": "cross-site"}, {"Cookie": self.make_cookie("owner-test", "other-web-session")}):
+                    with self.subTest(action=action, override=override):
+                        status, _, body = self.request("/operator/network/mtproto", self.form(action=action, confirm="yes"), headers=override)
+                        self.assertEqual(status, 403)
+                        self.assertNotIn(self.web_secret, body)
+                status, _, _ = self.request("/operator/network/mtproto", self.form(action=action, confirm="yes", csrf="wrong"))
+                self.assertEqual(status, 403)
+            for values in (self.form(action=["web_start", "web_stop"], confirm="yes"),
+                           self.form(action="web_links", command="read-secret"), self.form(action="web_exec", confirm="yes")):
+                status, _, _ = self.request("/operator/network/mtproto", values)
+                self.assertEqual(status, 400)
+            links.assert_not_called()
+            control.assert_not_called()
+            probe.assert_not_called()
+        self.assertEqual(self.settings(), before)
+
+    def test_web_proxy_service_actions_require_confirmation_and_dispatch_fixed_suffix(self):
+        before = self.settings()
+        with mock.patch.object(self.web_provider, "control", return_value={"ok": True}) as control, \
+                mock.patch.object(self.panel.mtproto, "control") as mt_control:
+            for action in ("start", "stop", "restart"):
+                for confirm in (None, "no"):
+                    values = self.form(action="web_" + action)
+                    if confirm is not None:
+                        values["confirm"] = confirm
+                    status, _, _ = self.request("/operator/network/mtproto", values)
+                    self.assertEqual(status, 400)
+                control.assert_not_called()
+                status, headers, _ = self.request("/operator/network/mtproto", self.form(action="web_" + action, confirm="yes"))
+                self.assert_network_redirect(status, headers, "mtproto")
+                control.assert_called_once_with(action)
+                control.reset_mock()
+            mt_control.assert_not_called()
+        self.assertEqual(self.settings(), before)
+
+    def test_web_proxy_probe_is_explicit_fixed_and_logs_only_success(self):
+        before = self.settings()
+        with mock.patch.object(self.web_provider, "health_probe", return_value={"ok": True, "status": "confirmed"}) as probe, \
+                mock.patch.object(self.panel.mtproto, "health_probe") as mt_probe:
+            status, headers, _ = self.request("/operator/network/mtproto", self.form(action="web_probe"))
+            self.assert_network_redirect(status, headers, "mtproto")
+            probe.assert_called_once_with()
+            mt_probe.assert_not_called()
+        self.assertEqual(self.settings(), before)
+        with closing(self.panel.conn()) as db:
+            rows = list(db.execute("select detail from audit where action like 'network:%'"))
+        self.assertEqual([json.loads(row[0]) for row in rows], [{"ok": True}])
+
+    def test_web_proxy_internal_errors_are_suppressed_in_html_json_requests_and_audit(self):
+        before = self.settings()
+        for action, helper in (("web_links", "owner_connection_links"), ("web_probe", "health_probe"), ("web_start", "control")):
+            for headers in ({}, {"Accept": "application/json", "X-QV-Request": "1"}):
+                with self.subTest(action=action, json=bool(headers)), mock.patch.object(self.web_provider, helper,
+                        side_effect=RuntimeError(self.web_secret + "/etc/quantumvpn-webproxy/private.json")):
+                    status, _, body = self.request("/operator/network/mtproto", self.form(action=action, confirm="yes"), headers=headers)
+                    self.assertEqual(status, 503)
+                    self.assertNotIn(self.web_secret, body)
+                    self.assertNotIn("/etc/quantumvpn-webproxy", body)
+                    self.assertNotIn(self.web_secret, self.audit_text())
+        self.assertEqual(self.settings(), before)
 
     def test_owner_proxy_links_are_explicit_post_only_no_store_and_not_logged(self):
         with mock.patch.object(self.panel.mtproto, "owner_connection_links", return_value=self.links) as links:

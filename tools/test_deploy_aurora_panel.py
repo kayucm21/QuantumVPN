@@ -308,11 +308,11 @@ class DeploymentGuardsTests(unittest.TestCase):
                     self.assertTrue(config["files"][name]["stage"].startswith(".aurora-upload-"))
 
     def test_pulse_hashes_require_explicit_scope_and_legacy_namespace_is_safe(self):
-        for option in ("--expected-old-network-center-sha256", "--expected-old-ai-journal-sha256", "--expected-old-mtproto-sha256"):
+        for option in ("--expected-old-network-center-sha256", "--expected-old-ai-journal-sha256", "--expected-old-mtproto-sha256", "--expected-old-proxy-links-sha256", "--expected-old-webproxy-sha256"):
             with self.subTest(option=option), self.assertRaisesRegex(ValueError, "require --with-pulse"):
                 self.deployer.build_config(self.args(option, "d" * 64))
         args = self.args()
-        for attribute in ("with_pulse", "expected_old_network_center_sha256", "expected_old_ai_journal_sha256", "expected_old_mtproto_sha256"):
+        for attribute in ("with_pulse", "expected_old_network_center_sha256", "expected_old_ai_journal_sha256", "expected_old_mtproto_sha256", "expected_old_proxy_links_sha256", "expected_old_webproxy_sha256"):
             delattr(args, attribute)
         config, payloads = self.deployer.build_config(args)
         self.assertFalse(config["with_pulse"])

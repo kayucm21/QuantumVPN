@@ -58,7 +58,7 @@ class VerificationGuardsTests(unittest.TestCase):
         self.assertNotIn("'POST'", self.module.REMOTE_SOURCE)
         self.assertNotIn("--insecure", self.module.REMOTE_SOURCE)
         self.assertNotIn("_create_unverified_context", self.module.REMOTE_SOURCE)
-        self.assertEqual(self.module.EXPECTED_BUILD, "2.3.0-pulse.2")
+        self.assertEqual(self.module.EXPECTED_BUILD, "2.3.0-pulse.3")
         self.assertEqual(self.remote["BUILD"], self.module.EXPECTED_BUILD)
         self.assertNotIn("detector404", self.module.REMOTE_SOURCE)
         for node in ast.walk(tree):

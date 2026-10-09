@@ -7,6 +7,7 @@ import html
 import io
 import ipaddress
 import json
+import math
 import os
 import re
 import sqlite3
@@ -17,6 +18,10 @@ from contextlib import closing
 from urllib.parse import urlsplit
 
 MAX_BYTES = 4 * 1024 * 1024
+CLIENT_QUALITY_LIMIT = 2000
+CLIENT_QUALITY_MIN_DEVICES = 5
+CLIENT_QUALITY_PROTOCOLS = {"vless", "trojan", "hysteria", "hysteria2", "tuic", "wireguard", "amneziawg", "shadowsocks", "unknown"}
+CLIENT_QUALITY_NETWORKS = {"wifi", "mobile", "ethernet", "unknown"}
 APK_LINK_SCHEMES = {"vless", "vmess", "trojan", "ss", "hysteria", "hysteria2", "hy2", "tuic", "olcrtc", "olconnect"}
 ADS_SUFFIXES = (
     "doubleclick.net", "googlesyndication.com", "googleadservices.com", "adservice.google.com",
@@ -190,13 +195,109 @@ def validate_backup(ciphertext: bytes, key: bytes, aes_class) -> dict:
             "note": "AES-GCM, ZIP и восстановление SQLite проверены в отдельном временном каталоге. Для полного запуска нужны серверные файлы, окружение сервиса и внешний ключ расшифровки."}
 
 
+def client_quality_summary(db, now=None) -> dict:
+    """Read-only, bounded cohorts; repeated reports do not give a device extra weight.
+
+    This view deliberately does not reuse the release guard's raw reports or
+    version cohorts. It uses one latest report per device/node/protocol/network
+    and exposes no device IDs. A full window is not guaranteed at the cap.
+    """
+    moment = int(time.time() if now is None else now)
+    result = {"available": False, "window_start": moment - 86400, "window_end": moment,
+              "reports_considered": 0, "devices": 0, "device_group_samples": 0,
+              "groups": [], "suppressed_groups": 0, "missing_ping_samples": 0,
+              "limit": CLIENT_QUALITY_LIMIT, "limit_reached": False,
+              "min_devices": CLIENT_QUALITY_MIN_DEVICES, "sampling": "latest_per_device_group",
+              "recommendations_available": False}
+    try:
+        rows = db.execute(
+            "select device,ts,node_key,protocol,network,ping_ms,success from community_quality "
+            "where ts>=? and ts<=? order by ts desc,id desc limit ?",
+            (moment - 86400, moment, CLIENT_QUALITY_LIMIT)).fetchall()
+    except sqlite3.Error:
+        return result
+    result.update(available=True, reports_considered=len(rows), limit_reached=len(rows) == CLIENT_QUALITY_LIMIT)
+    latest = {}
+    for device, ts, node, protocol, network, ping, success in rows:
+        if not isinstance(device, str) or not device or len(device) > 128:
+            continue
+        node = node if isinstance(node, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", node) else ""
+        protocol = protocol if protocol in CLIENT_QUALITY_PROTOCOLS else "unknown"
+        network = network if network in CLIENT_QUALITY_NETWORKS else "unknown"
+        latest.setdefault((device, node, protocol, network), (ping, success == 1))
+    groups = {}
+    for (device, node, protocol, network), (ping, success) in latest.items():
+        try:
+            ping = float(ping) if success and not isinstance(ping, bool) else 0
+            measured = math.isfinite(ping) and 0 < ping <= 60000
+        except (ValueError, TypeError, OverflowError):
+            measured = False
+        result["missing_ping_samples"] += int(not measured)
+        group = groups.setdefault((node, protocol, network), {"devices": 0, "successes": 0, "pings": []})
+        group["devices"] += 1
+        group["successes"] += int(success)
+        if measured:
+            group["pings"].append(ping)
+    result.update(devices=len({key[0] for key in latest}), device_group_samples=len(latest))
+    for (node, protocol, network), group in groups.items():
+        if group["devices"] < CLIENT_QUALITY_MIN_DEVICES:
+            result["suppressed_groups"] += 1
+            continue
+        pings = sorted(group["pings"])
+        # A cohort of five must not expose a single valid personal measurement.
+        enough_pings = len(pings) >= CLIENT_QUALITY_MIN_DEVICES
+        percentile = lambda fraction: round(pings[math.ceil(len(pings) * fraction) - 1], 1) if enough_pings else None
+        result["groups"].append({"node": node, "protocol": protocol, "network": network,
+                                 "devices": group["devices"], "ping_devices": len(pings),
+                                 "success_percent": round(100 * group["successes"] / group["devices"], 1),
+                                 "ping_p50_ms": percentile(.5), "ping_p95_ms": percentile(.95)})
+    result["groups"].sort(key=lambda row: (-row["devices"], row["node"], row["protocol"], row["network"]))
+    return result
+
+
+def render_client_quality(summary: dict) -> str:
+    esc = lambda value: html.escape(str(value), quote=True)
+    groups = summary.get("groups", [])
+    minimum = CLIENT_QUALITY_MIN_DEVICES
+    if not summary.get("available"):
+        status = "Добровольные отчёты пока недоступны. Серверные проверки не подставляются вместо клиентских замеров."
+    elif not summary.get("reports_considered"):
+        status = "За последние 24 часа добровольные замеры не поступили. Это не означает неисправность VPN."
+    elif not groups:
+        status = f"Недостаточно добровольных данных: нужно минимум {minimum} разных устройств в группе."
+    else:
+        status = f"{int(summary['devices'])} устройств · {int(summary['reports_considered'])} отчётов · {len(groups)} групп."
+    networks = {"wifi": "Wi-Fi", "mobile": "Мобильная", "ethernet": "Ethernet", "unknown": "Не сообщена"}
+    latency = lambda value: esc(value) if value is not None else "—"
+    rows = "".join(
+        f"<tr><td>{esc(row['node'] or 'Не сообщена')}</td><td>{esc(row['protocol'].upper())}</td>"
+        f"<td>{esc(networks.get(row['network'], 'Не сообщена'))}</td><td>{int(row['devices'])}</td>"
+        f"<td>{esc(row['success_percent'])}%</td><td>{int(row['ping_devices'])}</td>"
+        f"<td>{latency(row['ping_p50_ms'])}</td><td>{latency(row['ping_p95_ms'])}</td></tr>"
+        for row in groups[:40])
+    table = ("<div class=quality-table><table><thead><tr><th>Нода (ключ)</th><th>Протокол</th><th>Сеть</th>"
+             "<th>Устройств</th><th>Подключения OK</th><th>Замеров ping</th><th>P50, мс</th><th>P95, мс</th>"
+             f"</tr></thead><tbody>{rows}</tbody></table></div>") if rows else ""
+    limit_note = (f"<p class=warn>Достигнут лимит {CLIENT_QUALITY_LIMIT} последних отчётов: выборка может не охватывать все 24 часа.</p>"
+                  if summary.get("limit_reached") else "")
+    remaining = f"<p class=muted>Показаны первые 40 из {len(groups)} групп.</p>" if len(groups) > 40 else ""
+    return f"""<details class=card style='margin-top:12px'><summary>Качество клиентов · {len(groups)} групп · 24 часа</summary>
+    <p class=muted>{esc(status)}</p>{limit_note}{table}{remaining}
+    <p class=muted>Один последний отчёт на устройство и группу нода / протокол / сеть. Редкие группы скрыты: {int(summary.get('suppressed_groups', 0))}.
+    Ping не измерен или подключение неуспешно в {int(summary.get('missing_ping_samples', 0))} записях этой выборки.
+    P50 — медиана, P95 — порог для 95% замеров; показаны только успешные положительные замеры минимум {minimum} устройств.</p>
+    <p class=muted>Это добровольные самоотчёты APK, а не ping с VDS. IP и идентификаторы устройств не показываются.
+    Ключ ноды не доказывает её географию. Выборка не измеряет скорость и не доказывает ТСПУ; для автоматической рекомендации сервера данных недостаточно.</p></details>"""
+
+
 def quality_snapshot(db, s: dict, rospanel_db: str) -> dict:
     def saved(key):
         try:
             return json.loads(s.get(key) or "{}")
         except (ValueError, TypeError):
             return {}
-    since = int(time.time()) - 86400
+    moment = int(time.time())
+    since = moment - 86400
     health = [dict(r) for r in db.execute(
         "select target,count(*) samples,sum(ok) successes,round(avg(case when ok=1 then latency_ms end),1) latency_ms,max(ts) checked_at "
         "from server_health where ts>=? group by target order by target limit 80", (since,))]
@@ -207,7 +308,7 @@ def quality_snapshot(db, s: dict, rospanel_db: str) -> dict:
     return {"subscription": saved("quality_subscription"), "route": saved("quality_route"),
             "backup": saved("quality_backup"), "dependencies": dependency_evidence(rospanel_db), "health": health,
             "clients": clients, "client_count": client_count, "installed": installed, "ai": ai, "version": s.get("app_version", ""),
-            "version_code": int(s.get("app_version_code") or 0)}
+            "version_code": int(s.get("app_version_code") or 0), "client_quality": client_quality_summary(db, moment)}
 
 
 def render_quality(snapshot: dict, s: dict) -> str:
@@ -230,6 +331,7 @@ def render_quality(snapshot: dict, s: dict) -> str:
     dep_html = "".join(dependencies) or "<p class=muted>Нет данных основной панели</p>"
     route_result = f"<div class=flash><b>{esc(route.get('target',''))} → {esc(route.get('direction',''))}</b><details><summary>Почему выбран этот маршрут?</summary><p>{esc(route.get('reason',''))}</p><small>Правило: {esc(route.get('matched','по умолчанию'))} · опубликовано r{esc(route.get('revision','—'))}</small></details></div>" if route else ""
     backup_result = f"<p class={'ok' if backup.get('ok') else 'off'}>{'Проверка восстановления пройдена' if backup.get('ok') else 'Проверка не пройдена'}</p><p>{esc(backup.get('note',''))}</p><p class=muted>Проверено: {esc(', '.join(backup.get('databases',[]) + backup.get('key_files',[])) or '—')}</p><p class=warn>Отсутствует в архиве: {esc(', '.join(backup.get('missing',[])) or 'нет обязательных пропусков')}</p><small>{esc(stamp(backup.get('checked_at')))}</small>" if backup else "<p class=muted>Восстановление ещё не проверялось</p>"
+    client_quality_html = render_client_quality(snapshot.get("client_quality", {}))
     return f"""<style>.quality-page details.card{{margin-top:10px}}.quality-page summary{{cursor:pointer;font-weight:650}}.quality-page .quality-table{{max-height:240px;overflow:auto}}.quality-page pre{{white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow:auto}}.quality-page table{{min-width:0}}.quality-page td{{overflow-wrap:anywhere}}.quality-page .grid{{align-items:start}}.quality-page .stat{{padding:9px;font-size:12px}}.quality-page .stat b{{margin-top:2px;font-size:21px}}.quality-page .card{{padding:12px}}.quality-page h2{{font-size:16px;margin:0 0 8px}}.quality-page p{{margin:8px 0;font-size:12px}}.quality-page form{{display:flex;align-items:flex-end;gap:8px}}.quality-page form label{{flex:1;min-width:0;margin:0}}.quality-page form button{{flex-shrink:0;padding:9px 12px}}.quality-page .flash{{margin-top:8px;padding:10px;font-size:12px}}.quality-page .quality-details{{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}}.panel-shell:has(.quality-page) .tabs>a{{min-height:35px;padding:8px 12px}}@media(max-width:900px){{.quality-page table{{min-width:650px}}.quality-page .quality-details{{grid-template-columns:1fr}}.quality-page form{{flex-wrap:wrap}}}}</style><section class=quality-page><div class=reference-kpis>
     <div class=stat>Протоколы в выдаче<b>{len(protocols) if sub else '—'}</b><small>{esc(stamp(sub.get('checked_at')))}</small></div>
     <div class=stat>Устройства с телеметрией<b>{snapshot['client_count']}</b><small>Сообщили текущую версию: {snapshot['installed']}</small></div>
@@ -239,7 +341,7 @@ def render_quality(snapshot: dict, s: dict) -> str:
     <section class=card><div class=section-head><h2>Подписка глазами APK</h2><form method=post action=/operator/actions><input type=hidden name=return_tab value=quality><button name=action value=inspect_subscription>Проверить</button></form></div>
     <p class=muted>Последний ответ одной подписки. Ссылки и ключи скрыты.</p>{awg_note}<div class=quality-protocols>{protocol_tiles}</div><details style='margin-top:10px'><summary>Формат и совместимость</summary><div class=quality-table><table><thead><tr><th>Протокол</th><th>Серверов</th><th>Формат</th></tr></thead><tbody>{sub_rows}</tbody></table></div><small>{esc(' · '.join(str(sub[k]) for k in ('source','encoding','warning') if sub.get(k)))}</small><pre>SHA-256: {esc(sub.get('sha256','нет данных'))}</pre></details></section>
     <section class=card><h2>Почему выбран этот маршрут?</h2><form method=post action=/operator/actions><input type=hidden name=return_tab value=quality><label>Домен, IP или URL<input name=route_target maxlength=1024 required placeholder='youtube.com' value='{esc(route.get('target',''))}'></label><button name=action value=explain_route>Проверить правило</button></form>{route_result}<p class=muted>DNS: {esc(s.get('routing_dns_resolver') or s.get('routing_dns_mode','vpn_only'))}. Введённый URL не открывается и не сканируется.</p></section>
-    </div><details class=card style='margin-top:12px'><summary>Состояние сервисов и нод · {len(snapshot['health'])} целей · последние 24 часа</summary><div class=quality-table><table><thead><tr><th>Цель</th><th>Успешные проверки</th><th>Доступность</th><th>Задержка ответа</th><th>Последний замер</th></tr></thead><tbody>{health_rows}</tbody></table></div><p class=muted>Это проверки с VDS. Потери пакетов и скорость конкретного VPN-протокола требуют отдельного измерения и здесь не вычисляются из TCP-пинга. <a href='/operator?tab=quality'>Обновить показатели →</a></p></details><div class=quality-details>
+    </div>{client_quality_html}<details class=card style='margin-top:12px'><summary>Состояние сервисов и нод · {len(snapshot['health'])} целей · последние 24 часа</summary><div class=quality-table><table><thead><tr><th>Цель</th><th>Успешные проверки</th><th>Доступность</th><th>Задержка ответа</th><th>Последний замер</th></tr></thead><tbody>{health_rows}</tbody></table></div><p class=muted>Это проверки с VDS. Потери пакетов и скорость конкретного VPN-протокола требуют отдельного измерения и здесь не вычисляются из TCP-пинга. <a href='/operator?tab=quality'>Обновить показатели →</a></p></details><div class=quality-details>
     <details class=card><summary>Карта зависимостей: ноды → протоколы → подписки</summary><div class=grid style='margin-top:12px'>{dep_html}</div><p class=muted>Панельная маршрутизация r{esc(s.get('routing_revision','1'))} и DNS применяются в APK к выбранному профилю. Индивидуальные ограничения основной панели могут изменить набор серверов пользователя.</p></details>
     <details class=card><summary>Обновления и уведомления · {esc(snapshot['version'])}</summary><div class=quality-table><table><thead><tr><th>Устройство</th><th>versionCode</th><th>Запрос политики</th><th>Проверка обновления</th><th>Загрузка</th><th>Разрешение уведомлений</th></tr></thead><tbody>{client_rows}</tbody></table></div><p class=muted>Версия — сообщение клиента, не независимая проверка установки. Запрос политики не доказывает показ уведомления. Старые APK не сообщают разрешение и установку: для них отображается «неизвестно».</p></details>
     <details class=card><summary>Qwen: рекомендации и наблюдения</summary><div class=quality-table><table><thead><tr><th>Время</th><th>Результат</th><th>Рекомендация</th><th>Telegram</th></tr></thead><tbody>{ai_rows}</tbody></table></div><p class=muted>Модель анализирует агрегированные измерения. Выполнение команд ей не предоставляется. Снимки измерений сохранены с каждым новым анализом.</p><a href='/operator?tab=ai'>Настройки Qwen →</a></details>

@@ -148,7 +148,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.3.0-pulse.4"
+PANEL_BUILD = "2.3.0-pulse.5"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -6392,7 +6392,7 @@ class App(BaseHTTPRequestHandler):
             if action in {"links", "web_links", "tls_links"}:
                 kind = {"links": "mtproto", "web_links": "web", "tls_links": "tls"}[action]
                 backend = {"mtproto": mtproto, "web": webproxy, "tls": mtproto_tls}[kind]
-                fragment = proxy_links.render_links(backend.owner_connection_links(), kind=kind)
+                fragment = proxy_links.render_links(proxy_links.domain_connection_links(backend.owner_connection_links(), kind=kind), kind=kind)
                 audit(db, actor, ip, "network:" + {"web": "webproxy", "tls": "mtproto_tls", "mtproto": "mtproto"}[kind] + ":links", {"revealed_to_owner": True})
                 db.commit()
                 response_headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"}

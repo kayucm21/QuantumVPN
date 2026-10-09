@@ -9,7 +9,10 @@ import zipfile
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from tools.quantumvpn_control_quality import dependency_evidence, explain_route, subscription_evidence, validate_backup
+from tools.quantumvpn_control_quality import (
+    CLIENT_QUALITY_LIMIT, client_quality_summary, dependency_evidence, explain_route,
+    quality_snapshot, render_client_quality, render_quality, subscription_evidence, validate_backup,
+)
 
 
 class QualityTests(unittest.TestCase):
@@ -142,6 +145,160 @@ class QualityTests(unittest.TestCase):
         result = validate_backup(archive, key, AESGCM)
         self.assertTrue(result["ok"])
         self.assertNotIn("outside", json.dumps(result))
+
+
+class ClientQualityTests(unittest.TestCase):
+    NOW = 200000
+
+    def setUp(self):
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("""create table community_quality(
+            id integer primary key, device text, ts integer, node_key text, protocol text,
+            network text, app_version text, ping_ms, success integer)""")
+        self.addCleanup(self.db.close)
+
+    def report(self, device, ping=30, *, ts=None, node="main", protocol="vless", network="wifi", success=1, version="5.11.3"):
+        self.db.execute("insert into community_quality(device,ts,node_key,protocol,network,app_version,ping_ms,success) values(?,?,?,?,?,?,?,?)",
+                        (device, self.NOW if ts is None else ts, node, protocol, network, version, ping, success))
+
+    def cohort(self, **values):
+        for index, ping in enumerate((10, 20, 30, 40, 50)):
+            self.report(f"private-device-{index}", ping, **values)
+
+    def summary(self):
+        return client_quality_summary(self.db, self.NOW)
+
+    def test_empty_and_missing_schema_are_honest(self):
+        result = self.summary()
+        self.assertTrue(result["available"])
+        self.assertEqual(result["groups"], [])
+        self.assertIn("замеры не поступили", render_client_quality(result))
+        self.db.execute("drop table community_quality")
+        missing = self.summary()
+        self.assertFalse(missing["available"])
+        self.assertIn("пока недоступны", render_client_quality(missing))
+
+    def test_minimum_five_devices_never_leaks_raw_reports(self):
+        for index in range(4):
+            self.report(f"private-device-{index}")
+        hidden = self.summary()
+        self.assertEqual(hidden["suppressed_groups"], 1)
+        self.assertEqual(hidden["groups"], [])
+        self.assertIn("минимум 5", render_client_quality(hidden))
+        self.report("private-device-4")
+        result = self.summary()
+        self.assertEqual(result["groups"][0]["devices"], 5)
+        rendered = json.dumps(result) + render_client_quality(result)
+        self.assertNotIn("private-device", rendered)
+        self.assertNotIn('"reports":', rendered)
+        self.assertFalse(result["recommendations_available"])
+
+    def test_successful_positive_pings_only_and_nearest_rank(self):
+        self.cohort()
+        self.report("private-failed", 1, success=0)
+        self.report("private-zero", 0)
+        self.report("private-unknown", None)
+        self.report("private-invalid", "not-a-measurement")
+        self.report("private-overlarge", 60001)
+        result = self.summary()
+        group = result["groups"][0]
+        self.assertEqual((group["ping_p50_ms"], group["ping_p95_ms"]), (30, 50))
+        self.assertEqual(group["ping_devices"], 5)
+        self.assertEqual(group["success_percent"], 90)
+        self.assertEqual(result["missing_ping_samples"], 5)
+
+    def test_valid_ping_cohort_itself_must_have_five_devices(self):
+        for index in range(5):
+            self.report(f"private-device-{index}", 20 if index < 4 else 0)
+        group = self.summary()["groups"][0]
+        self.assertEqual(group["ping_devices"], 4)
+        self.assertIsNone(group["ping_p50_ms"])
+        self.assertIsNone(group["ping_p95_ms"])
+
+    def test_latest_per_device_group_not_heavy_reporters(self):
+        self.cohort(ts=self.NOW - 10)
+        for _ in range(30):
+            self.report("private-device-0", 500)
+        self.report("private-device-0", 0, success=0)  # same timestamp; latest ID wins
+        result = self.summary()
+        self.assertEqual(result["reports_considered"], 36)
+        self.assertEqual(result["devices"], 5)
+        self.assertEqual(result["device_group_samples"], 5)
+        self.assertEqual(result["groups"][0]["success_percent"], 80)
+        self.assertEqual(result["groups"][0]["ping_devices"], 4)
+        self.assertIsNone(result["groups"][0]["ping_p95_ms"])
+
+    def test_groups_are_node_protocol_network_not_version(self):
+        self.cohort()
+        self.cohort(node="reserve")
+        self.cohort(protocol="trojan")
+        self.cohort(network="mobile")
+        self.report("private-device-0", 60, version="5.11.4")
+        result = self.summary()
+        self.assertEqual(result["devices"], 5)
+        self.assertEqual(result["device_group_samples"], 20)
+        self.assertEqual(len(result["groups"]), 4)
+        self.assertTrue(all(group["devices"] == 5 for group in result["groups"]))
+        self.assertNotIn("version", json.dumps(result))
+
+    def test_stale_and_future_reports_are_excluded_exactly(self):
+        self.cohort(ts=self.NOW - 86400)
+        self.cohort(ts=self.NOW - 86401, node="stale")
+        self.cohort(ts=self.NOW + 1, node="future")
+        result = self.summary()
+        self.assertEqual(result["reports_considered"], 5)
+        self.assertEqual([group["node"] for group in result["groups"]], ["main"])
+        self.assertEqual(result["window_end"], self.NOW)
+
+    def test_last_two_thousand_cap_is_explicit(self):
+        for index in range(CLIENT_QUALITY_LIMIT + 1):
+            self.report(f"private-{index}", 50, ts=self.NOW - index)
+        result = self.summary()
+        self.assertEqual(result["reports_considered"], CLIENT_QUALITY_LIMIT)
+        self.assertEqual(result["devices"], CLIENT_QUALITY_LIMIT)
+        self.assertTrue(result["limit_reached"])
+        self.assertIn("может не охватывать все 24 часа", render_client_quality(result))
+
+    def test_invalid_stored_group_values_never_appear_in_output(self):
+        self.cohort(node="<script>ip 1.2.3.4</script>", protocol="<img>", network="private-ip")
+        result = self.summary()
+        self.assertEqual(result["groups"][0]["node"], "")
+        rendered = json.dumps(result) + render_client_quality(result)
+        for forbidden in ("<script>", "<img>", "1.2.3.4", "private-ip"):
+            self.assertNotIn(forbidden, rendered)
+        self.assertIn("Не сообщена", rendered)
+
+    def test_summary_query_is_read_only_and_render_distinguishes_vds(self):
+        self.cohort()
+        statements = []
+        self.db.set_trace_callback(statements.append)
+        result = self.summary()
+        self.db.set_trace_callback(None)
+        self.assertTrue(all(statement.lstrip().lower().startswith("select ") for statement in statements))
+        rendered = render_client_quality(result)
+        for phrase in ("Качество клиентов", "не ping с VDS", "не доказывает ТСПУ", "P50", "P95"):
+            self.assertIn(phrase, rendered)
+        self.assertNotIn("<form", rendered)
+
+    def test_quality_page_uses_summary_without_changing_existing_controls(self):
+        self.cohort()
+        self.db.executescript("""
+            create table server_health(target,ok,latency_ms,ts);
+            create table delivery_evidence(device,version_code,policy_at,update_at,download_at,install_at,notification_permission);
+            create table ai_observations(id,ts,trigger,status,advice,telegram_sent,before_json);
+        """)
+        snapshot = quality_snapshot(self.db, {}, "missing-rospanel.db")
+        self.assertIn("client_quality", snapshot)
+        # Fixture times are intentionally old relative to the real wall clock.
+        snapshot["client_quality"] = self.summary()
+        rendered = render_quality(snapshot, {})
+        self.assertIn("Качество клиентов", rendered)
+        self.assertIn("value=verify_backup", rendered)
+        self.assertIn("value=inspect_subscription", rendered)
+        self.assertNotIn("private-device", rendered)
+        del snapshot["client_quality"]
+        self.assertIn("пока недоступны", render_quality(snapshot, {}))
 
 
 if __name__ == "__main__":

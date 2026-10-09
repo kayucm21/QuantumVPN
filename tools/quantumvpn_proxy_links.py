@@ -18,6 +18,7 @@ _KEYS = frozenset({"telegram", "https"})
 _QUERY_KEYS = frozenset({"server", "port", "secret"})
 _SECRET = re.compile(r"(?:[a-f0-9]{32}|dd[a-f0-9]{32})\Z", re.IGNORECASE)
 _TLS_DOMAIN = "pecaocek.ignorelist.com"
+_OWNED_ADDRESS = "150.241.96.191"
 _TLS_SECRET = re.compile(r"ee[a-f0-9]{32}" + _TLS_DOMAIN.encode("ascii").hex() + r"\Z", re.IGNORECASE)
 _PORT = re.compile(r"[1-9][0-9]{0,4}\Z")
 _WEB_PATH = re.compile(r"[a-z0-9_-]{8,64}\Z")
@@ -71,19 +72,23 @@ def _link_parameters(value: str, variant: str, kind: str) -> tuple[str, int | No
     query = dict(fields)
     if kind == "web":
         return _web_parameters(query)
-    address = ipaddress.ip_address(query["server"])
-    if (not address.is_global or address.is_multicast or address.is_reserved
-            or address.is_unspecified or address.is_loopback or address.is_link_local):
-        raise ValueError
+    if query["server"] == _TLS_DOMAIN:
+        server = _TLS_DOMAIN
+    else:
+        address = ipaddress.ip_address(query["server"])
+        if (not address.is_global or address.is_multicast or address.is_reserved
+                or address.is_unspecified or address.is_loopback or address.is_link_local):
+            raise ValueError
+        server = address.compressed
     port_text = query["port"]
     if not _PORT.fullmatch(port_text) or not 1 <= int(port_text) <= 65535:
         raise ValueError
     secret = query["secret"]
     if not (_TLS_SECRET if kind == "tls" else _SECRET).fullmatch(secret):
         raise ValueError
-    if kind == "tls" and (address.compressed != "150.241.96.191" or int(port_text) != 5443):
+    if kind == "tls" and (server not in {_OWNED_ADDRESS, _TLS_DOMAIN} or int(port_text) != 5443):
         raise ValueError
-    return address.compressed, int(port_text), secret.lower()
+    return server, int(port_text), secret.lower()
 
 
 def validated_links(links: dict, *, kind: str = "mtproto") -> dict[str, str]:
@@ -104,6 +109,26 @@ def validated_links(links: dict, *, kind: str = "mtproto") -> dict[str, str]:
         raise ValueError("invalid_proxy_links") from None
 
 
+def domain_connection_links(links: dict, *, kind: str = "mtproto") -> dict[str, str]:
+    """Present this owned service through its fixed DNS alias, without changing it.
+
+    Backend helpers keep their pinned runtime/IP contracts. This mapping changes
+    only owner-requested connection links, preserving each key and actual port.
+    An arbitrary backend address/port must never become a trusted domain link.
+    """
+    safe = validated_links(links, kind=kind)
+    if kind == "web":
+        server, _, _ = _link_parameters(safe["telegram"], "telegram", kind)
+        if server.split("/", 1)[0] != _TLS_DOMAIN:
+            raise ValueError("invalid_proxy_links")
+        return safe
+    server, port, secret = _link_parameters(safe["telegram"], "telegram", kind)
+    if server not in {_OWNED_ADDRESS, _TLS_DOMAIN} or port != {"mtproto": 3443, "tls": 5443}[kind]:
+        raise ValueError("invalid_proxy_links")
+    query = urlencode({"server": _TLS_DOMAIN, "port": port, "secret": secret})
+    return validated_links({"telegram": "tg://proxy?" + query, "https": "https://t.me/proxy?" + query}, kind=kind)
+
+
 def render_links(links: dict, *, kind: str = "mtproto") -> str:
     """Render links only after the controller has checked explicit owner access.
 
@@ -118,6 +143,7 @@ def render_links(links: dict, *, kind: str = "mtproto") -> str:
     return f'''<section id="{prefix}-links" class="proxy-links" data-proxy-links aria-labelledby="{prefix}-title">
       <header class="proxy-links-heading"><h3 id="{prefix}-title">{title}</h3><button type="button" class="secondary" data-proxy-visibility aria-controls="{prefix}-values" aria-expanded="true">Скрыть ссылки</button></header>
       <p class="network-hint">Ссылки содержат ключ подключения. Передавайте их только доверенным пользователям. Скрытие не отзывает уже показанный ключ.</p>
+      <p class="network-hint">Домен — удобный адрес, не скрытие IP через DNS. Порт необходим для подключения; WEB Proxy использует HTTPS 443.</p>
       <div id="{prefix}-values" data-proxy-values>
         <label for="{prefix}-telegram-link">Ссылка для приложения Telegram</label>
         <textarea id="{prefix}-telegram-link" rows="2" readonly spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Ссылка подключения Telegram">{telegram}</textarea>

@@ -38,6 +38,16 @@ class DeploymentGuardsTests(unittest.TestCase):
     def args(self, *extra):
         return self.deployer.parser().parse_args(["--host", "example.invalid", "--expected-old-app-sha256", "a" * 64, *extra])
 
+    def test_quality_upload_is_explicit_pinned_and_not_an_unchanged_companion(self):
+        config, payloads = self.deployer.build_config(self.args("--with-quality", "--expected-old-quality-sha256", "b" * 64))
+        self.assertTrue(config["with_quality"])
+        self.assertEqual(config["files"]["quantumvpn_control_quality.py"]["old_sha256"], "b" * 64)
+        self.assertIn("quantumvpn_control_quality.py", payloads)
+        self.assertNotIn("quantumvpn_control_quality.py", config["companions"])
+        self.assertIn("quantumvpn_resources.py", config["companions"])
+        with self.assertRaises(ValueError):
+            self.deployer.build_config(self.args("--expected-old-quality-sha256", "b" * 64))
+
     def test_default_never_adds_community_files(self):
         config, payloads = self.deployer.build_config(self.args())
         self.assertFalse(config["apply"])

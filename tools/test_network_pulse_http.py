@@ -245,6 +245,22 @@ class NetworkPulseHTTPTests(unittest.TestCase):
             control.assert_not_called()
             probe.assert_not_called()
 
+    def test_quality_page_has_separate_client_measurements_without_probe_or_write(self):
+        before = self.settings()
+        with mock.patch.object(self.panel.mtproto, "owner_connection_links") as reveal, \
+                mock.patch.object(self.panel.mtproto, "health_probe") as probe:
+            for user in ("owner-test", "viewer-test"):
+                status, headers, body = self.request("/operator?tab=quality", user=user)
+                self.assertEqual(status, 200)
+                self.assertIn("Качество клиентов", body)
+                self.assertIn("добровольные самоотчёты APK", body)
+                self.assertIn("Проверка восстановления резервной копии", body)
+                self.assertIn("no-store", headers.get("Cache-Control", ""))
+                self.assertNotIn(self.secret, body)
+                self.assertFalse(_NetworkMarkup(body).nested_forms)
+            reveal.assert_not_called(); probe.assert_not_called()
+        self.assertEqual(self.settings(), before)
+
     def test_other_page_does_not_include_hidden_totp_secret(self):
         secret = "JBSWY3DPEHPK3PXP"
         with closing(self.panel.conn()) as db:
@@ -598,6 +614,8 @@ class NetworkPulseHTTPTests(unittest.TestCase):
             self.assertIn("no-store", headers.get("Cache-Control", ""))
             self.assertIn("proxy-tls-telegram-link", page)
             self.assertIn(secret, page)
+            self.assertIn("server=pecaocek.ignorelist.com&amp;port=5443", page)
+            self.assertNotIn("server=150.241.96.191", page)
             status, _, _ = self.request("/operator/network/mtproto", self.form(action="tls_probe"))
             self.assertEqual(status, 303)
             status, _, _ = self.request("/operator/network/mtproto", self.form(action="tls_restart"))
@@ -742,6 +760,8 @@ class NetworkPulseHTTPTests(unittest.TestCase):
             self.assertEqual(status, 200)
             links.assert_called_once_with()
             self.assertIn(self.secret, page)
+            self.assertIn("server=pecaocek.ignorelist.com&amp;port=3443", page)
+            self.assertNotIn("server=150.241.96.191", page)
             self.assertIn("no-store", headers.get("Cache-Control", ""))
             self.assertEqual(headers["Referrer-Policy"], "no-referrer")
             self.assertIn("noindex", headers.get("X-Robots-Tag", ""))

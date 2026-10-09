@@ -24,6 +24,7 @@ REMOTE_ROOT = "/opt/quantumvpn-operator"
 COMPANIONS = ("quantumvpn_control_quality.py", "quantumvpn_resources.py")
 COMMUNITY_MODULES = ("quantumvpn_durak.py", "quantumvpn_community.py", "quantumvpn_control_next.py")
 BOT_STATUS_MODULE = "quantumvpn_bot_status.py"
+QUALITY_MODULE = "quantumvpn_control_quality.py"
 NETWORK_AI_MODULES = ("quantumvpn_gemini.py", "quantumvpn_network_guard.py", "quantumvpn_target_scan.py")
 LOCAL_AI_MODULES = ("quantumvpn_llama.py", "quantumvpn_autopilot.py", "quantumvpn_maintenance.py")
 PULSE_MODULES = ("quantumvpn_network_center.py", "quantumvpn_ai_journal.py", "quantumvpn_mtproto.py", "quantumvpn_proxy_links.py", "quantumvpn_webproxy.py", "quantumvpn_mtproto_tls.py", "quantumvpn_mtproto_tls_protocol.py")
@@ -43,6 +44,7 @@ SERVICE = 'quantumvpn-operator'
 BASE_SOURCES = {'app.py', 'quantumvpn_aurora.py', 'assets/quantumvpn-world.svg'}
 COMMUNITY_SOURCES = {'quantumvpn_durak.py', 'quantumvpn_community.py', 'quantumvpn_control_next.py'}
 BOT_STATUS_SOURCES = {'quantumvpn_bot_status.py'}
+QUALITY_SOURCES = {'quantumvpn_control_quality.py'}
 NETWORK_AI_SOURCES = {'quantumvpn_gemini.py', 'quantumvpn_network_guard.py', 'quantumvpn_target_scan.py'}
 LOCAL_AI_SOURCES = {'quantumvpn_llama.py', 'quantumvpn_autopilot.py', 'quantumvpn_maintenance.py'}
 PULSE_SOURCES = {'quantumvpn_network_center.py', 'quantumvpn_ai_journal.py', 'quantumvpn_mtproto.py', 'quantumvpn_proxy_links.py', 'quantumvpn_webproxy.py', 'quantumvpn_mtproto_tls.py', 'quantumvpn_mtproto_tls_protocol.py'}
@@ -151,6 +153,7 @@ def preflight(config):
     require(command(['systemctl', 'is-active', SERVICE]).strip() == b'active', 'service_inactive')
     allowed = (BASE_SOURCES | (COMMUNITY_SOURCES if config.get('with_community') else set())
                | (BOT_STATUS_SOURCES if config.get('with_bot_status') else set())
+               | (QUALITY_SOURCES if config.get('with_quality') else set())
                | (NETWORK_AI_SOURCES if config.get('with_network_ai') else set())
                | (LOCAL_AI_SOURCES if config.get('with_local_ai') else set())
                | (PULSE_SOURCES if config.get('with_pulse') else set())
@@ -158,6 +161,7 @@ def preflight(config):
     require(set(config['files']) <= allowed and {'app.py', 'quantumvpn_aurora.py'} <= set(config['files']), 'source_allowlist')
     require(not config.get('with_community') or COMMUNITY_SOURCES <= set(config['files']), 'community_sources_missing')
     require(not config.get('with_bot_status') or BOT_STATUS_SOURCES <= set(config['files']), 'bot_status_source_missing')
+    require(not config.get('with_quality') or QUALITY_SOURCES <= set(config['files']), 'quality_source_missing')
     require(not config.get('with_network_ai') or NETWORK_AI_SOURCES <= set(config['files']), 'network_ai_sources_missing')
     require(not config.get('with_local_ai') or LOCAL_AI_SOURCES <= set(config['files']), 'local_ai_sources_missing')
     require(not config.get('with_pulse') or PULSE_SOURCES <= set(config['files']), 'pulse_sources_missing')
@@ -450,6 +454,8 @@ def parser() -> argparse.ArgumentParser:
                         help="Also deploy only quantumvpn_bot_status.py; no dependency changes")
     result.add_argument("--expected-old-bot-status-sha256", type=sha256,
                         help="Existing bot status module SHA-256; omitted means the module must be absent")
+    result.add_argument("--with-quality", action="store_true", help="Deploy only the read-only quality view helper; preserve settings, client consent and APK releases")
+    result.add_argument("--expected-old-quality-sha256", type=sha256, help="Existing quality helper SHA-256; omitted means the helper must be absent")
     result.add_argument("--with-network-ai", action="store_true",
                         help="Also deploy only quantumvpn_gemini.py, quantumvpn_network_guard.py and quantumvpn_target_scan.py; no dependency or configuration changes")
     for name in ("gemini", "network-guard", "target-scan"):
@@ -492,6 +498,11 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
         local[BOT_STATUS_MODULE] = ROOT / "tools" / BOT_STATUS_MODULE
     elif getattr(args, "expected_old_bot_status_sha256", None):
         raise ValueError("Bot status old hash requires --with-bot-status")
+    with_quality = getattr(args, "with_quality", False)
+    if with_quality:
+        local[QUALITY_MODULE] = ROOT / "tools" / QUALITY_MODULE
+    elif getattr(args, "expected_old_quality_sha256", None):
+        raise ValueError("Quality old hash requires --with-quality")
     with_network_ai = getattr(args, "with_network_ai", False)
     if with_network_ai:
         for name in NETWORK_AI_MODULES:
@@ -538,6 +549,8 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
                     "quantumvpn_control_next.py": getattr(args, "expected_old_control_next_sha256", None)})
     if with_bot_status:
         old[BOT_STATUS_MODULE] = getattr(args, "expected_old_bot_status_sha256", None)
+    if with_quality:
+        old[QUALITY_MODULE] = getattr(args, "expected_old_quality_sha256", None)
     if with_network_ai:
         old.update({"quantumvpn_gemini.py": getattr(args, "expected_old_gemini_sha256", None),
                     "quantumvpn_network_guard.py": getattr(args, "expected_old_network_guard_sha256", None),
@@ -562,11 +575,12 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
                     "stage": ".aurora-upload-" + upload + "-" + Path(name).name}
              for name, payload in payloads.items()}
     companions = {name: hashlib.sha256((ROOT / "tools" / name).read_bytes()).hexdigest()
-                  for name in COMPANIONS}
+                  for name in COMPANIONS if name not in local}
     return {"apply": args.apply, "upload": upload, "files": files,
             "companions": companions, "panel_build": builds[0],
             "with_community": with_community,
             "with_bot_status": with_bot_status,
+            "with_quality": with_quality,
             "with_network_ai": with_network_ai,
             "with_local_ai": with_local_ai,
             "with_pulse": with_pulse,

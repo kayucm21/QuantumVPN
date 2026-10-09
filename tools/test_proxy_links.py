@@ -52,6 +52,28 @@ class Markup(HTMLParser):
 
 
 class ProxyLinksTests(unittest.TestCase):
+    def test_owned_domain_alias_preserves_key_and_port_and_backend_input(self):
+        for kind, port, secret in (("mtproto", 3443, "dd" + "ab" * 16),
+                                  ("tls", 5443, "ee" + "cd" * 16 + "pecaocek.ignorelist.com".encode().hex())):
+            with self.subTest(kind=kind):
+                original = pair(port=port, secret=secret)
+                expected = pair(server="pecaocek.ignorelist.com", port=port, secret=secret)
+                result = proxy_links.domain_connection_links(original, kind=kind)
+                self.assertEqual(result, expected)
+                self.assertEqual(proxy_links.validated_links(result, kind=kind), expected)
+                self.assertEqual(proxy_links.domain_connection_links(result, kind=kind), expected)
+                self.assertIn("150.241.96.191", original["telegram"])
+                self.assertNotIn("150.241.96.191", proxy_links.render_links(result, kind=kind))
+        self.assertEqual(proxy_links.domain_connection_links(web_pair(), kind="web"), web_pair())
+        with self.assertRaisesRegex(ValueError, "^invalid_proxy_links$"):
+            proxy_links.domain_connection_links(web_pair(server="foreign.example/quantum_test"), kind="web")
+
+    def test_alias_rejects_foreign_backend_hosts_ports_and_lookalike_domains(self):
+        for value in (pair(server="8.8.8.8"), pair(port=443), pair(server="pecaocek.ignorelist.com.evil.com"),
+                      pair(server="PECAOCEK.ignorelist.com"), pair(server="pecaocek.ignorelist.com@evil.com")):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "^invalid_proxy_links$"):
+                proxy_links.domain_connection_links(value)
+
     def test_canonical_pair_accepts_current_padded_and_unpadded_secrets(self):
         for secret in ("ab" * 16, "dd" + "ab" * 16, "DD" + "AB" * 16):
             with self.subTest(secret_length=len(secret)):

@@ -133,8 +133,30 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("target.name.startswith('quantumvpn-webproxy-build-')", installer.REMOTE)
         self.assertIn('(path.stat().st_dev,path.stat().st_ino)==(device,inode)', installer.REMOTE)
         self.assertIn("recovery.mkdir(mode=0o700)", installer.REMOTE)
-        self.assertIn('os.rename(path,recovery/path.name)', installer.REMOTE)
+        self.assertIn('os.rename(path,recovery/destinations[path])', installer.REMOTE)
         self.assertNotIn('os.unlink(UNIT)', installer.REMOTE)
+
+    def test_rollback_keeps_same_basename_runtime_and_private_paths_distinct(self):
+        with tempfile.TemporaryDirectory() as folder:
+            parent = Path(folder)
+            runtime = parent / 'opt' / 'quantumvpn-webproxy'
+            private = parent / 'etc' / 'quantumvpn-webproxy'
+            unit = parent / 'etc' / 'unit.service'
+            runtime.mkdir(parents=True)
+            private.mkdir(parents=True)
+            unit.touch()
+            created = []
+            for path in (runtime, private, unit):
+                REMOTE['remember'](created, path)
+            command = Mock()
+            with patch.dict(REMOTE, {'ROOT': runtime, 'PRIVATE': private, 'UNIT': unit,
+                                    'RECOVERY_PARENT': parent / 'etc', 'run': command}):
+                recovery = Path(REMOTE['rollback'](created, True))
+            self.assertEqual(sorted(path.name for path in recovery.iterdir()),
+                             ['private', 'runtime', 'unit.service'])
+            self.assertFalse(any(path.exists() for path in (runtime, private, unit)))
+            command.assert_any_call(['systemctl', 'disable', '--now', REMOTE['SERVICE']],
+                                    30, 'new_service_rollback')
 
     def test_build_integrity_and_bounded_private_toolchain(self):
         for expected in ('GO_MOD_SHA256', 'GO_SUM_SHA256', '--setenv=GOTOOLCHAIN=local',
@@ -218,9 +240,12 @@ class DownloadAndArchiveTests(unittest.TestCase):
 
     def test_run_failure_suppresses_raw_error_details(self):
         result = SimpleNamespace(returncode=1, stdout='SECRET upstream error')
-        with patch.object(REMOTE['subprocess'], 'run', return_value=result):
+        output = io.StringIO()
+        with patch.object(REMOTE['subprocess'], 'run', return_value=result), contextlib.redirect_stdout(output):
             with self.assertRaisesRegex(RuntimeError, '^command_failed_go_build$'):
                 REMOTE['run'](['/private/go', 'build'], stage='go_build')
+        self.assertEqual(json.loads(output.getvalue()), {'status': 'Progress', 'stage': 'go_build'})
+        self.assertNotIn('SECRET', output.getvalue())
 
 
 if __name__ == '__main__':

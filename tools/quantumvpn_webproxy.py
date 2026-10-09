@@ -178,7 +178,9 @@ def _opener():
 
 def _http(opener, url: str, method: str, body: bytes | None, headers: dict,
           timeout: float, maximum: int) -> tuple[int, dict, bytes]:
-    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    # An empty byte body makes urllib synthesize a form Content-Type. The WEB
+    # downlink contract requires no Content-Type, so keep empty requests bodyless.
+    request = urllib.request.Request(url, data=body or None, headers=headers, method=method)
     try:
         response = opener.open(request, timeout=timeout)
     except urllib.error.HTTPError as error:
@@ -410,6 +412,8 @@ def _probe(manifest: dict, secret: str, *, public: bool = True) -> dict:
         encrypted, cursor = bytearray(), 0
         for _ in range(12):
             status, headers, body = request("api/v1/down", headers={"X-Down-Cursor": str(cursor)})
+            if status not in (200, 204):
+                raise RuntimeError("downlink_rejected")
             next_cursor = headers.get("x-down-cursor", "")
             if not re.fullmatch(r"0|[1-9][0-9]{0,15}", next_cursor):
                 raise RuntimeError("cursor_invalid")
@@ -417,8 +421,6 @@ def _probe(manifest: dict, secret: str, *, public: bool = True) -> dict:
                 if body or int(next_cursor) != cursor:
                     raise RuntimeError("cursor_invalid")
                 continue
-            if status != 200:
-                raise RuntimeError("downlink_rejected")
             if int(next_cursor) != cursor + 1:
                 raise RuntimeError("cursor_invalid")
             cursor = int(next_cursor)

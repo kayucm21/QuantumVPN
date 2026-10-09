@@ -31,6 +31,7 @@ GO_MOD_SHA256='7d3ba1e86605768b4cf7a4a91654e29012677e0892a2c27a8e29432de1802658'
 GO_SUM_SHA256='1737d5523b7264df09b253e86e29f96af295a7bd18e0aaa4373c6099317e065f'
 ROOT=Path('/opt/quantumvpn-webproxy')
 PRIVATE=Path('/etc/quantumvpn-webproxy')
+RECOVERY_PARENT=Path('/etc')
 UNIT=Path('/etc/systemd/system/quantumvpn-webproxy.service')
 SERVICE='quantumvpn-webproxy.service'
 USER='qvpn-webproxy'
@@ -83,6 +84,8 @@ def exclusive(path,data,mode=0o600):
 
 def run(argv,timeout=30,stage='command',env=None,cwd=None):
     require(re.fullmatch(r'[a-z_]{1,64}',stage),'invalid_command_stage')
+    if stage in ('go_download','go_verify','go_test','go_build','new_service_start'):
+        print(json.dumps({'status':'Progress','stage':stage}),flush=True)
     try:
         result=subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
                               timeout=timeout,check=False,env=env,cwd=cwd,text=True)
@@ -315,12 +318,14 @@ def rollback(created,started):
     if started:
         run(['systemctl','disable','--now',SERVICE],30,'new_service_rollback')
     if not created:return None
-    recovery=Path('/etc')/('quantumvpn-webproxy-failed-'+str(time.time_ns()))
+    recovery=RECOVERY_PARENT/('quantumvpn-webproxy-failed-'+str(time.time_ns()))
     recovery.mkdir(mode=0o700)
+    destinations={ROOT:'runtime',PRIVATE:'private',UNIT:'unit.service'}
     for path,device,inode in reversed(created):
+        require(path in destinations,'rollback_target_not_owned')
         require(path.exists() and not path.is_symlink() and (path.stat().st_dev,path.stat().st_ino)==(device,inode),
                 'rollback_identity_changed_manual_recovery_required')
-        os.rename(path,recovery/path.name)
+        os.rename(path,recovery/destinations[path])
     run(['systemctl','daemon-reload'],15,'rollback_daemon_reload')
     return str(recovery)
 
@@ -369,7 +374,9 @@ def main():
         PRIVATE.mkdir(mode=0o700);remember(created,PRIVATE)
         exclusive(ROOT/'tproxy-server',read_file(binary,50*1024*1024),0o755)
         exclusive(ROOT/'quantumvpn_webproxy.py',source,0o644)
-        (ROOT/'toolchain').mkdir(mode=0o700)
+        # Public Go tooling contains no relay credentials; subsequent bounded,
+        # unprivileged gateway builds must be able to traverse this directory.
+        (ROOT/'toolchain').mkdir(mode=0o755)
         os.rename(toolchain,ROOT/'toolchain/go')
         # The pinned archive is retained privately, never served by either panel.
         exclusive(ROOT/'upstream.tar.gz',source_archive)
@@ -449,6 +456,7 @@ def main() -> None:
     try:
         client.connect('150.241.96.191', username='root', password=password,
                        allow_agent=False, look_for_keys=False, timeout=15, auth_timeout=20)
+        client.get_transport().set_keepalive(20)
         stdin, stdout, stderr = client.exec_command('python3 -B -', timeout=2700)
         program = ('APPLY=' + repr(options.apply) + '\nRELAY_ONLY=' + repr(options.relay_only)
                    + '\nBASE_PATH=' + repr(options.base_path)

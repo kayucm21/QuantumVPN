@@ -186,6 +186,16 @@ IP families and MTProto readiness. Diagnostic output is allowlist-redacted.
 
 ### Verified deployment
 
+On 9 October 2026 the owner-approved WEB Proxy activation on HTTPS 443 passed
+genuine public Telegram nonce proofs over HTTP/1.1 and HTTP/2. The owned
+`tools/activate-webproxy-front.py` defaults to read-only inventory; apply requires
+four observed protected SHA-256 values, a verified private relay, native gateway
+tests, unchanged public-root responses and protected configuration. It installs
+only a loopback client-IP-preserving gateway, exact RosPanel-cgroup fallback NAT
+and owned lifecycle units/drop-ins. No main/VPN restart was needed. Details and
+private snapshot location: `docs/TELEGRAM-PROXY-20261009.md`. Production APK,
+credentials, subscriptions and DNS remain unchanged.
+
 On 8 October 2026, `2.3.0-pulse.2` passed the guarded source-only deployment
 and the extended live verification on `150.241.96.191`. Private source/database
 snapshot:

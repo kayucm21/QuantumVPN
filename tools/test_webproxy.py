@@ -97,6 +97,8 @@ class FakeCarrier:
             return 204, {"x-up-ack": "1"}, b""
         if url.endswith("/down"):
             assert headers["X-Down-Cursor"] == str(self.cursor)
+            if self.failure == "down":
+                return 404, {}, b'private error'
             self.cursor += 1
             if self.failure == "cursor":
                 return 200, {"x-down-cursor": "99"}, web._frame(2, 1, self.encrypted)
@@ -107,6 +109,33 @@ class FakeCarrier:
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_bodyless_transport_does_not_add_form_content_type(self):
+        response = Mock(status=204, headers={})
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b''
+        observed = []
+
+        def open_request(request, timeout):
+            # Exercise urllib's actual header preparation, not the fake carrier.
+            handler = urllib.request.HTTPHandler()
+            handler.parent = SimpleNamespace(addheaders=[])
+            prepared = handler.http_request(request)
+            observed.append(prepared)
+            return response
+
+        opener = Mock()
+        opener.open.side_effect = open_request
+        for body in (None, b''):
+            web._http(opener, 'http://127.0.0.1:18082/api/v1/down', 'POST', body,
+                      {'Authorization': 'Bearer ' + SESSION}, 1, 1024)
+            self.assertIsNone(observed[-1].data)
+            self.assertFalse(observed[-1].has_header('Content-type'))
+        web._http(opener, 'http://127.0.0.1:18082/api/v1/up', 'POST', b'data',
+                  {'Content-Type': 'application/octet-stream'}, 1, 1024)
+        self.assertEqual(observed[-1].data, b'data')
+        self.assertEqual(observed[-1].get_header('Content-type'), 'application/octet-stream')
+
     def test_pinned_manifest_exact_endpoints_and_identity(self):
         self.assertEqual(web._validate_manifest(manifest()), manifest())
         for key, bad in (("commit", "0" * 40), ("archive_sha256", "0" * 64),
@@ -272,7 +301,8 @@ class ProtocolTests(unittest.TestCase):
 
     def test_session_is_closed_after_malformed_contract_uplink_cursor_or_stream_error(self):
         for failure, expected in (("session", "session_contract_invalid"), ("up", "uplink_rejected"),
-                                  ("cursor", "cursor_invalid"), ("close", "stream_closed")):
+                                  ("cursor", "cursor_invalid"), ("close", "stream_closed"),
+                                  ("down", "downlink_rejected")):
             carrier = FakeCarrier(failure=failure)
             with self.subTest(failure=failure):
                 value = self.probe(carrier)

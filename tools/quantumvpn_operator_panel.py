@@ -101,12 +101,14 @@ try:
     import quantumvpn_network_center as network_center
     import quantumvpn_ai_journal as ai_journal
     import quantumvpn_mtproto as mtproto
+    import quantumvpn_mtproto_tls as mtproto_tls
     import quantumvpn_webproxy as webproxy
     import quantumvpn_proxy_links as proxy_links
 except ModuleNotFoundError:
     from tools import quantumvpn_network_center as network_center
     from tools import quantumvpn_ai_journal as ai_journal
     from tools import quantumvpn_mtproto as mtproto
+    from tools import quantumvpn_mtproto_tls as mtproto_tls
     from tools import quantumvpn_webproxy as webproxy
     from tools import quantumvpn_proxy_links as proxy_links
 
@@ -146,7 +148,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.3.0-pulse.3"
+PANEL_BUILD = "2.3.0-pulse.4"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -3851,6 +3853,27 @@ def render_network_pulse(s, csrf, actor_role, view="overview", target="", source
       <div class=network-metric><span>Готовые upstream</span><b>{esc(proxy.get('stats',{}).get('total_ready_targets','—'))}</b></div></div>
       <p class=network-hint>Официальный MTProxy, отдельный непривилегированный процесс. Статистика доступна только на loopback. Секрет не включается в обычную страницу, публичный статус или журнал ИИ.</p>
       <p class=network-hint>MTProto — прокси только для Telegram, не VPN для браузера или других приложений. TCP-ответ сам по себе не подтверждает работу протокола.</p>{owner_controls}</section>'''
+    tls = mtproto_tls.snapshot() if view == "mtproto" else {}
+    tls_controls = ""
+    if actor_role == "owner":
+        tls_disabled = "" if tls.get("installed") is True else "disabled"
+        tls_controls = f'''<form method=post action=/operator/network/mtproto data-proxy-reveal data-proxy-container=proxy-tls-container data-proxy-status=proxy-tls-status>
+          <input type=hidden name=csrf value="{esc(csrf)}"><input type=hidden name=action value=tls_links>
+          <button type=submit {tls_disabled}>Показать и скопировать TLS-ссылку</button></form>
+          <p id=proxy-tls-status role=status aria-live=polite></p><div id=proxy-tls-container></div>
+          <form method=post action=/operator/network/mtproto><input type=hidden name=csrf value="{esc(csrf)}">
+          <button class=secondary name=action value=tls_probe {tls_disabled}>Проверить TLS и Telegram</button></form>
+          <details><summary>Управление TLS-сервисом</summary><form method=post action=/operator/network/mtproto><input type=hidden name=csrf value="{esc(csrf)}"><fieldset {tls_disabled}>
+          <label><input type=checkbox name=confirm value=yes required> Подтверждаю управление только отдельным MTProto TLS</label>
+          <div class=network-actions><button name=action value=tls_start>Запустить</button><button class=secondary name=action value=tls_stop>Остановить</button><button class=secondary name=action value=tls_restart>Перезапустить</button></div></fieldset></form></details>'''
+    tls_status = {"active": "Работает", "inactive": "Остановлен", "not_installed": "Не установлен",
+                  "configuration_unavailable": "Конфигурация недоступна"}.get(tls.get("status"), tls.get("status", "Нет данных"))
+    mtproto_html += f'''<section class=network-card><h2>Telegram MTProto · TLS-маскировка</h2><div class=network-metrics>
+      <div class=network-metric><span>Сервис</span><b>{esc(tls_status)}</b></div>
+      <div class=network-metric><span>Отдельный порт</span><b>5443</b></div>
+      <div class=network-metric><span>Готовые upstream</span><b>{esc(tls.get('stats',{}).get('total_ready_targets','—'))}</b></div></div>
+      <p class=network-hint>Официальный MTProxy с настоящим FakeTLS-рукопожатием. Откройте новую ссылку и выберите этот прокси в Telegram; старое подключение на 3443 само не переключится.</p>
+      <p class=network-hint>Это не WEB Proxy и не обычный HTTPS-сайт. Проверка подтверждает ответ Telegram, но не гарантирует доступ у каждого оператора. Секрет показывается только владельцу после успешной проверки протокола.</p>{tls_controls}</section>'''
     web = webproxy.snapshot() if view == "mtproto" else {}
     web_status = {"active": "Процесс работает", "inactive": "Остановлен", "not_installed": "Не подключён",
                   "configuration_unavailable": "Конфигурация недоступна"}.get(web.get("status"), web.get("status", "Нет данных"))
@@ -6366,32 +6389,32 @@ class App(BaseHTTPRequestHandler):
                 db.commit()
                 return self.redirect_network("ai", "Ограничения ИИ сохранены. Живые подключения не изменены")
             action = values.get("action", "")
-            if action in {"links", "web_links"}:
-                kind = "web" if action == "web_links" else "mtproto"
-                backend = webproxy if kind == "web" else mtproto
+            if action in {"links", "web_links", "tls_links"}:
+                kind = {"links": "mtproto", "web_links": "web", "tls_links": "tls"}[action]
+                backend = {"mtproto": mtproto, "web": webproxy, "tls": mtproto_tls}[kind]
                 fragment = proxy_links.render_links(backend.owner_connection_links(), kind=kind)
-                audit(db, actor, ip, "network:" + ("webproxy" if kind == "web" else "mtproto") + ":links", {"revealed_to_owner": True})
+                audit(db, actor, ip, "network:" + {"web": "webproxy", "tls": "mtproto_tls", "mtproto": "mtproto"}[kind] + ":links", {"revealed_to_owner": True})
                 db.commit()
                 response_headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"}
                 if self.headers.get("Accept") == "application/json" and self.headers.get("X-QV-Request") == "1":
                     return self.reply(200, json.dumps({"html": fragment}, ensure_ascii=False), headers=response_headers)
                 body = fragment + '<p><a href="/operator?tab=network&amp;network_view=mtproto">Вернуться в панель</a></p>'
                 return self.reply(200, '<!doctype html><html lang=ru><head><meta charset=utf-8><meta name=referrer content=no-referrer><meta name=viewport content="width=device-width,initial-scale=1"><title>Telegram-прокси</title><style>' + css() + aurora_css() + proxy_links.links_css() + '</style></head><body class=aurora-panel><main style="max-width:720px;margin:24px auto;padding:20px">' + body + '</main>' + proxy_links.links_script() + '</body></html>', "text/html; charset=utf-8", headers=response_headers)
-            if action in {"probe", "web_probe"}:
-                backend = webproxy if action == "web_probe" else mtproto
+            if action in {"probe", "web_probe", "tls_probe"}:
+                backend = {"probe": mtproto, "web_probe": webproxy, "tls_probe": mtproto_tls}[action]
                 result = backend.health_probe()
-                audit(db, actor, ip, "network:" + ("webproxy" if action == "web_probe" else "mtproto") + ":probe", {"ok": result.get("ok") is True})
+                audit(db, actor, ip, "network:" + {"probe": "mtproto", "web_probe": "webproxy", "tls_probe": "mtproto_tls"}[action] + ":probe", {"ok": result.get("ok") is True})
                 db.commit()
-                label = "WEB HTTPS/Telegram" if action == "web_probe" else "MTProto-протокол"
+                label = {"web_probe": "WEB HTTPS/Telegram", "tls_probe": "MTProto TLS/Telegram", "probe": "MTProto-протокол"}[action]
                 return self.redirect_network("mtproto", label + " подтверждён" if result.get("ok") is True else label + " не подтвердился. Проверьте статус сервиса")
-            if action not in {"start", "stop", "restart", "web_start", "web_stop", "web_restart"}:
+            if action not in {"start", "stop", "restart", "web_start", "web_stop", "web_restart", "tls_start", "tls_stop", "tls_restart"}:
                 raise ValueError("Неизвестное действие прокси")
             if values.get("confirm") != "yes":
                 raise ValueError("Отметьте подтверждение управления Telegram-прокси")
-            is_web = action.startswith("web_")
-            command = action[4:] if is_web else action
-            result = (webproxy if is_web else mtproto).control(command)
-            audit(db, actor, ip, "network:" + ("webproxy" if is_web else "mtproto") + ":" + command, {"ok": result.get("ok") is True})
+            family = "web" if action.startswith("web_") else "tls" if action.startswith("tls_") else "mtproto"
+            command = action[4:] if family in {"web", "tls"} else action
+            result = {"web": webproxy, "tls": mtproto_tls, "mtproto": mtproto}[family].control(command)
+            audit(db, actor, ip, "network:" + {"web": "webproxy", "tls": "mtproto_tls", "mtproto": "mtproto"}[family] + ":" + command, {"ok": result.get("ok") is True})
             db.commit()
             return self.redirect_network("mtproto", "Команда прокси выполнена" if result.get("ok") is True else "Сервис не выполнил команду")
         except (ValueError, TypeError, UnicodeError):

@@ -23,7 +23,7 @@ HOST = "150.241.96.191"
 PUBLIC = "https://pecaocek.ignorelist.com:8443"
 EXPECTED_VERSION = "5.11.4"
 EXPECTED_CODE = 501104099
-EXPECTED_BUILD = "2.3.0-pulse.3"
+EXPECTED_BUILD = "2.3.0-pulse.4"
 ABIS = ("arm64-v8a", "armeabi-v7a")
 MAX_JSON = 131072
 VIEWS = ("overview", "nodes", "dns", "routes", "ai", "mtproto")
@@ -52,7 +52,7 @@ from urllib.parse import urlencode, urlsplit
 
 sys.dont_write_bytecode = True
 PUBLIC = 'https://pecaocek.ignorelist.com:8443'
-BUILD = '2.3.0-pulse.3'
+BUILD = '2.3.0-pulse.4'
 VERSION = '5.11.4'
 VERSION_CODE = 501104099
 VIEWS = ('overview', 'nodes', 'dns', 'routes', 'ai', 'mtproto')

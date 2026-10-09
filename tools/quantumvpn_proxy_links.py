@@ -17,6 +17,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 _KEYS = frozenset({"telegram", "https"})
 _QUERY_KEYS = frozenset({"server", "port", "secret"})
 _SECRET = re.compile(r"(?:[a-f0-9]{32}|dd[a-f0-9]{32})\Z", re.IGNORECASE)
+_TLS_DOMAIN = "pecaocek.ignorelist.com"
+_TLS_SECRET = re.compile(r"ee[a-f0-9]{32}" + _TLS_DOMAIN.encode("ascii").hex() + r"\Z", re.IGNORECASE)
 _PORT = re.compile(r"[1-9][0-9]{0,4}\Z")
 _WEB_PATH = re.compile(r"[a-z0-9_-]{8,64}\Z")
 _WEB_SECRET = re.compile(r"[A-Za-z0-9_-]{23}\Z")
@@ -58,11 +60,11 @@ def _link_parameters(value: str, variant: str, kind: str) -> tuple[str, int | No
     if any(ord(char) <= 32 or ord(char) >= 127 for char in value):
         raise ValueError
     parts = urlsplit(value)
-    endpoint = "proxy" if kind == "mtproto" else "webproxy"
+    endpoint = "webproxy" if kind == "web" else "proxy"
     expected = ("tg", endpoint, "") if variant == "telegram" else ("https", "t.me", "/" + endpoint)
     if (parts.scheme, parts.netloc, parts.path) != expected or parts.fragment:
         raise ValueError
-    keys = _QUERY_KEYS if kind == "mtproto" else frozenset({"server", "secret"})
+    keys = frozenset({"server", "secret"}) if kind == "web" else _QUERY_KEYS
     fields = parse_qsl(parts.query, keep_blank_values=True, strict_parsing=True, max_num_fields=len(keys))
     if len(fields) != len(keys) or {key for key, _ in fields} != keys:
         raise ValueError
@@ -77,7 +79,9 @@ def _link_parameters(value: str, variant: str, kind: str) -> tuple[str, int | No
     if not _PORT.fullmatch(port_text) or not 1 <= int(port_text) <= 65535:
         raise ValueError
     secret = query["secret"]
-    if not _SECRET.fullmatch(secret):
+    if not (_TLS_SECRET if kind == "tls" else _SECRET).fullmatch(secret):
+        raise ValueError
+    if kind == "tls" and (address.compressed != "150.241.96.191" or int(port_text) != 5443):
         raise ValueError
     return address.compressed, int(port_text), secret.lower()
 
@@ -85,16 +89,16 @@ def _link_parameters(value: str, variant: str, kind: str) -> tuple[str, int | No
 def validated_links(links: dict, *, kind: str = "mtproto") -> dict[str, str]:
     """Return only a matching canonical pair; reject with no credential data."""
     try:
-        if kind not in {"mtproto", "web"} or type(links) is not dict or set(links) != _KEYS:
+        if kind not in {"mtproto", "web", "tls"} or type(links) is not dict or set(links) != _KEYS:
             raise ValueError
         telegram = _link_parameters(links["telegram"], "telegram", kind)
         https = _link_parameters(links["https"], "https", kind)
         if telegram != https:
             raise ValueError
         server, port, secret = telegram
-        values = {"server": server, **({"port": port} if kind == "mtproto" else {}), "secret": secret}
+        values = {"server": server, **({"port": port} if kind != "web" else {}), "secret": secret}
         query = urlencode(values)
-        endpoint = "proxy" if kind == "mtproto" else "webproxy"
+        endpoint = "webproxy" if kind == "web" else "proxy"
         return {"telegram": "tg://" + endpoint + "?" + query, "https": "https://t.me/" + endpoint + "?" + query}
     except (ValueError, TypeError, KeyError, OverflowError, binascii.Error):
         raise ValueError("invalid_proxy_links") from None
@@ -110,7 +114,7 @@ def render_links(links: dict, *, kind: str = "mtproto") -> str:
     telegram = html.escape(safe["telegram"], quote=True)
     https = html.escape(safe["https"], quote=True)
     prefix = "proxy-" + kind
-    title = "Подключить Telegram · " + ("MTProto" if kind == "mtproto" else "WEBProxy")
+    title = "Подключить Telegram · " + {"mtproto": "MTProto", "web": "WEBProxy", "tls": "MTProto TLS"}[kind]
     return f'''<section id="{prefix}-links" class="proxy-links" data-proxy-links aria-labelledby="{prefix}-title">
       <header class="proxy-links-heading"><h3 id="{prefix}-title">{title}</h3><button type="button" class="secondary" data-proxy-visibility aria-controls="{prefix}-values" aria-expanded="true">Скрыть ссылки</button></header>
       <p class="network-hint">Ссылки содержат ключ подключения. Передавайте их только доверенным пользователям. Скрытие не отзывает уже показанный ключ.</p>
@@ -141,8 +145,8 @@ def links_script() -> str:
     return r'''<script>(() => {
       if (window.__quantumProxyLinksBound) return;
       window.__quantumProxyLinksBound = true;
-      const allowed = new Set(['proxy-mtproto-telegram-link','proxy-mtproto-https-link','proxy-web-telegram-link','proxy-web-https-link']);
-      const safeId = value => typeof value === 'string' && /^proxy-(?:mtproto|web)-[a-z0-9-]{1,48}$/.test(value);
+      const allowed = new Set(['proxy-mtproto-telegram-link','proxy-mtproto-https-link','proxy-web-telegram-link','proxy-web-https-link','proxy-tls-telegram-link','proxy-tls-https-link']);
+      const safeId = value => typeof value === 'string' && /^proxy-(?:mtproto|web|tls)-[a-z0-9-]{1,48}$/.test(value);
       document.addEventListener('submit', async event => {
         const form = event.target;
         if (!form || typeof form.matches !== 'function' || !form.matches('form[data-proxy-reveal]')) return;
@@ -154,11 +158,11 @@ def links_script() -> str:
         if (!container || !status) return;
         const data = new FormData(form), actions = data.getAll('action'), confirmations = data.getAll('csrf');
         if (form.getAttribute('action') !== '/operator/network/mtproto' || String(form.getAttribute('method')).toLowerCase() !== 'post'
-            || actions.length !== 1 || !['links','web_links'].includes(actions[0])
+            || actions.length !== 1 || !['links','web_links','tls_links'].includes(actions[0])
             || confirmations.length !== 1 || typeof confirmations[0] !== 'string' || !confirmations[0]) {
           status.textContent = 'Запрос недействителен. Обновите страницу.'; return;
         }
-        const prefix = actions[0] === 'links' ? 'proxy-mtproto-' : 'proxy-web-';
+        const prefix = {links:'proxy-mtproto-',web_links:'proxy-web-',tls_links:'proxy-tls-'}[actions[0]];
         if (!containerId.startsWith(prefix) || !statusId.startsWith(prefix)) return;
         const button = form.querySelector('button[type=submit],button:not([type])');
         const disabled = button ? button.disabled : false;

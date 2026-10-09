@@ -530,13 +530,16 @@ class NetworkPulseHTTPTests(unittest.TestCase):
             control.assert_not_called()
             probe.assert_not_called()
 
-    def test_both_proxy_cards_are_get_safe_with_owner_only_inline_reveal_forms(self):
+    def test_all_proxy_cards_are_get_safe_with_owner_only_inline_reveal_forms(self):
         with mock.patch.object(self.panel.mtproto, "owner_connection_links", return_value=self.links) as mt_links, \
                 mock.patch.object(self.panel.mtproto, "control") as mt_control, \
                 mock.patch.object(self.panel.mtproto, "health_probe") as mt_probe, \
                 mock.patch.object(self.web_provider, "owner_connection_links", return_value=self.web_links) as web_links, \
                 mock.patch.object(self.web_provider, "control") as web_control, \
-                mock.patch.object(self.web_provider, "health_probe") as web_probe:
+                mock.patch.object(self.web_provider, "health_probe") as web_probe, \
+                mock.patch.object(self.panel.mtproto_tls, "owner_connection_links") as tls_links, \
+                mock.patch.object(self.panel.mtproto_tls, "control") as tls_control, \
+                mock.patch.object(self.panel.mtproto_tls, "health_probe") as tls_probe:
             for user in ("owner-test", "operator-test", "viewer-test"):
                 with self.subTest(user=user):
                     status, headers, page = self.request("/operator?tab=network&network_view=mtproto", user=user)
@@ -551,22 +554,58 @@ class NetworkPulseHTTPTests(unittest.TestCase):
                     self.assertEqual(markup.nested_forms, [])
                     forms = [item for item in markup.elements if item["tag"] == "form"
                              and "data-proxy-reveal" in item["attrs"] and not item["hidden"]]
-                    self.assertEqual(len(forms), 2 if user == "owner-test" else 0)
+                    self.assertEqual(len(forms), 3 if user == "owner-test" else 0)
                     for form in forms:
                         attrs = form["attrs"]
                         self.assertEqual(attrs["action"], "/operator/network/mtproto")
                         self.assertEqual(attrs["method"].lower(), "post")
-                        self.assertIn(form["fields"]["action"], {"links", "web_links"})
-                        kind = "web" if form["fields"]["action"] == "web_links" else "mtproto"
+                        self.assertIn(form["fields"]["action"], {"links", "web_links", "tls_links"})
+                        kind = {"links": "mtproto", "web_links": "web", "tls_links": "tls"}[form["fields"]["action"]]
                         self.assertEqual(form["fields"]["csrf"], self.csrf_for(self.role_cookies[user]))
                         self.assertEqual(form["field_names"].count("csrf"), 1)
                         self.assertEqual(form["field_names"].count("action"), 1)
                         for key in ("data-proxy-container", "data-proxy-status"):
-                            self.assertRegex(attrs[key], r"^proxy-(mtproto|web)-[a-z0-9-]{1,48}$")
+                            self.assertRegex(attrs[key], r"^proxy-(mtproto|web|tls)-[a-z0-9-]{1,48}$")
                             self.assertTrue(attrs[key].startswith(f"proxy-{kind}-"))
                             self.assertFalse(markup.one(attrs[key])["hidden"])
-            for helper in (mt_links, mt_control, mt_probe, web_links, web_control, web_probe):
+            for helper in (mt_links, mt_control, mt_probe, web_links, web_control, web_probe, tls_links, tls_control, tls_probe):
                 helper.assert_not_called()
+
+    def test_native_tls_owner_only_csrf_origin_and_secret_safe(self):
+        secret = "ee" + self.secret.removeprefix("dd") + "pecaocek.ignorelist.com".encode().hex()
+        query = urlencode({"server": "150.241.96.191", "port": 5443, "secret": secret})
+        value = {"telegram": "tg://proxy?" + query, "https": "https://t.me/proxy?" + query}
+        with mock.patch.object(self.panel.mtproto_tls, "owner_connection_links", return_value=value) as reveal, \
+                mock.patch.object(self.panel.mtproto_tls, "health_probe", return_value={"ok": True}) as probe, \
+                mock.patch.object(self.panel.mtproto_tls, "control", return_value={"ok": True}) as control:
+            for user in ("operator-test", "viewer-test"):
+                for action in ("tls_links", "tls_probe", "tls_start", "tls_stop", "tls_restart"):
+                    status, _, page = self.request("/operator/network/mtproto", self.form(user, action=action, confirm="yes"), user=user)
+                    self.assertEqual(status, 403)
+                    self.assertNotIn(secret, page)
+            reveal.assert_not_called(); probe.assert_not_called(); control.assert_not_called()
+            for action in ("tls_links", "tls_probe", "tls_start", "tls_stop", "tls_restart"):
+                status, _, page = self.request("/operator/network/mtproto", self.form(action=action, confirm="yes"),
+                                                headers={"Origin": "https://evil.example"})
+                self.assertEqual(status, 403)
+                self.assertNotIn(secret, page)
+                status, _, page = self.request("/operator/network/mtproto", {"csrf": "invalid", "action": action, "confirm": "yes"})
+                self.assertEqual(status, 403)
+                self.assertNotIn(secret, page)
+            reveal.assert_not_called(); probe.assert_not_called(); control.assert_not_called()
+            status, headers, page = self.request("/operator/network/mtproto", self.form(action="tls_links"))
+            self.assertEqual(status, 200)
+            self.assertIn("no-store", headers.get("Cache-Control", ""))
+            self.assertIn("proxy-tls-telegram-link", page)
+            self.assertIn(secret, page)
+            status, _, _ = self.request("/operator/network/mtproto", self.form(action="tls_probe"))
+            self.assertEqual(status, 303)
+            status, _, _ = self.request("/operator/network/mtproto", self.form(action="tls_restart"))
+            self.assertEqual(status, 400)
+            control.assert_not_called()
+            status, _, _ = self.request("/operator/network/mtproto", self.form(action="tls_restart", confirm="yes"))
+            self.assertEqual(status, 303)
+            control.assert_called_once_with("restart")
 
     def test_web_proxy_all_actions_require_owner_without_helper_calls(self):
         with mock.patch.object(self.web_provider, "owner_connection_links", return_value=self.web_links) as links, \

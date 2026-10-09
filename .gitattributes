@@ -11,3 +11,7 @@ core-patches/*.patch text eol=lf -whitespace
 *.png binary
 tools/assets/routing-catalog-seed.json text eol=lf
 tools/assets/routing-catalog-seed.LICENSE.txt text eol=lf
+# Pinned proxy runtime/source digests must survive Windows checkouts unchanged.
+tools/quantumvpn_mtproto*.py text eol=lf
+tools/install-mtproto*.py text eol=lf
+tools/refresh-mtproto-upstream.py text eol=lf

@@ -297,6 +297,10 @@ class ProxyLinksTests(unittest.TestCase):
           attrs['data-proxy-status'] = 'proxy-web-status'; form.fields[0][1] = 'web_links';
           response = {ok:true,status:200,json:async () => ({html:'<section data-proxy-links>web-server-fragment</section>'})};
           await fire(); assert.equal(calls.length,count + 1); assert.match(container.html,/web-server-fragment/);
+          form.fields[0][1] = 'tls_links'; await fire(); assert.equal(calls.length,count + 1);
+          attrs['data-proxy-container'] = 'proxy-tls-container'; attrs['data-proxy-status'] = 'proxy-tls-status';
+          response = {ok:true,status:200,json:async () => ({html:'<section data-proxy-links>tls-server-fragment</section>'})};
+          await fire(); assert.equal(calls.length,count + 2); assert.match(container.html,/tls-server-fragment/);
           let resolve;
           global.fetch = (url,options) => {calls.push({url,options});return new Promise(done => resolve = done);};
           const pending = fire(); assert.equal(container.html,''); assert.equal(submit.disabled,true);

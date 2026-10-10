@@ -79,7 +79,8 @@ def parse_client_extensions(client):
 class Connection:
     """Independent server fixture validates the actual obfuscated2 request."""
     def __init__(self, *, hello_options=None, wrong_nonce=False, no_response=False,
-                 response_prefix=b"", oversized_frame=False, initial_reply=None):
+                 response_prefix=b"", oversized_frame=False, initial_reply=None,
+                 client_profile="standard", reject_legacy_sni=False):
         self.incoming = b""
         self.sent = []
         self.timeouts = []
@@ -90,6 +91,8 @@ class Connection:
         self.response_prefix = response_prefix
         self.oversized_frame = oversized_frame
         self.initial_reply = initial_reply
+        self.client_profile = client_profile
+        self.reject_legacy_sni = reject_legacy_sni
 
     def __enter__(self):
         return self
@@ -108,11 +111,18 @@ class Connection:
     def sendall(self, payload):
         self.sent.append(payload)
         if len(self.sent) == 1:
-            if len(payload) != 517 or payload[:5] != bytes.fromhex("1603010200"):
+            modern = self.client_profile == tls.IOS_MODERN_SAFARI
+            if (not (1500 < len(payload) < 2000) if modern else len(payload) != 517):
+                raise AssertionError("hello size")
+            if payload[:3] != bytes.fromhex("160301") or int.from_bytes(payload[3:5], "big") != len(payload) - 5:
                 raise AssertionError("hello record")
             extensions = parse_client_extensions(payload)
             name = tls.DOMAIN.encode()
-            if extensions[0] != struct.pack(">H", 3 + len(name)) + b"\0" + struct.pack(">H", len(name)) + name:
+            expected_name = struct.pack(">H", 3 + len(name)) + b"\0" + struct.pack(">H", len(name)) + name
+            if self.client_profile == tls.IOS_LEGACY_BROKEN_SNI:
+                if 0 in extensions or next(iter(extensions.values())) != expected_name:
+                    raise AssertionError("legacy broken SNI")
+            elif extensions[0] != expected_name:
                 raise AssertionError("SNI")
             zeroed = bytearray(payload)
             zeroed[11:43] = b"\0" * 32
@@ -122,6 +132,9 @@ class Connection:
             stamp = struct.unpack("<I", digest[28:32])[0] ^ struct.unpack("<I", payload[39:43])[0]
             if not int(time.time()) - 600 < stamp <= int(time.time()) + 3:
                 raise AssertionError("timestamp")
+            if self.reject_legacy_sni and self.client_profile == tls.IOS_LEGACY_BROKEN_SNI:
+                self.incoming = record(21, b"\x02\x28")
+                return
             self.incoming = self.initial_reply if self.initial_reply is not None else server_hello(payload, **self.hello_options)
             return
         if self.no_response:
@@ -169,9 +182,9 @@ class NativeFakeTlsTests(unittest.TestCase):
         self.assertNotIn("client_random", text)
         self.assertFalse(result["account_authorization_tested"])
 
-    def run_probe(self, connection, endpoint="127.0.0.1", port=5443):
+    def run_probe(self, connection, endpoint="127.0.0.1", port=5443, *, client_profile="standard"):
         with patch.object(tls.socket, "create_connection", return_value=connection) as connect:
-            result = tls.probe(SECRET, endpoint, port, tls.DOMAIN)
+            result = tls.probe(SECRET, endpoint, port, tls.DOMAIN, client_profile=client_profile)
         self.assert_redacted(result)
         connect.assert_called_once_with((endpoint, port), timeout=2)
         return result
@@ -204,6 +217,89 @@ class NativeFakeTlsTests(unittest.TestCase):
         second = tls.build_client_hello(SECRET, timestamp=1700000000)
         self.assertNotEqual(first[11:43], second[11:43])
         self.assertNotEqual(first[44:76], second[44:76])
+
+    def test_ios_profiles_lengths_structure_hmac_and_replay_distinctness(self):
+        for profile in (tls.IOS_LEGACY_BROKEN_SNI, tls.IOS_MODERN_SAFARI):
+            with self.subTest(profile=profile):
+                stamp = 1700000000
+                hello = tls.build_client_hello(SECRET, timestamp=stamp, client_profile=profile)
+                second = tls.build_client_hello(SECRET, timestamp=stamp, client_profile=profile)
+                self.assertNotEqual(hello[11:43], second[11:43])
+                self.assertNotEqual(hello[44:76], second[44:76])
+                self.assertEqual(int.from_bytes(hello[3:5], "big"), len(hello) - 5)
+                self.assertEqual(int.from_bytes(hello[6:9], "big"), len(hello) - 9)
+                self.assertEqual(hello[43], 32)
+                zeroed = bytearray(hello)
+                zeroed[11:43] = b"\0" * 32
+                digest = hmac.new(bytes.fromhex(SECRET), zeroed, hashlib.sha256).digest()
+                self.assertEqual(hello[11:39], digest[:28])
+                self.assertEqual(struct.unpack("<I", digest[-4:])[0] ^ struct.unpack("<I", hello[39:43])[0], stamp)
+                extensions = parse_client_extensions(hello)
+                first_kind = next(iter(extensions))
+                self.assertEqual(first_kind & 0x0f0f, 0x0a0a)
+                name = tls.DOMAIN.encode()
+                expected_name = struct.pack(">H", len(name) + 3) + b"\0" + struct.pack(">H", len(name)) + name
+                if profile == tls.IOS_LEGACY_BROKEN_SNI:
+                    self.assertEqual(len(hello), 517)
+                    self.assertNotIn(0, extensions)
+                    self.assertEqual(extensions[first_kind], expected_name)
+                    self.assertEqual(list(extensions)[1:13], [23, 0xff01, 10, 11, 16, 5, 13, 18, 51, 45, 43, 27])
+                    self.assertIn(21, extensions)
+                else:
+                    self.assertTrue(1500 < len(hello) < 2000)
+                    self.assertEqual(extensions[first_kind], b"")
+                    self.assertEqual(extensions[0], expected_name)
+                    self.assertNotIn(21, extensions)
+                    share_list = extensions[51]
+                    self.assertEqual(int.from_bytes(share_list[:2], "big"), len(share_list) - 2)
+                    self.assertEqual(share_list[7:11], bytes.fromhex("11ec04c0"))
+                    kem = share_list[11:11 + 1184]
+                    self.assertEqual(len(kem), 1184)
+                    for offset in range(0, 1152, 3):
+                        first = kem[offset] | ((kem[offset + 1] & 15) << 8)
+                        second = (kem[offset + 1] >> 4) | (kem[offset + 2] << 4)
+                        self.assertLess(first, 3329)
+                        self.assertLess(second, 3329)
+
+    def test_ios_probe_keeps_server_authentication_and_telegram_nonce_required(self):
+        for profile in (tls.IOS_LEGACY_BROKEN_SNI, tls.IOS_MODERN_SAFARI):
+            with self.subTest(profile=profile):
+                result = self.run_probe(Connection(client_profile=profile), client_profile=profile)
+                self.assertTrue(result["ok"], result)
+                self.assertTrue(result["fake_tls_authenticated"])
+                self.assertTrue(result["telegram_nonce_confirmed"])
+                self.assertEqual(result["client_profile"], profile)
+                result = self.run_probe(Connection(client_profile=profile, wrong_nonce=True), client_profile=profile)
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["fake_tls_authenticated"])
+                self.assertEqual(result["failure_code"], "telegram_nonce_not_confirmed")
+                connection = Connection(client_profile=profile, hello_options={"corrupt_digest": True})
+                result = self.run_probe(connection, client_profile=profile)
+                self.assertFalse(result["ok"])
+                self.assertFalse(result["fake_tls_authenticated"])
+                self.assertEqual(result["failure_code"], "server_hello_not_authenticated")
+                self.assertEqual(len(connection.sent), 1)
+
+    def test_legacy_profile_fails_on_strict_sni_before_telegram_payload(self):
+        profile = tls.IOS_LEGACY_BROKEN_SNI
+        connection = Connection(client_profile=profile, reject_legacy_sni=True)
+        result = self.run_probe(connection, client_profile=profile)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["fake_tls_authenticated"])
+        self.assertFalse(result["telegram_nonce_confirmed"])
+        self.assertEqual(result["failure_code"], "invalid_tls_record")
+        self.assertEqual(len(connection.sent), 1)
+
+    def test_unknown_profile_is_redacted_and_rejected_before_socket(self):
+        with patch.object(tls.socket, "create_connection") as connect:
+            result = tls.probe(SECRET, client_profile=SECRET)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failure_code"], "invalid_client_profile")
+        self.assertNotIn("client_profile", result)
+        self.assert_redacted(result)
+        connect.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, "invalid_client_profile"):
+            tls.build_client_hello(SECRET, client_profile=SECRET)
 
     def test_input_validation_before_any_socket_or_request(self):
         cases = [("SECRET", "127.0.0.1", 5443, tls.DOMAIN, "invalid_probe_secret"),

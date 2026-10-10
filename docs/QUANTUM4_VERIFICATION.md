@@ -60,6 +60,13 @@ also require confirmation under Android's policy.
 
 ## Separate remaining gates
 
+GitHub CI runs for the two foundation commits and their previous baseline all
+failed at Android SDK setup, before Gradle: the pinned action's default requested
+Google's removed `tools` package. Both CI and Release workflows now explicitly
+request `platform-tools` while retaining the action's reviewed commit SHA. The
+workflows remain enabled. This configuration correction is not a completed remote
+build or device gate; it does not modify the locally verified APK artifacts.
+
 The n8n/OpenClaw installation has its own guarded installer and health/model
 checks. Its outcome is not inferred from the Android or panel test results.
 GitHub publication is separate from the VDS production schedule and must not

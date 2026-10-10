@@ -66,6 +66,10 @@ Google's removed `tools` package. Both CI and Release workflows now explicitly
 request `platform-tools` while retaining the action's reviewed commit SHA. The
 workflows remain enabled. This configuration correction is not a completed remote
 build or device gate; it does not modify the locally verified APK artifacts.
+The next CI run passed SDK setup and exposed a second pre-existing issue:
+`ci-build.sh` and its nested shell entry points were recorded without execute
+permission. Git executable modes are now retained for `gradlew` and tracked
+`scripts/*.sh`; their file contents are unchanged.
 
 The n8n/OpenClaw installation has its own guarded installer and health/model
 checks. Its outcome is not inferred from the Android or panel test results.

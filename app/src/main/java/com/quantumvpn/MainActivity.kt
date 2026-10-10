@@ -40,6 +40,7 @@ import com.quantumvpn.ui.StartupSplashScreen
 import com.quantumvpn.ui.ThemeMode
 import com.quantumvpn.ui.theme.QuantumVpnTheme
 import com.quantumvpn.updates.SystemApkUpdateInstaller
+import com.quantumvpn.updates.SessionInstallState
 import com.quantumvpn.updates.UpdateCandidate
 import com.quantumvpn.updates.UpdateChannel
 import com.quantumvpn.updates.UpdateState
@@ -50,6 +51,8 @@ import com.quantumvpn.vpn.VpnScheduleAlarms
 import com.quantumvpn.widget.VpnToggleWidget
 import com.quantumvpn.widget.VpnWideWidget
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -73,6 +76,8 @@ class MainActivity : FragmentActivity() {
         get() = (application as QuantumVpnApplication).container.updateController
     private val systemApkInstaller
         get() = (application as QuantumVpnApplication).container.systemApkInstaller
+    private val sessionApkInstaller
+        get() = (application as QuantumVpnApplication).container.sessionApkInstaller
     private var systemInstallFile: File? = null
     private var systemDownloadActive = false
     private val communityRepository by lazy { CommunityRepository(applicationContext) }
@@ -95,10 +100,22 @@ class MainActivity : FragmentActivity() {
     }
     private val updateInstallerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
+    ) { _ ->
+        if (Build.VERSION.SDK_INT >= 31) {
+            // The confirmation Activity result is not authoritative; wait for our
+            // authenticated PackageInstaller status callback and package inspection.
+            sessionApkInstaller.refreshInstalledVersion()
+            return@registerForActivityResult
+        }
         systemApkInstaller.finishInstallerHandoff()
         systemInstallFile = null
-        updateController.onInstallerFinished(result.resultCode == Activity.RESULT_OK)
+        val expected = (updateController.state.value as? UpdateState.Installing)?.candidate
+        val installed = runCatching {
+            val identity = com.quantumvpn.updates.AndroidApkUpdateVerifier(this).inspectInstalled()
+            expected?.takeIf { identity.versionCode >= it.metadata.versionCode }?.let { identity }
+        }.getOrNull()
+        if (installed != null) updateController.onInstalledPackageVerified(installed.versionName, installed.versionCode)
+        else updateController.onInstallerFinished(installed = false)
     }
     private val unknownSourceLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -125,6 +142,45 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
         // Блокировка скриншотов/записи экрана до отрисовки UI.
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                sessionApkInstaller.state.collect { install ->
+                    when (install) {
+                        SessionInstallState.Idle -> Unit
+                        SessionInstallState.Preparing -> updateController.onInstallerStarted()
+                        is SessionInstallState.Committed -> {
+                            updateController.onInstallerStarted()
+                            updateController.onInstallerStaged()
+                            systemApkInstaller.finishInstallerHandoff()
+                            systemInstallFile = null
+                            lifecycleScope.launch {
+                                communityRepository.reportDelivery(install.versionCode, DeliveryMilestone.InstallHandoff)
+                            }
+                        }
+                        is SessionInstallState.RequiresConfirmation -> {
+                            updateController.onInstallerStarted(requiresUserAction = true)
+                            sessionApkInstaller.takeConfirmationIntent()?.let { confirmation ->
+                                try { updateInstallerLauncher.launch(confirmation) }
+                                catch (_: Exception) { failSystemInstall("Android не открыл подтверждение установки.") }
+                            }
+                        }
+                        is SessionInstallState.Installed -> {
+                            updateController.onInstalledPackageVerified(install.versionName, install.versionCode)
+                            sessionApkInstaller.acknowledgeTerminalState()
+                        }
+                        SessionInstallState.Cancelled -> {
+                            systemApkInstaller.finishInstallerHandoff()
+                            updateController.onInstallCancelled()
+                            sessionApkInstaller.acknowledgeTerminalState()
+                        }
+                        is SessionInstallState.Failure -> {
+                            failSystemInstall(install.message)
+                            sessionApkInstaller.acknowledgeTerminalState()
+                        }
+                    }
+                }
+            }
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -248,6 +304,7 @@ class MainActivity : FragmentActivity() {
             LaunchedEffect(updateState) {
                 when (val s = updateState) {
                     is UpdateState.UpToDate -> startupUpdateSettled = true
+                    is UpdateState.Installed, is UpdateState.InstallCancelled -> startupUpdateSettled = true
                     is UpdateState.Available -> {
                         if (!systemDownloadStarted) {
                             systemDownloadStarted = true
@@ -264,6 +321,9 @@ class MainActivity : FragmentActivity() {
                         // Не открываем браузер и не заставляем пользователя искать
                         // APK вручную. Ошибка остаётся в приложении, а главный экран
                         // откроется только после завершения этой попытки обновления.
+                        systemApkInstaller.cancel()
+                        systemInstallFile = null
+                        systemDownloadActive = false
                         startupUpdateSettled = true
                     }
                     UpdateState.Idle -> if (systemDownloadStarted) startupUpdateSettled = true
@@ -355,6 +415,7 @@ class MainActivity : FragmentActivity() {
                         onFinished = { splashDone = true },
                         routingEnabled = state.settings.panelRoutingEnabled,
                         serverItems = state.homeSelectorGroups.flatMap { it.items }.distinctBy { it.tag },
+                        onCancelUpdate = ::cancelUpdate,
                     )
                 } else {
                     QuantumVpnApp(
@@ -389,15 +450,14 @@ class MainActivity : FragmentActivity() {
                             val candidate = when (val s = updateController.state.value) {
                                 is UpdateState.Available -> s.candidate
                                 is UpdateState.Failure -> s.candidate
+                                is UpdateState.InstallCancelled -> s.candidate
                                 else -> null
                             }
                             if (candidate != null) startSystemApkDownload(candidate)
                         },
                         onInstallUpdate = ::requestUpdateInstall,
                         onCancelUpdate = {
-                            systemApkInstaller.cancel()
-                            systemInstallFile = null
-                            updateController.cancelAndDelete()
+                            cancelUpdate()
                         },
                         initialShortcut = pendingShortcut,
                         onShortcutConsumed = { pendingShortcut = null },
@@ -423,6 +483,7 @@ class MainActivity : FragmentActivity() {
     override fun onStart() {
         super.onStart()
         activityStarted = true
+        sessionApkInstaller.recoverForegroundSession()
         updateVisibleStreams()
     }
 
@@ -574,6 +635,15 @@ class MainActivity : FragmentActivity() {
 
     private fun launchUpdateInstaller() {
         try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                val candidate = (updateController.state.value as? UpdateState.Ready)?.candidate ?: return
+                val file = systemInstallFile?.takeIf { it.isFile } ?: updateController.verifiedApkFile()
+                updateController.onInstallerStarted()
+                lifecycleScope.launch {
+                    sessionApkInstaller.install(candidate, file)
+                }
+                return
+            }
             val systemFile = systemInstallFile
             val intent = if (systemFile != null && systemFile.isFile) {
                 systemApkInstaller.createInstallIntent(systemFile)
@@ -586,6 +656,7 @@ class MainActivity : FragmentActivity() {
                     communityRepository.reportDelivery(candidate.metadata.versionCode, DeliveryMilestone.InstallHandoff)
                 }
             }
+            updateController.onInstallerStarted(requiresUserAction = true)
         } catch (_: ActivityNotFoundException) {
             failSystemInstall("Системный установщик APK не найден.")
         } catch (_: SecurityException) {
@@ -596,9 +667,20 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun failSystemInstall(message: String) {
+        sessionApkInstaller.failInstallation(message)
         systemApkInstaller.cancel()
         systemInstallFile = null
         updateController.failInstallation(message)
+    }
+
+    private fun cancelUpdate() {
+        pendingUpdateInstall = false
+        val installing = updateController.state.value is UpdateState.Installing
+        if (installing) sessionApkInstaller.cancel()
+        systemApkInstaller.cancel()
+        systemInstallFile = null
+        systemDownloadActive = false
+        if (installing) updateController.onInstallCancelled() else updateController.cancelAndDelete()
     }
 
     private fun startSystemApkDownload(candidate: UpdateCandidate) {

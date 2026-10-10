@@ -1,7 +1,7 @@
 """Verify and privately stage local APKs, then optionally schedule or promote.
 
 No release is public by default. --schedule-at requires an explicit Moscow
-midnight ISO-8601 timestamp and keeps the current app version unchanged. SSH
+whole-hour ISO-8601 timestamp and keeps the current app version unchanged. SSH
 trust is pinned in known_hosts; credentials are read only from the process env.
 """
 from __future__ import annotations
@@ -37,9 +37,9 @@ def digest(path):
 
 
 def parse_schedule(value, *, now=None):
-    """Only an unambiguous future midnight at UTC+03:00 is accepted."""
-    require(bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T00:00:00\+03:00", value)),
-            "--schedule-at must be YYYY-MM-DDT00:00:00+03:00 (Moscow)")
+    """An explicit future whole hour at UTC+03:00; never infer a date/timezone."""
+    require(bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):00:00\+03:00", value)),
+            "--schedule-at must be YYYY-MM-DDTHH:00:00+03:00 (Moscow)")
     instant = datetime.fromisoformat(value)
     require(instant.utcoffset() == MOSCOW.utcoffset(None), "Moscow timezone required")
     stamp = int(instant.timestamp())
@@ -450,7 +450,7 @@ def main():
     parser.add_argument("--expected-signer-sha256", required=True)
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--promote", action="store_true", help="Explicit immediate publication")
-    actions.add_argument("--schedule-at", help="YYYY-MM-DDT00:00:00+03:00 (Moscow midnight)")
+    actions.add_argument("--schedule-at", help="YYYY-MM-DDTHH:00:00+03:00 (explicit Moscow date/hour)")
     parser.add_argument("--notes", default="QuantumVPN 2.0: новый интерфейс, удобные кнопки, оформление и доступность.")
     parser.add_argument("--check-only", action="store_true", help="Read-only remote preflight; do not upload or change settings")
     args = parser.parse_args()

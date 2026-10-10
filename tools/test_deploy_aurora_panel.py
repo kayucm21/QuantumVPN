@@ -71,12 +71,89 @@ class DeploymentGuardsTests(unittest.TestCase):
         self.assertFalse(config["with_network_ai"])
         self.assertFalse(config["with_local_ai"])
         self.assertFalse(config["with_pulse"])
+        self.assertFalse(config["with_four_source"])
         self.assertNotIn("quantumvpn_community.py", payloads)
         self.assertNotIn("quantumvpn_bot_status.py", payloads)
         self.assertTrue(set(self.deployer.NETWORK_AI_MODULES).isdisjoint(payloads))
         self.assertTrue(set(self.deployer.LOCAL_AI_MODULES).isdisjoint(payloads))
         self.assertTrue(set(self.deployer.PULSE_MODULES).isdisjoint(payloads))
+        self.assertTrue(set(self.deployer.FOUR_SOURCES).isdisjoint(payloads))
         self.assertEqual(set(self.deployer.COMPANIONS), set(config["companions"]))
+
+    def test_four_plan_upload_is_explicit_pinned_and_removes_only_its_companions(self):
+        config, payloads = self.deployer.build_config(self.args("--with-four-source", "--expected-old-four-catalog-sha256", "b" * 64))
+        self.assertTrue(config["with_four_source"])
+        self.assertTrue(set(self.deployer.FOUR_SOURCES) <= set(payloads))
+        self.assertTrue(set(self.deployer.FOUR_SOURCES).isdisjoint(config["companions"]))
+        self.assertEqual(config["files"]["quantumvpn_four_catalog.py"]["old_sha256"], "b" * 64)
+        self.assertIsNone(config["files"]["quantumvpn_four_ui.py"]["old_sha256"])
+        with self.assertRaises(ValueError):
+            self.deployer.build_config(self.args("--expected-old-four-ui-sha256", "c" * 64))
+        tree = ast.parse(self.deployer.REMOTE_SOURCE)
+        allowed = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "FOUR_SOURCES" for target in node.targets))
+        self.assertEqual(allowed, set(self.deployer.FOUR_SOURCES))
+
+    def test_four_source_preflight_rejects_missing_scope_presence_and_hashes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            scope = self.remote_scope(root)
+            config = {"files": {name: {"old_sha256": None} for name in
+                                ("app.py", "quantumvpn_aurora.py", *self.deployer.FOUR_SOURCES)},
+                      "companions": {}, "with_four_source": True}
+            scope["environment"] = lambda: {"QV_DATA_DIR": str(root)}
+            with mock.patch.object(scope["os"], "geteuid", return_value=0, create=True):
+                self.assertEqual(set(config["files"]), set(scope["preflight"](config)[2]))
+                for name in self.deployer.FOUR_SOURCES:
+                    with self.subTest(name=name):
+                        missing = {**config, "files": {key: value for key, value in config["files"].items() if key != name}}
+                        with self.assertRaisesRegex(scope["CheckFailed"], "four_sources_missing"):
+                            scope["preflight"](missing)
+                        path = root / name
+                        path.write_text("# an earlier helper\n")
+                        with self.assertRaisesRegex(scope["CheckFailed"], "source_presence_" + name):
+                            scope["preflight"](config)
+                        config["files"][name]["old_sha256"] = "e" * 64
+                        with self.assertRaisesRegex(scope["CheckFailed"], "source_hash_" + name):
+                            scope["preflight"](config)
+                        config["files"][name]["old_sha256"] = scope["digest"](path)
+                        self.assertTrue(scope["preflight"](config)[2][name]["exists"])
+                for flag, name in ((False, "quantumvpn_four_ui.py"), (True, "operator.db"),
+                                   (True, "../quantumvpn_four_ui.py"), (True, "quantum-n8n.service")):
+                    bad = {**config, "with_four_source": flag, "files": {**config["files"], name: {"old_sha256": None}}}
+                    with self.subTest(flag=flag, name=name), self.assertRaisesRegex(scope["CheckFailed"], "source_allowlist"):
+                        scope["preflight"](bad)
+
+    def test_four_source_rollback_restores_only_verified_helper_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            backup = root / "source-backup"
+            backup.mkdir()
+            scope = self.remote_scope(root)
+            existing, introduced = (root / name for name in self.deployer.FOUR_SOURCES)
+            old = b"# old catalogue\n"
+            (backup / existing.name).write_bytes(old)
+            for path in (existing, introduced):
+                path.write_text("# installed helper\n")
+            scope["CONFIG"] = {"files": {path.name: {"sha256": scope["digest"](path)} for path in (existing, introduced)},
+                               "upload": "fixture-four"}
+            states = {existing.name: {"exists": True, "sha256": hashlib.sha256(old).hexdigest(),
+                                      "uid": 0, "gid": 0, "mode": 0o600},
+                      introduced.name: {"exists": False}}
+            protected = {"operator.db": b"live clients", "routing-ed25519.key": b"live identity",
+                         "quantum-n8n.service": b"untouched automation service"}
+            for name, data in protected.items():
+                (root / name).write_bytes(data)
+            introduced.write_text("# concurrent edit\n")
+            with self.assertRaisesRegex(scope["CheckFailed"], "rollback_source_changed"):
+                scope["restore"](states, backup, [existing.name, introduced.name])
+            introduced.write_text("# installed helper\n")
+            with mock.patch.object(scope["os"], "chown", create=True):
+                scope["restore"](states, backup, [existing.name, introduced.name])
+            self.assertEqual(old, existing.read_bytes())
+            self.assertFalse(introduced.exists())
+            for name, data in protected.items():
+                self.assertEqual(data, (root / name).read_bytes())
 
     def test_explicit_community_is_exact_fixed_allowlist(self):
         with tempfile.TemporaryDirectory() as temp:

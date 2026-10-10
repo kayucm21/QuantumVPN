@@ -75,6 +75,16 @@ class SystemApkUpdateInstaller(context: Context) {
 
         val url = candidate.apkAsset.downloadUrl
         val fileName = candidate.metadata.apkFile.ifBlank { "QuantumVPN-update.apk" }
+        try {
+            UpdateStoragePolicy.requireDownloadSpace(candidate.metadata.apkSize, app.cacheDir.usableSpace)
+            val destination = app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                ?: throw UpdateException("Хранилище для загрузки обновления недоступно.")
+            UpdateStoragePolicy.requireDownloadSpace(candidate.metadata.apkSize, destination.usableSpace)
+        } catch (error: UpdateException) {
+            this.pendingCandidate = null
+            onFailed(error.message ?: "Недостаточно места для обновления.")
+            return
+        }
         val request = DownloadManager.Request(Uri.parse(url))
             .setTitle("QuantumVPN ${candidate.metadata.versionName}")
             .setDescription("Загрузка обновления")

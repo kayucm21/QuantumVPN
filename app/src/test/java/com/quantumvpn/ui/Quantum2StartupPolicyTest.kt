@@ -16,7 +16,8 @@ class Quantum2StartupPolicyTest {
     }
 
     @Test fun updateCheckDownloadRetryAndInstallNeverSkipToHome() {
-        allStates().filterNot { it is UpdateState.UpToDate || it is UpdateState.Failure || it is UpdateState.Idle }
+        allStates().filterNot { it is UpdateState.UpToDate || it is UpdateState.Failure || it is UpdateState.Idle ||
+            it is UpdateState.Installed || it is UpdateState.InstallCancelled }
             .forEach { state -> assertFalse("Update gate must hold: $state", startupFinishAllowed(true, state)) }
     }
 
@@ -25,6 +26,8 @@ class Quantum2StartupPolicyTest {
         assertTrue(startupFinishAllowed(true, UpdateState.Failure("Offline fixture")))
         // MainActivity only supplies ready=true for Idle after completed install handoff.
         assertTrue(startupFinishAllowed(true, UpdateState.Idle))
+        assertTrue(startupFinishAllowed(true, UpdateState.Installed("fixture", 2L)))
+        assertTrue(startupFinishAllowed(true, UpdateState.InstallCancelled(candidate)))
     }
 
     private fun allStates(): List<UpdateState> = listOf(
@@ -37,6 +40,10 @@ class Quantum2StartupPolicyTest {
         UpdateState.Downloading(candidate, 0, 100),
         UpdateState.Downloading(candidate, 100, 100),
         UpdateState.Ready(candidate),
+        UpdateState.Installing(candidate),
+        UpdateState.Installing(candidate, requiresUserAction = true),
+        UpdateState.Installed("fixture", 2L),
+        UpdateState.InstallCancelled(candidate),
         UpdateState.Failure("Offline fixture"),
     )
 

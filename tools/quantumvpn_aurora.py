@@ -26,9 +26,9 @@ def aurora_css() -> str:
       font: 13px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif;
       -webkit-font-smoothing: antialiased;
     }
-    main { width: 100%; max-width: 1840px; margin: auto; padding: 0 24px 24px 0; }
+    main { width: 100%; max-width: 1840px; margin: auto; padding: 0 24px 0 0; }
     .panel-shell { display: grid; grid-template-columns: 216px minmax(0, 1fr); gap: 24px; align-items: start; }
-    .panel-content { min-width: 0; max-width: none; padding: 0; }
+    .panel-content { min-width: 0; max-width: none; padding: 0 0 24px; }
     .sidebar {
       position: sticky; top: 0; height: 100vh; height: 100svh; min-height: 0;
       overflow-y: auto; overflow-x: hidden; padding: 24px 12px 18px;
@@ -75,8 +75,10 @@ def aurora_css() -> str:
     .nav-group summary:before { color: #6bc9b7; }
     .nav-group a { padding: 8px 12px 8px 27px !important; font-size: 11px !important; }
     .aurora-group.active > a { color: #9cf7df; background: #14382f; border-color: #2b6b5c; box-shadow: inset 3px 0 #64e9cd; font-weight: 650; }
-    .aurora-subnav { display: flex; flex-wrap: wrap; gap: 7px; list-style: none; margin: -5px 0 20px; padding: 0 0 14px; border-bottom: 1px solid #26394d; }
-    .aurora-subnav a, .panel-content .aurora-subnav a { display: inline-flex; align-items: center; min-height: 32px; padding: 6px 10px; color: #adc5d6; background: #112239; border: 1px solid #2b425a; border-radius: 5px; font-size: 11px; text-decoration: none; }
+    /* Five primary sections keep the rail short. Secondary destinations stay
+       in one local row, not a growing vertical stack on narrow displays. */
+    .aurora-subnav { display: flex; flex-wrap: nowrap; gap: 7px; list-style: none; margin: -5px 0 20px; padding: 0 0 14px; border-bottom: 1px solid #26394d; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #37516c transparent; }
+    .aurora-subnav a, .panel-content .aurora-subnav a { display: inline-flex; flex: 0 0 auto; align-items: center; min-height: 32px; padding: 6px 10px; color: #adc5d6; background: #112239; border: 1px solid #2b425a; border-radius: 5px; font-size: 11px; text-decoration: none; white-space: nowrap; }
     .aurora-subnav a:hover, .panel-content .aurora-subnav a:hover { background: #20384b; color: #e8f8f4; text-decoration: none; }
     .aurora-subnav a.active, .aurora-subnav [aria-current=page], .aurora-subnav .active > a { background: #163b32; border-color: #3b7564; color: #9ef0d8; }
     .sidebar nav.tabs a[href='/operator/logout'] { margin-top: 12px; padding-top: 12px; border-top: 1px solid #203348; border-radius: 0; color: #92a9bf; }

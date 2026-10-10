@@ -141,6 +141,43 @@ class ControlHTTPTests(unittest.TestCase):
             self.assertEqual(current["routing_profile"], "whitelist")
             self.assertEqual(int(current["routing_revision"]), int(before["routing_revision"]) + 1)
 
+    def test_routing_candidate_overlap_warning_precedes_unchanged_nonce_confirmation(self):
+        with closing(self.panel.conn()) as db:
+            before = self.panel.settings(db)
+        fields = {"action": "publish", "routing_enabled": "on", "routing_profile": "whitelist",
+                  "routing_dns_mode": "vpn_only", "routing_adblock_enabled": "on",
+                  "routing_direct_domains": "candidate-overlap.example",
+                  "routing_proxy_domains": "video.candidate-overlap.example",
+                  "routing_direct_cidrs": "8.0.0.0/8", "routing_proxy_cidrs": "8.8.8.0/24"}
+        with mock.patch.object(self.panel, "urlopen", side_effect=AssertionError("No target fetch in preview")):
+            with urlopen(Request(self.base + "/operator/routing", data=urlencode(fields).encode(),
+                                 headers={"Cookie": self.cookie, "Origin": ORIGIN})) as response:
+                page = response.read().decode()
+        preview = confirmed_control_fields(page)
+        self.assertIn("Проверка маршрутов перед публикацией", page)
+        self.assertIn("video.candidate-overlap.example", page)
+        self.assertIn("8.8.8.0/24", page)
+        self.assertLess(page.index("routing-conflict-preview"), page.index("action=/operator/control/apply"))
+        self.assertEqual(preview["csrf"], self.csrf)
+        with closing(self.panel.conn()) as db:
+            row = db.execute("select candidate_json,guards_json,state from control_previews where id=? and digest=?",
+                             (preview["preview_id"], preview["digest"])).fetchone()
+            candidate, guards = json.loads(row[0]), json.loads(row[1])
+            payload = self.panel.routing_payload(candidate, max(1, int(guards["routing_revision"])) + 1)
+            candidate_hash = hashlib.sha256(self.panel.canonical_json(payload)).hexdigest()
+            self.assertIn(candidate_hash, page)
+            self.assertEqual(row[2], "pending")
+            self.assertEqual(self.panel.settings(db), before)
+        # Deliberate overlaps remain legal. The original confirmation applies
+        # the reviewed candidate; the warning does not substitute a new form.
+        with urlopen(Request(self.base + "/operator/control/apply", data=urlencode(preview).encode(),
+                             headers={"Cookie": self.cookie, "Origin": ORIGIN})) as response:
+            self.assertIn("tab=routing", response.url)
+        with closing(self.panel.conn()) as db:
+            current = self.panel.settings(db)
+            self.assertEqual(current["routing_direct_domains"], "candidate-overlap.example")
+            self.assertEqual(current["routing_proxy_domains"], "video.candidate-overlap.example")
+
     def test_routing_confirmation_retains_strict_origin_and_session_csrf(self):
         preview, _ = self.routing_preview()
         other_session = self.make_cookie("owner-test", "a-different-browser-session")

@@ -21,8 +21,9 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <!-- GitHub-distributed builds launch the system installer only after explicit download/install confirmation. -->
+    <!-- Verified self-updates use PackageInstaller; Android may still request confirmation. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <!-- Always-on subscription auto-refresh must survive device reboots. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Requested only after the user opens the QR scanner. -->
@@ -52,6 +53,8 @@
         <profileable
             android:shell="true"
             tools:targetApi="q" />
+
+        <receiver android:name=".updates.UpdateInstallResultReceiver" android:exported="false" />
 
         <activity
             android:name=".MainActivity"

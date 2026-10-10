@@ -21,7 +21,8 @@ import paramiko
 
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_ROOT = "/opt/quantumvpn-operator"
-COMPANIONS = ("quantumvpn_control_quality.py", "quantumvpn_resources.py")
+FOUR_SOURCES = ("quantumvpn_four_catalog.py", "quantumvpn_four_ui.py")
+COMPANIONS = ("quantumvpn_control_quality.py", "quantumvpn_resources.py", *FOUR_SOURCES)
 COMMUNITY_MODULES = ("quantumvpn_durak.py", "quantumvpn_community.py", "quantumvpn_control_next.py")
 BOT_STATUS_MODULE = "quantumvpn_bot_status.py"
 BOT_OPERATIONS_MODULES = ("quantumvpn_bot_operations.py", "quantumvpn_ai_knowledge.py", "quantumvpn_proxy_monitor.py")
@@ -51,6 +52,7 @@ NETWORK_AI_SOURCES = {'quantumvpn_gemini.py', 'quantumvpn_network_guard.py', 'qu
 LOCAL_AI_SOURCES = {'quantumvpn_llama.py', 'quantumvpn_autopilot.py', 'quantumvpn_maintenance.py'}
 PULSE_SOURCES = {'quantumvpn_network_center.py', 'quantumvpn_ai_journal.py', 'quantumvpn_mtproto.py', 'quantumvpn_proxy_links.py', 'quantumvpn_webproxy.py', 'quantumvpn_mtproto_tls.py', 'quantumvpn_mtproto_tls_protocol.py'}
 CATALOG_SOURCES = {'quantumvpn_target_catalog.py', 'assets/routing-catalog-seed.json', 'assets/routing-catalog-seed.LICENSE.txt'}
+FOUR_SOURCES = {'quantumvpn_four_catalog.py', 'quantumvpn_four_ui.py'}
 VOLATILE = {
     'node_quarantine', 'latency_state', 'latency_last_probe', 'latency_best_ms',
     'load_balancer_last_target', 'load_balancer_last_decision',
@@ -161,7 +163,8 @@ def preflight(config):
                | (NETWORK_AI_SOURCES if config.get('with_network_ai') else set())
                | (LOCAL_AI_SOURCES if config.get('with_local_ai') else set())
                | (PULSE_SOURCES if config.get('with_pulse') else set())
-               | (CATALOG_SOURCES if config.get('with_catalog') else set()))
+               | (CATALOG_SOURCES if config.get('with_catalog') else set())
+               | (FOUR_SOURCES if config.get('with_four_source') else set()))
     require(set(config['files']) <= allowed and {'app.py', 'quantumvpn_aurora.py'} <= set(config['files']), 'source_allowlist')
     require(not config.get('with_community') or COMMUNITY_SOURCES <= set(config['files']), 'community_sources_missing')
     require(not config.get('with_bot_status') or BOT_STATUS_SOURCES <= set(config['files']), 'bot_status_source_missing')
@@ -171,6 +174,7 @@ def preflight(config):
     require(not config.get('with_local_ai') or LOCAL_AI_SOURCES <= set(config['files']), 'local_ai_sources_missing')
     require(not config.get('with_pulse') or PULSE_SOURCES <= set(config['files']), 'pulse_sources_missing')
     require(not config.get('with_catalog') or CATALOG_SOURCES <= set(config['files']), 'catalog_sources_missing')
+    require(not config.get('with_four_source') or FOUR_SOURCES <= set(config['files']), 'four_sources_missing')
     for name, expected in config['companions'].items():
         path = safe_target(name)
         require(path.is_file() and digest(path) == expected, 'companion_hash_' + name)
@@ -485,6 +489,10 @@ def parser() -> argparse.ArgumentParser:
     for name in ("catalog", "catalog-seed", "catalog-license"):
         result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
                             help="Existing catalogue source SHA-256; omitted means this file must be absent")
+    result.add_argument("--with-four-source", action="store_true", help="Deploy only the read-only Quantum 4.0 plan catalogue and UI; no models, workflows or configuration changes")
+    for name in ("four-catalog", "four-ui"):
+        result.add_argument("--expected-old-" + name + "-sha256", type=sha256,
+                            help="Existing plan helper SHA-256; omitted means this file must be absent")
     return result
 
 
@@ -542,6 +550,12 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
             local[name] = ROOT / "tools" / name
     elif any(getattr(args, key, None) for key in ("expected_old_catalog_sha256", "expected_old_catalog_seed_sha256", "expected_old_catalog_license_sha256")):
         raise ValueError("Catalogue old hashes require --with-catalog")
+    with_four_source = getattr(args, "with_four_source", False)
+    if with_four_source:
+        for name in FOUR_SOURCES:
+            local[name] = ROOT / "tools" / name
+    elif any(getattr(args, key, None) for key in ("expected_old_four_catalog_sha256", "expected_old_four_ui_sha256")):
+        raise ValueError("Four old hashes require --with-four-source")
     payloads = {name: path.read_bytes() for name, path in local.items()}
     tree = ast.parse(payloads["app.py"])
     builds = [node.value.value for node in tree.body if isinstance(node, ast.Assign)
@@ -590,6 +604,9 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
         old.update({"quantumvpn_target_catalog.py": getattr(args, "expected_old_catalog_sha256", None),
                     "assets/routing-catalog-seed.json": getattr(args, "expected_old_catalog_seed_sha256", None),
                     "assets/routing-catalog-seed.LICENSE.txt": getattr(args, "expected_old_catalog_license_sha256", None)})
+    if with_four_source:
+        old.update({"quantumvpn_four_catalog.py": getattr(args, "expected_old_four_catalog_sha256", None),
+                    "quantumvpn_four_ui.py": getattr(args, "expected_old_four_ui_sha256", None)})
     files = {name: {"sha256": hashlib.sha256(payload).hexdigest(), "old_sha256": old[name],
                     "stage": ".aurora-upload-" + upload + "-" + Path(name).name}
              for name, payload in payloads.items()}
@@ -605,6 +622,7 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
             "with_local_ai": with_local_ai,
             "with_pulse": with_pulse,
             "with_catalog": with_catalog,
+            "with_four_source": with_four_source,
             "login_marker": args.login_marker}, payloads
 
 

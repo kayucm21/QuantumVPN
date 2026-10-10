@@ -121,7 +121,7 @@ class UpdateControllerInstrumentedTest {
         assertEquals(1, updateRoot().listFiles().orEmpty().size)
 
         controller.onInstallerFinished(installed = false)
-        withTimeout(5_000) { controller.state.first { it is UpdateState.Failure } }
+        withTimeout(5_000) { controller.state.first { it is UpdateState.InstallCancelled } }
         assertFalse(updateRoot().exists())
         controller.cancelAndDelete()
         withTimeout(5_000) { controller.state.first { it == UpdateState.Idle } }
@@ -157,6 +157,61 @@ class UpdateControllerInstrumentedTest {
         assertEquals(context.packageName, archive.packageName)
         assertEquals(installed.versionCode, archive.versionCode)
         assertTrue(UpdateInstallPolicy.signingCompatible(installed.signing, archive.signing))
+    }
+
+    @Test
+    fun stagedSessionDeletesApkWithoutPretendingItIsInstalled() = runBlocking {
+        val bytes = "verified session fixture".toByteArray()
+        val candidate = candidate(bytes)
+        val controller = controller(candidate, bytes, ApkUpdateVerifier { _, _ -> })
+        controller.check(UpdateChannel.Beta)
+        withTimeout(5_000) { controller.state.first { it is UpdateState.Available } }
+        controller.download()
+        withTimeout(5_000) { controller.state.first { it is UpdateState.Ready } }
+
+        controller.onInstallerStarted()
+        controller.onInstallerStaged()
+        assertFalse(updateRoot().exists())
+        assertTrue(controller.state.value is UpdateState.Installing)
+        controller.onInstallerStarted(requiresUserAction = true)
+        assertTrue((controller.state.value as UpdateState.Installing).requiresUserAction)
+        controller.onInstallCancelled()
+        assertTrue(controller.state.value is UpdateState.InstallCancelled)
+        assertFalse(updateRoot().exists())
+    }
+
+    @Test
+    fun rejectedSystemApkDeletesOnlyOwnedUpdateCache() = runBlocking {
+        val bytes = "tampered session fixture".toByteArray()
+        val candidate = candidate(bytes).copy(metadata = candidate(bytes).metadata.copy(apkSha256 = "f".repeat(64)))
+        val controller = controller(candidate, bytes, ApkUpdateVerifier { _, _ -> error("must not verify") })
+        val ownedDirectory = File(context.cacheDir, "updates-system").apply { mkdirs() }
+        val owned = File(ownedDirectory, "invalid.apk").apply { writeBytes(bytes) }
+        controller.markReadyFromSystemFile(candidate, owned)
+        withTimeout(5_000) { controller.state.first { it is UpdateState.Failure } }
+        assertFalse(owned.exists())
+
+        val unrelatedDirectory = File(context.cacheDir, "unrelated-update-test").apply { mkdirs() }
+        val unrelated = File(unrelatedDirectory, "unrelated.apk").apply { writeBytes(bytes) }
+        try {
+            val isolated = controller(candidate, bytes, ApkUpdateVerifier { _, _ -> error("must not verify") })
+            isolated.markReadyFromSystemFile(candidate, unrelated)
+            withTimeout(5_000) { isolated.state.first { it is UpdateState.Failure } }
+            assertTrue(unrelated.exists())
+        } finally {
+            unrelated.delete()
+            unrelatedDirectory.delete()
+            ownedDirectory.delete()
+        }
+    }
+
+    @Test
+    fun installerResultReceiverIsNotExported() {
+        @Suppress("DEPRECATION")
+        val info = context.packageManager.getReceiverInfo(
+            android.content.ComponentName(context, UpdateInstallResultReceiver::class.java), 0,
+        )
+        assertFalse(info.exported)
     }
 
     @Test

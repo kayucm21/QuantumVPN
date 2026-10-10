@@ -5,13 +5,15 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from tools.quantumvpn_control_quality import (
-    CLIENT_QUALITY_LIMIT, client_quality_summary, dependency_evidence, explain_route,
-    quality_snapshot, render_client_quality, render_quality, subscription_evidence, validate_backup,
+    CLIENT_QUALITY_LIMIT, ROUTE_MATCH_LIMIT, client_quality_summary, dependency_evidence, explain_route,
+    quality_snapshot, render_client_quality, render_quality, render_route_evidence, render_routing_conflict_preview,
+    routing_conflict_preview, subscription_evidence, validate_backup,
 )
 
 
@@ -56,6 +58,109 @@ class QualityTests(unittest.TestCase):
         result = explain_route(self.policy(block_domains=["example.com"], direct_domains=["example.com"], proxy_domains=["example.com"]), "https://sub.example.com/path")
         self.assertEqual(result["direction"], "Блокировка")
         self.assertEqual(result["matched"], "example.com")
+        self.assertTrue(result["conflict"])
+        self.assertEqual(result["conflict_categories"], ["block", "direct", "proxy"])
+        self.assertEqual(result["matching_count"], 3)
+
+    def test_simulator_reports_suffix_overlaps_without_network_or_policy_changes(self):
+        policy = self.policy(direct_domains=["example.com", "sub.example.com", "example.com"],
+                             proxy_domains=["example.com"])
+        before = json.dumps(policy, sort_keys=True)
+        with mock.patch("socket.getaddrinfo", side_effect=AssertionError("DNS is not permitted")):
+            result = explain_route(policy, "https://sub.example.com/private?token=not-retained")
+        self.assertEqual(result["direction"], "Напрямую")
+        self.assertEqual(result["matching_count"], 3)
+        self.assertEqual(result["matches"], [
+            {"category": "direct", "rule": "example.com", "source": "explicit"},
+            {"category": "direct", "rule": "sub.example.com", "source": "explicit"},
+            {"category": "proxy", "rule": "example.com", "source": "explicit"},
+        ])
+        self.assertEqual(result["method"], "published_policy_only")
+        self.assertNotIn("not-retained", json.dumps(result))
+        self.assertEqual(json.dumps(policy, sort_keys=True), before)
+
+    def test_one_direction_suffix_overlap_is_not_a_conflict(self):
+        result = explain_route(self.policy(proxy_domains=["example.com", "sub.example.com"]), "sub.example.com")
+        self.assertFalse(result["conflict"])
+        self.assertEqual(result["conflict_categories"], [])
+        self.assertEqual(result["matching_count"], 2)
+
+    def test_candidate_preview_finds_suffix_and_ipv4_ipv6_cidr_overlap_without_network(self):
+        policy = self.policy(direct_domains=["example.com", "doubleclick.net"],
+                             proxy_domains=["sub.example.com"],
+                             block_domains=["blocked.sub.example.com"],
+                             direct_cidrs=["8.0.0.0/8", "2001:4860::/32"],
+                             proxy_cidrs=["8.8.8.0/24", "2001:4860:4860::/48"])
+        before = json.dumps(policy, sort_keys=True)
+        with mock.patch("socket.getaddrinfo", side_effect=AssertionError("No DNS")):
+            result = routing_conflict_preview(policy)
+        representatives = {row["representative"] for row in result["findings"]}
+        self.assertTrue({"sub.example.com", "blocked.sub.example.com", "doubleclick.net",
+                         "8.0.0.0/8", "8.8.8.0/24", "2001:4860::/32", "2001:4860:4860::/48"} <= representatives)
+        self.assertTrue(all(row["explanation"]["conflict"] for row in result["findings"]))
+        self.assertEqual(result["method"], "candidate_policy_only")
+        self.assertEqual(json.dumps(policy, sort_keys=True), before)
+
+    def test_candidate_preview_counts_all_representatives_but_only_explains_twenty_four(self):
+        policy = self.policy(direct_domains=["example.com"],
+                             proxy_domains=[f"child{index}.example.com" for index in range(80)])
+        with mock.patch("tools.quantumvpn_control_quality.explain_route", wraps=explain_route) as explain:
+            result = routing_conflict_preview(policy)
+        self.assertEqual(result["representative_count"], 80)
+        self.assertEqual(len(result["findings"]), ROUTE_MATCH_LIMIT)
+        self.assertEqual(explain.call_count, ROUTE_MATCH_LIMIT)
+        self.assertTrue(result["truncated"])
+
+    def test_candidate_render_is_escaped_honest_and_has_no_confirmation_or_mutation_form(self):
+        snapshot = routing_conflict_preview(self.policy(direct_domains=["example.com"], proxy_domains=["example.com"]))
+        snapshot["findings"][0]["representative"] = '<script>bad</script>'
+        source = render_routing_conflict_preview(snapshot)
+        self.assertNotIn("<script>", source)
+        self.assertNotIn("<form", source)
+        self.assertIn("&lt;script&gt;", source)
+        self.assertIn("реальные соединения не моделировались", source)
+        self.assertIn("SHA-256 кандидата", source)
+        self.assertIn("Пересечений direct", render_routing_conflict_preview(routing_conflict_preview(self.policy())))
+
+    def test_adblock_conflict_is_visible_and_flag_dependent(self):
+        policy = self.policy(direct_domains=["doubleclick.net"])
+        result = explain_route(policy, "ads.doubleclick.net")
+        self.assertTrue(result["conflict"])
+        self.assertEqual(result["matches"][0]["source"], "adblock")
+        policy["adblock"]["enabled"] = False
+        self.assertFalse(explain_route(policy, "ads.doubleclick.net")["conflict"])
+
+    def test_ipv6_overlapping_cidrs_preserve_actual_priority(self):
+        result = explain_route(self.policy(direct_cidrs=["2001:4860::/32"],
+                                         proxy_cidrs=["2001:4860:4860::/48"]), "[2001:4860:4860::8888]")
+        self.assertEqual(result["direction"], "Напрямую")
+        self.assertEqual(result["matching_count"], 2)
+        self.assertTrue(result["conflict"])
+
+    def test_match_display_is_bounded_without_losing_conflict_evidence(self):
+        direct = [f"8.8.8.8/{prefix}" for prefix in range(1, 33)]
+        # The production normaliser makes CIDRs canonical; this fixture uses
+        # canonical networks too, so ip_network remains strict in the advisor.
+        import ipaddress
+        direct = [str(ipaddress.ip_network(value, strict=False)) for value in direct]
+        result = explain_route(self.policy(direct_cidrs=direct, proxy_cidrs=["8.8.8.8/32"]), "8.8.8.8")
+        self.assertEqual(result["matching_count"], 33)
+        self.assertEqual(len(result["matches"]), ROUTE_MATCH_LIMIT)
+        self.assertTrue(result["matches_truncated"])
+        self.assertTrue(result["conflict"])
+        self.assertEqual(result["conflict_categories"], ["direct", "proxy"])
+
+    def test_simulator_render_escapes_saved_evidence_and_handles_legacy_reports(self):
+        source = render_route_evidence({"target": "<script>alert(1)</script>", "direction": "<img src=x>",
+                                       "matches": [{"category": "proxy", "rule": '<svg onload="alert(1)">', "source": "explicit"}],
+                                       "matching_count": 1, "conflict": True, "conflict_categories": ["direct", "proxy"]})
+        for tag in ("<script", "<img", "<svg"):
+            self.assertNotIn(tag, source)
+        self.assertIn("Конфликт направлений", source)
+        self.assertIn("Совпавшие правила · 1", source)
+        self.assertIn("published", explain_route(self.policy(), "example.com")["method"])
+        self.assertIn("example.com", render_route_evidence({"target": "example.com", "direction": "VPN"}))
+        self.assertEqual(render_route_evidence({}), "")
 
     def test_ads_block_is_flag_dependent(self):
         policy = self.policy()

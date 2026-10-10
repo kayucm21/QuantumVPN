@@ -153,9 +153,14 @@ class AuroraPanelTests(unittest.TestCase):
             return response.read().decode("utf-8")
 
     def test_build_and_tab_registry_cover_existing_routes(self):
-        self.assertTrue(self.panel.PANEL_BUILD.startswith("2.3.0-pulse"))
-        self.assertEqual(set(self.panel.PAGE_TITLES), LEGACY_TABS | {"network"})
-        self.assertEqual(len(self.panel.AURORA_NAV_GROUPS), 8)
+        self.assertEqual(self.panel.PANEL_BUILD, "4.0.0-foundation.1")
+        self.assertEqual(set(self.panel.PAGE_TITLES), LEGACY_TABS | {"network", "roadmap"})
+        self.assertEqual(len(self.panel.AURORA_NAV_GROUPS), 5)
+        self.assertEqual([group[1] for group in self.panel.AURORA_NAV_GROUPS],
+                         ["Обзор", "Сеть", "Клиенты", "Продукт", "Система"])
+        members = [tab for group in self.panel.AURORA_NAV_GROUPS for tab in group[3]]
+        self.assertEqual(len(members), len(set(members)))
+        self.assertEqual(set(members), set(self.panel.PAGE_TITLES))
         for tab, title in self.panel.PAGE_TITLES.items():
             with self.subTest(tab=tab):
                 self.assertTrue(title[0])
@@ -168,7 +173,7 @@ class AuroraPanelTests(unittest.TestCase):
                 primary_html, subnav_html = self.panel.aurora_navigation(tab, "owner")
                 primary = PanelHTML(primary_html).tab_links()
                 subnav = PanelHTML(subnav_html).tab_links()
-                self.assertEqual(len(primary), 8)
+                self.assertEqual(len(primary), 5)
                 self.assertEqual(sum(PanelHTML.active(node) for _, node in primary), 1)
                 current = [name for name, node in subnav if PanelHTML.active(node)]
                 if subnav:
@@ -176,7 +181,31 @@ class AuroraPanelTests(unittest.TestCase):
                 else:
                     self.assertIn((tab, True), [(name, PanelHTML.active(node)) for name, node in primary])
                 reachable.update(name for name, _ in primary + subnav)
-        self.assertEqual(reachable, LEGACY_TABS | {"network"})
+        self.assertEqual(reachable, LEGACY_TABS | {"network", "roadmap"})
+
+    def test_roadmap_is_authenticated_read_only_bounded_and_searchable(self):
+        with urlopen(self.base + "/operator?tab=roadmap", timeout=10) as denied:
+            # Existing HTML auth deliberately renders the login page in-place,
+            # without disclosing an authenticated page or redirecting the URL.
+            body = denied.read().decode("utf-8")
+            self.assertNotIn("План Quantum 4.0", body)
+            self.assertTrue(any(node["tag"] == "form" and node["attrs"].get("action") == "/operator/login"
+                                for node in PanelHTML(body).nodes))
+        headers = {"Authorization": "Basic " + base64.b64encode(b"aurora-viewer:aurora-viewer-password").decode()}
+        with mock.patch.object(self.panel, "rospanel_users", side_effect=AssertionError("Roadmap must not query fleet")):
+            with urlopen(Request(self.base + "/operator?tab=roadmap&q=%D0%BD%D0%B0%D0%B2%D0%B8%D0%B3%D0%B0%D1%86%D0%B8%D0%B8", headers=headers), timeout=10) as response:
+                page = response.read().decode("utf-8")
+        self.assertIn("Пять групп навигации", page)
+        self.assertIn("Это план развития", page)
+        document = PanelHTML(page)
+        self.assertTrue(all(node["attrs"].get("method") == "get" for node in document.nodes if node["tag"] == "form"))
+        self.assertNotIn("Телеграм", page)
+        for query in ("roadmap_offset=-1", "roadmap_limit=51", "roadmap_group=bad", "q=" + "a" * 129,
+                      "roadmap_offset=1&roadmap_offset=2"):
+            with self.subTest(query=query), self.assertRaises(HTTPError) as invalid:
+                urlopen(Request(self.base + "/operator?tab=roadmap&" + query, headers=headers), timeout=10)
+            self.assertEqual(invalid.exception.code, 400)
+            invalid.exception.close()
 
     def test_admin_link_is_visible_only_to_owner(self):
         for role in ("owner", "operator", "viewer"):

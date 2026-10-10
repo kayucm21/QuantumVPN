@@ -17,7 +17,8 @@ internal fun startupDownloadProgress(downloaded: Long, total: Long): Float? =
 
 /** A stale UI-ready flag must never skip a check, download or installer handoff. */
 internal fun startupFinishAllowed(ready: Boolean, update: UpdateState): Boolean = ready &&
-    (update is UpdateState.UpToDate || update is UpdateState.Failure || update is UpdateState.Idle)
+    (update is UpdateState.UpToDate || update is UpdateState.Failure || update is UpdateState.Idle ||
+        update is UpdateState.Installed || update is UpdateState.InstallCancelled)
 
 internal fun serverPingText(ping: Int?, measured: Boolean): String = when {
     ping != null && ping > 0 -> "$ping мс"

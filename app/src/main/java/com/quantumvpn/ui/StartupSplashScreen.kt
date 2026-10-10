@@ -15,6 +15,7 @@ import kotlinx.coroutines.withContext
 fun StartupSplashScreen(
     ready: Boolean, updateState: UpdateState, availableServers: Int, reduceMotion: Boolean = false,
     onFinished: () -> Unit, routingEnabled: Boolean = true, serverItems: List<RuntimeOutboundItem> = emptyList(),
+    onCancelUpdate: () -> Unit = {},
 ) {
     val app = LocalContext.current.applicationContext as QuantumVpnApplication
     var rulesReady by remember(routingEnabled) { mutableStateOf(!routingEnabled) }
@@ -41,6 +42,6 @@ fun StartupSplashScreen(
     ResourcePresentation(app.container.appResourceRepository) {
         AuroraStartup2026(ready, updateState, availableServers, reduceMotion,
             rulesReady = rulesReady, rulesDetail = rulesDetail, serversChecked = serversChecked,
-            reachableServers = reachable, onFinished = onFinished)
+            reachableServers = reachable, onFinished = onFinished, onCancelUpdate = onCancelUpdate)
     }
 }

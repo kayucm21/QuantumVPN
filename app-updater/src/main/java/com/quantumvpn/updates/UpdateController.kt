@@ -2,6 +2,7 @@ package com.quantumvpn.updates
 
 import android.content.Context
 import android.content.Intent
+import android.os.Environment
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
@@ -59,6 +60,7 @@ class UpdateController(
         when (val current = mutableState.value) {
             is UpdateState.Downloading,
             is UpdateState.Ready,
+            is UpdateState.Installing,
             is UpdateState.RetryingViaVpn -> return
             is UpdateState.Checking -> return
             is UpdateState.Available -> {
@@ -104,6 +106,7 @@ class UpdateController(
         when (mutableState.value) {
             is UpdateState.Downloading,
             is UpdateState.Ready,
+            is UpdateState.Installing,
             is UpdateState.RetryingViaVpn,
             is UpdateState.Checking -> return
             else -> Unit
@@ -111,6 +114,7 @@ class UpdateController(
         val candidate = when (val current = mutableState.value) {
             is UpdateState.Available -> current.candidate
             is UpdateState.Failure -> current.candidate
+            is UpdateState.InstallCancelled -> current.candidate
             else -> null
         } ?: return
         replaceOperation { downloadInternal(candidate) }
@@ -162,17 +166,27 @@ class UpdateController(
                     throw UpdateException("SHA-256 системного APK не совпадает с публикацией.")
                 }
                 verifier.verify(file, candidate.metadata)
+                coroutineContext.ensureActive()
                 readyFile = file
                 mutableState.value = UpdateState.Ready(candidate)
+            } catch (cancelled: CancellationException) {
+                discardOwnedApk(file)
+                cleanupFiles()
+                throw cancelled
             } catch (error: UpdateException) {
+                discardOwnedApk(file)
+                cleanupFiles()
                 mutableState.value = UpdateState.Failure(error.message ?: "Не удалось проверить системный APK.", candidate)
             } catch (_: Throwable) {
+                discardOwnedApk(file)
+                cleanupFiles()
                 mutableState.value = UpdateState.Failure("Не удалось проверить системный APK.", candidate)
             }
         }
     }
 
     fun failSystemDownload(message: String, candidate: UpdateCandidate?) {
+        cleanupFiles()
         mutableState.value = UpdateState.Failure(message, candidate)
     }
 
@@ -196,6 +210,7 @@ class UpdateController(
         var smoothedSpeed = 0L
         val already = partial.takeIf { it.isFile }?.length() ?: 0L
         try {
+            UpdateStoragePolicy.requireDownloadSpace(candidate.metadata.apkSize, root.usableSpace, already)
             val downloadJob = coroutineContext[Job]
             // Prefer Wi‑Fi/LTE under the VPN so panel:8443 is not killed mid-APK.
             // Never wipe .part: HTTP client resumes; VPN fallback is last resort only.
@@ -306,18 +321,55 @@ class UpdateController(
         return installIntentFactory.create(file)
     }
 
+    fun verifiedApkFile(): File = readyFile?.takeIf(File::isFile)
+        ?: throw UpdateException("Проверенный APK больше недоступен.")
+
+    fun onInstallerStarted(requiresUserAction: Boolean = false) {
+        val candidate = when (val current = mutableState.value) {
+            is UpdateState.Ready -> current.candidate
+            is UpdateState.Installing -> current.candidate
+            else -> null
+        }
+        mutableState.value = UpdateState.Installing(candidate, requiresUserAction)
+    }
+
+    /** PackageInstaller now owns a durable copy; our APK cache must not survive handoff. */
+    fun onInstallerStaged() {
+        cleanupFiles()
+    }
+
+    fun onInstalledPackageVerified(versionName: String, versionCode: Long) {
+        cleanupFiles()
+        mutableState.value = UpdateState.Installed(versionName, versionCode)
+    }
+
+    fun onInstallCancelled() {
+        val candidate = (mutableState.value as? UpdateState.Installing)?.candidate
+        cleanupFiles()
+        mutableState.value = UpdateState.InstallCancelled(candidate)
+    }
+
     fun onInstallerFinished(installed: Boolean) {
-        val candidate = (mutableState.value as? UpdateState.Ready)?.candidate
+        val candidate = when (val current = mutableState.value) {
+            is UpdateState.Ready -> current.candidate
+            is UpdateState.Installing -> current.candidate
+            else -> null
+        }
         cleanupFiles()
         mutableState.value = if (installed) {
-            UpdateState.Idle
+            // A successful Activity result is only a handoff; verify installed version separately.
+            UpdateState.Installing(candidate)
         } else {
-            UpdateState.Failure("Установка отменена или не завершена.", candidate)
+            UpdateState.InstallCancelled(candidate)
         }
     }
 
     fun failInstallation(message: String) {
-        val candidate = (mutableState.value as? UpdateState.Ready)?.candidate
+        val candidate = when (val current = mutableState.value) {
+            is UpdateState.Ready -> current.candidate
+            is UpdateState.Installing -> current.candidate
+            else -> null
+        }
         cleanupFiles()
         mutableState.value = UpdateState.Failure(message, candidate)
     }
@@ -327,8 +379,11 @@ class UpdateController(
     }
 
     private fun replaceOperation(block: suspend () -> Unit) {
-        operation?.cancel()
-        operation = scope.launch { block() }
+        val previous = operation
+        operation = scope.launch {
+            previous?.cancelAndJoin()
+            block()
+        }
     }
 
     private suspend fun <T> withVpnRetry(
@@ -378,11 +433,22 @@ class UpdateController(
     }
 
     private fun cleanupFiles() {
+        readyFile?.let(::discardOwnedApk)
         readyFile = null
         root.listFiles()?.forEach { file ->
             if (file.isFile) file.delete()
         }
         root.delete()
+    }
+
+    /** Only private updater locations are eligible; an arbitrary supplied file is never deleted. */
+    private fun discardOwnedApk(file: File) {
+        runCatching {
+            val parent = file.canonicalFile.parentFile ?: return@runCatching
+            val owned = listOfNotNull(root, File(appContext.cacheDir, "updates-system"),
+                appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS))
+            if (file.name.endsWith(".apk", true) && owned.any { parent == it.canonicalFile }) file.delete()
+        }
     }
 
     /** A new process must not inherit APK or .part leftovers from a previous attempt. */
@@ -394,6 +460,7 @@ class UpdateController(
             if (!file.isFile) return@forEach
             file.delete()
         }
+        root.delete()
     }
 
     private fun sha256(file: File): String {

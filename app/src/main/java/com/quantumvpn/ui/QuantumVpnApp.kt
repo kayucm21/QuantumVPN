@@ -1258,7 +1258,7 @@ internal fun UpdateReadyDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    "Обновление загружено и проверено. Android потребует подтверждение установки.",
+                    "Обновление загружено и проверено. Поддерживаемый Android может установить его автоматически; иначе появится системное подтверждение.",
                 )
                 ReleaseNotesMarkdown(
                     candidate.release.body.ifBlank {

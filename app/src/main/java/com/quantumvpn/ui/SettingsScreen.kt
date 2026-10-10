@@ -503,8 +503,26 @@ internal fun UpdateControls(
             Button(
                 onClick = onInstall,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            ) { Text("Открыть системную установку") }
+            ) { Text("Установить проверенное обновление") }
             OutlinedButton(onClick = onCancel) { Text("Удалить APK") }
+        }
+
+        is UpdateState.Installing -> {
+            Text(if (state.requiresUserAction) "Android требует подтверждения установки."
+                else "Пакет передан Android · ожидаем результат установки.")
+            Text("Загрузка завершена. Установка будет подтверждена только после проверки версии приложения.",
+                style = MaterialTheme.typography.bodySmall)
+            OutlinedButton(onClick = onCancel) { Text("Отменить установку") }
+        }
+
+        is UpdateState.Installed -> {
+            Text("Установлена версия ${state.versionName} · версия пакета проверена.")
+            OutlinedButton(onClick = { onCheck(channel) }) { Text("Проверить обновления") }
+        }
+
+        is UpdateState.InstallCancelled -> {
+            Text("Установка отменена · временный APK удалён.")
+            OutlinedButton(onClick = { onCheck(channel) }) { Text("Проверить заново") }
         }
 
         is UpdateState.Failure -> {

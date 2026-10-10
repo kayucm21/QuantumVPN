@@ -45,9 +45,9 @@ except ModuleNotFoundError:
     from tools import quantumvpn_community as community
 
 try:  # Script deployment keeps both modules in the same directory.
-    from quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, subscription_evidence, validate_backup
+    from quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, render_routing_conflict_preview, routing_conflict_preview, subscription_evidence, validate_backup
 except ModuleNotFoundError:
-    from tools.quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, subscription_evidence, validate_backup
+    from tools.quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, render_routing_conflict_preview, routing_conflict_preview, subscription_evidence, validate_backup
 
 try:
     import quantumvpn_resources as resources
@@ -58,6 +58,13 @@ try:
     from quantumvpn_aurora import aurora_css, aurora_script
 except ModuleNotFoundError:
     from tools.quantumvpn_aurora import aurora_css, aurora_script
+
+try:
+    import quantumvpn_four_catalog as four_catalog
+    from quantumvpn_four_ui import render_roadmap
+except ModuleNotFoundError:
+    from tools import quantumvpn_four_catalog as four_catalog
+    from tools.quantumvpn_four_ui import render_roadmap
 
 try:
     import quantumvpn_control_next as control_next
@@ -154,7 +161,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "2.3.0-pulse.6"
+PANEL_BUILD = "4.0.0-foundation.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -191,6 +198,7 @@ PAGE_TITLES = {
     "resources": ("РЕСУРСЫ И ИСПРАВЛЕНИЯ", "Подписанное оформление, тестовая группа и откат"),
     "features": ("Функции приложения", "Удалённые флаги и условия их применения"),
     "branding": ("Оформление", "Тексты, акценты и доступные параметры интерфейса"),
+    "roadmap": ("План Quantum 4.0", "100 согласованных возможностей · проверяемый прогресс вместо обещаний"),
     "incidents": ("События", "Инциденты и состояние сервисов"),
     "logs": ("Живые логи", "События панели без перезагрузки страницы"),
     "reports": ("Отчёты", "Агрегированная статистика и экспорт"),
@@ -205,11 +213,8 @@ AURORA_NAV_GROUPS = (
     ("overview", "Обзор", "▦", ("dashboard", "fleet", "quality")),
     ("network", "Сеть", "⇄", ("network", "latency", "automation", "routing", "ai")),
     ("clients", "Клиенты", "♧", ("users", "service", "devices", "support", "donations")),
-    ("releases", "Релизы", "◇", ("release", "resources", "features", "branding")),
-    ("events", "События", "≡", ("incidents", "logs", "reports", "audit")),
-    ("security", "Защита", "♢", ("security", "admins")),
-    ("games", "Игры", "♠", ("cards",)),
-    ("system", "Система", "⚙", ("integrations",)),
+    ("product", "Продукт", "◇", ("release", "resources", "features", "branding", "cards", "roadmap")),
+    ("system", "Система", "⚙", ("integrations", "incidents", "logs", "reports", "audit", "security", "admins")),
 )
 
 
@@ -4407,7 +4412,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <meta name=referrer content=same-origin><title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}{aurora_css()}{scan_dialog_css()}{catalog_dialog_css()}{proxy_links.links_css()}</style><body class=aurora-panel data-ui=Aurora2><main><div class=panel-shell>
       <aside class=sidebar>
-      <div class=sidebar-brand>Quantum Control<span>AURORA · 2.0</span></div>
+      <div class=sidebar-brand>Quantum Control<span>4.0 · FOUNDATION</span></div>
       {navigation}
       <a class=aurora-logout href="/operator/logout">Выход из панели</a>
       </aside>
@@ -4416,7 +4421,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <div class=hero-top><form class=control-search method=get action=/operator><input type=hidden name=tab value=users><input name=q aria-label="Поиск пользователей" placeholder="Поиск по пользователям…" value="{html.escape(q)}"><button>Найти</button></form><span id=system-pill class=system-pill>{'● Есть открытые инциденты' if report['open_incidents'] else '● Открытых инцидентов нет'}</span><span class=top-date>{time.strftime('%d.%m.%Y %H:%M', time.gmtime(time.time()+10800))}<br><small>МСК · {html.escape(actor_role)}</small></span></div>
     </section>
     {flash_html}
-    <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>Aurora 2.0</small></header>
+    <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>4.0 · Foundation</small></header>
     {subnavigation}
     {quality_html}
     <section {show('quality')}>{next_quality_html}{next_history_html}</section>
@@ -5077,6 +5082,20 @@ class App(BaseHTTPRequestHandler):
 
     def control_preview_page(self, preview, adm):
         body = control_next.render_preview(preview, self.control_csrf(adm))
+        if preview.get("scope") == "routing":
+            # Inspect the exact server-stored candidate tied to the existing
+            # actor/digest. This adds evidence only: nonce, CSRF, CAS guards,
+            # expiry and the apply callback remain unchanged.
+            row = adm["db"].execute(
+                "select candidate_json,guards_json from control_previews where id=? and digest=? and scope='routing' and actor=? and state='pending'",
+                (preview["preview_id"], preview["digest"], adm["user"]),
+            ).fetchone()
+            if not row:
+                raise ValueError("Кандидат подтверждения не найден")
+            candidate, guards = json.loads(row[0]), json.loads(row[1])
+            revision = max(1, int(guards.get("routing_revision") or 1)) + 1
+            evidence = routing_conflict_preview(routing_payload(candidate, revision))
+            body = render_routing_conflict_preview(evidence) + body
         if getattr(self, "_network_return_view", None):
             body = body.replace("</form>", '<input type=hidden name=return_tab value=network><input type=hidden name=return_view value="' + html.escape(self._network_return_view, quote=True) + '"></form>')
             cancel_source = getattr(self, "_network_cancel_source", "draft")
@@ -6210,6 +6229,26 @@ class App(BaseHTTPRequestHandler):
             flash = query.get("flash", [""])[0]
             if tab == "admins" and not role_at_least(adm.get("role", "viewer"), "owner"):
                 return self.reply(403, "Только owner может управлять администраторами", "text/plain; charset=utf-8")
+            if tab == "roadmap":
+                try:
+                    keys = ("q", "roadmap_group", "roadmap_offset", "roadmap_limit")
+                    if any(len(query.get(key, [])) > 1 for key in keys):
+                        raise ValueError("duplicate_roadmap_parameter")
+                    group = query.get("roadmap_group", [""])[0]
+                    catalog = four_catalog.catalog(q, group, int(query.get("roadmap_offset", ["0"])[0]),
+                                                   int(query.get("roadmap_limit", ["20"])[0]))
+                except (ValueError, TypeError):
+                    return self.reply(400, "Некорректные параметры плана 4.0", "text/plain; charset=utf-8")
+                navigation, subnavigation = aurora_navigation(tab, adm.get("role", "viewer"))
+                title, description = PAGE_TITLES[tab]
+                # Pure catalogue rendering deliberately skips RosPanel, model,
+                # service_status and all route/update actions.
+                page = f'''<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=referrer content=same-origin>
+                <title>{html.escape(title)} · Quantum Control</title><style>{css()}{aurora_css()}</style><body class=aurora-panel data-ui=Quantum4Roadmap><main><div class=panel-shell>
+                <aside class=sidebar><div class=sidebar-brand>Quantum Control<span>ПЛАН · 4.0</span></div>{navigation}<a class=aurora-logout href=/operator/logout>Выход из панели</a></aside>
+                <section class="panel-content four-content" style="padding-top:24px"><header class=reference-heading><div><h1>{html.escape(title)}</h1><p>{html.escape(description)}</p></div></header>
+                {subnavigation}{render_roadmap(catalog, q, group)}</section></div></main></body></html>'''
+                return self.reply(200, page, "text/html; charset=utf-8")
             admin_rows = db.execute(
                 "select username,role,enabled,updated_at from admin_users order by username"
             ).fetchall()

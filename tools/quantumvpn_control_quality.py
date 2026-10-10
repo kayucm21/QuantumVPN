@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from bisect import bisect_left, bisect_right
 import hashlib
 import html
 import io
@@ -29,6 +30,7 @@ ADS_SUFFIXES = (
     "facebook.net", "hotjar.com", "clarity.ms", "moatads.com", "taboola.com", "outbrain.com",
     "criteo.com", "pubmatic.com", "openx.net", "rubiconproject.com",
 )
+ROUTE_MATCH_LIMIT = 24
 
 
 def subscription_evidence(raw: bytes) -> dict:
@@ -104,31 +106,118 @@ def explain_route(payload: dict, target: str) -> dict:
             raise ValueError("Некорректный домен") from exc
         if not re.fullmatch(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host) or any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") for label in host.split(".")):
             raise ValueError("Некорректный домен или IP")
-    result = {"target": host, "revision": payload.get("revision"), "dns": payload.get("dns", {}), "checked_at": int(time.time())}
+    result = {"target": host, "revision": payload.get("revision"), "dns": payload.get("dns", {}), "checked_at": int(time.time()),
+              "matches": [], "matching_count": 0, "matches_truncated": False,
+              "conflict": False, "conflict_categories": [], "method": "published_policy_only"}
     if not payload.get("enabled", True):
         return {**result, "direction": "Профиль устройства", "reason": "Панельная маршрутизация отключена; используются правила сохранённого профиля."}
     rules = payload.get("rules", {})
     def suffix(values):
-        return next((s for s in values if host == s or host.endswith("." + s)), None)
+        return list(dict.fromkeys(s for s in values if host == s or host.endswith("." + s)))
     def cidr(values):
-        return next((s for s in values if address and address in ipaddress.ip_network(s)), None)
-    block = suffix(rules.get("block_domains", [])) if not address else None
-    ads = suffix(ADS_SUFFIXES) if not address and payload.get("adblock", {}).get("enabled") else None
+        return list(dict.fromkeys(s for s in values if address and address in ipaddress.ip_network(s)))
+    block_matches = suffix(rules.get("block_domains", [])) if not address else []
+    ad_matches = suffix(ADS_SUFFIXES) if not address and payload.get("adblock", {}).get("enabled") else []
+    direct_matches = suffix(rules.get("direct_domains", [])) if not address else cidr(rules.get("direct_cidrs", []))
+    proxy_matches = suffix(rules.get("proxy_domains", [])) if not address else cidr(rules.get("proxy_cidrs", []))
+    matches = ([{"category": "block", "rule": value, "source": "explicit"} for value in block_matches]
+               + [{"category": "block", "rule": value, "source": "adblock"} for value in ad_matches]
+               + [{"category": "direct", "rule": value, "source": "explicit"} for value in direct_matches]
+               + [{"category": "proxy", "rule": value, "source": "explicit"} for value in proxy_matches])
+    categories = [category for category in ("block", "direct", "proxy") if any(item["category"] == category for item in matches)]
+    result.update(matches=matches[:ROUTE_MATCH_LIMIT], matching_count=len(matches),
+                  matches_truncated=len(matches) > ROUTE_MATCH_LIMIT, conflict=len(categories) > 1,
+                  conflict_categories=categories if len(categories) > 1 else [])
+    block = block_matches[0] if block_matches else None
+    ads = ad_matches[0] if ad_matches else None
     if block or ads:
         return {**result, "direction": "Блокировка", "reason": "Приоритет block / DNS reject", "matched": block or ads}
-    direct = suffix(rules.get("direct_domains", [])) if not address else cidr(rules.get("direct_cidrs", []))
+    direct = direct_matches[0] if direct_matches else None
     if direct:
         return {**result, "direction": "Напрямую", "reason": "Явное правило direct", "matched": direct}
     # Android's generated LAN bypass precedes explicit proxy rules.
     # sing-box ip_is_private matches non-public addresses, including CGNAT.
     if address and (not address.is_global or address.is_multicast):
         return {**result, "direction": "Напрямую", "reason": "Локальная сеть / служебный адрес"}
-    proxy = suffix(rules.get("proxy_domains", [])) if not address else cidr(rules.get("proxy_cidrs", []))
+    proxy = proxy_matches[0] if proxy_matches else None
     if payload.get("profile") == "balanced":
         return {**result, "direction": "Зависит от RU-списка APK", "matched": proxy or "RU / по умолчанию", "reason": "APK проверяет локальные RU domain/IP списки перед proxy: совпадение → напрямую, иначе → VPN. RU-списки и оставшиеся правила профиля не проверялись панелью."}
     if proxy:
         return {**result, "direction": "Через выбранный VPN", "reason": "Явное правило proxy", "matched": proxy}
     return {**result, "direction": "Через выбранный VPN", "reason": "Маршрут по умолчанию; локальные сети исключены"}
+
+
+def routing_conflict_preview(payload: dict) -> dict:
+    """Find suffix/CIDR overlaps in a candidate without DNS or quadratic pairs.
+
+    Domain children are representative conflict targets. For CIDRs one
+    representative address is selected per overlapping network. Counts refer
+    to those representatives, not to the infinite number of affected hosts.
+    Only the first ROUTE_MATCH_LIMIT explanations are materialised.
+    """
+    rules = payload.get("rules", {})
+    domain_sets = {category: set(rules.get(category + "_domains", []))
+                   for category in ("block", "direct", "proxy")}
+    if payload.get("adblock", {}).get("enabled"):
+        domain_sets["block"].update(ADS_SUFFIXES)
+    domain_targets = sorted(set().union(*domain_sets.values()))
+    findings, count = [], 0
+    for target in domain_targets:
+        labels = target.split(".")
+        suffixes = {".".join(labels[index:]) for index in range(len(labels))}
+        categories = [name for name, values in domain_sets.items() if values & suffixes]
+        if len(categories) > 1:
+            count += 1
+            if len(findings) < ROUTE_MATCH_LIMIT:
+                findings.append({"kind": "domain", "representative": target,
+                                 "explanation": explain_route(payload, target)})
+
+    networks = {name: list(dict.fromkeys(ipaddress.ip_network(value) for value in rules.get(name + "_cidrs", [])))
+                for name in ("direct", "proxy")}
+    for category, other in (("direct", "proxy"), ("proxy", "direct")):
+        for version in (4, 6):
+            peers = [network for network in networks[other] if network.version == version]
+            starts = sorted(int(network.network_address) for network in peers)
+            ends = sorted(int(network.broadcast_address) for network in peers)
+            for network in networks[category]:
+                if network.version != version:
+                    continue
+                start, end = int(network.network_address), int(network.broadcast_address)
+                # Any interval ending before start is already included in the
+                # count of intervals starting before end. Difference > 0 means
+                # at least one peer overlaps, regardless of nested prefix order.
+                if bisect_right(starts, end) <= bisect_left(ends, start):
+                    continue
+                count += 1
+                if len(findings) < ROUTE_MATCH_LIMIT:
+                    index = bisect_left(starts, start)
+                    address = starts[index] if index < len(starts) and starts[index] <= end else start
+                    target = str(ipaddress.IPv4Address(address) if version == 4 else ipaddress.IPv6Address(address))
+                    findings.append({"kind": "cidr", "representative": str(network),
+                                     "explanation": explain_route(payload, target)})
+    document = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {"method": "candidate_policy_only", "enabled": payload.get("enabled", True),
+            "sha256": hashlib.sha256(document).hexdigest(), "revision": payload.get("revision"),
+            "representative_count": count, "findings": findings, "truncated": count > len(findings)}
+
+
+def render_routing_conflict_preview(snapshot: dict) -> str:
+    """Present a candidate warning before the unchanged confirmation form."""
+    esc = lambda value: html.escape(str(value), quote=True)
+    count = int(snapshot["representative_count"])
+    rows = "".join(f'<details><summary>{esc(item["representative"])}</summary>'
+                   + render_route_evidence(item["explanation"]) + '</details>'
+                   for item in snapshot["findings"][:ROUTE_MATCH_LIMIT])
+    state = (f"Пересечения направлений: {count} примеров доменов / CIDR." if count
+             else "Пересечений direct / proxy / block в списках кандидата не найдено.")
+    active = "" if snapshot["enabled"] else " Панельная маршрутизация отключена: эти пересечения сейчас не активны."
+    truncated = f" Показано {len(snapshot['findings'])} из {count} примеров." if snapshot["truncated"] else ""
+    return (f'<section class="card routing-conflict-preview"><h2>Проверка маршрутов перед публикацией</h2>'
+            f'<p class={"warn" if count else "muted"}>{esc(state + active + truncated)}</p>'
+            '<p class=muted>Проверен кандидат именно этого подтверждения. Это анализ suffix/CIDR и DNS-блокировки рекламы, '
+            'без запросов к целям; локальные RU-списки APK, разрешение DNS и реальные соединения не моделировались. '
+            'Пересечения могут быть намеренными; действует порядок block → direct → VPN с исключениями профиля.</p>'
+            f'<small>SHA-256 кандидата: <code>{esc(snapshot["sha256"])}</code></small>{rows}</section>')
 
 
 def dependency_evidence(path: str) -> dict:
@@ -311,6 +400,37 @@ def quality_snapshot(db, s: dict, rospanel_db: str) -> dict:
             "version_code": int(s.get("app_version_code") or 0), "client_quality": client_quality_summary(db, moment)}
 
 
+def render_route_evidence(route: dict) -> str:
+    """Render a bounded, escaped explanation; never make a target request."""
+    if not route:
+        return ""
+    esc = lambda value: html.escape(str(value), quote=True)
+    labels = {"block": "Блокировка", "direct": "Напрямую", "proxy": "VPN"}
+    matches = [item for item in route.get("matches", [])[:ROUTE_MATCH_LIMIT] if isinstance(item, dict)]
+    rows = "".join(
+        f"<tr><td>{esc(labels.get(item.get('category'), 'Правило'))}</td><td><code>{esc(item.get('rule', ''))}</code></td>"
+        f"<td>{'Блокировка рекламы' if item.get('source') == 'adblock' else 'Явный список'}</td></tr>"
+        for item in matches
+    )
+    count = max(len(matches), int(route.get("matching_count") or len(matches)))
+    truncated = f"<p class=muted>Показаны первые {len(matches)} из {count} совпадений.</p>" if count > len(matches) else ""
+    conflicts = (
+        "<p class=warn><b>Конфликт направлений:</b> "
+        + esc(" / ".join(labels.get(value, "Правило") for value in route.get("conflict_categories", [])))
+        + ". Применяется приоритет опубликованной политики; списки не изменялись.</p>"
+    ) if route.get("conflict") else ""
+    matches_html = (
+        f"<details><summary>Совпавшие правила · {count}</summary><div class=quality-table><table><thead>"
+        "<tr><th>Направление</th><th>Домен / CIDR</th><th>Источник</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>{truncated}</details>"
+    ) if rows else ""
+    return (
+        f"<div class=flash><b>{esc(route.get('target', ''))} → {esc(route.get('direction', ''))}</b>{conflicts}"
+        f"<p>{esc(route.get('reason', ''))}</p><small>Правило: {esc(route.get('matched', 'по умолчанию'))}"
+        f" · опубликовано r{esc(route.get('revision', '—'))}</small>{matches_html}</div>"
+    )
+
+
 def render_quality(snapshot: dict, s: dict) -> str:
     esc = lambda x: html.escape(str(x), quote=True)
     stamp = lambda x: time.strftime("%d.%m %H:%M", time.gmtime(int(x or 0) + 10800)) + " МСК" if x else "нет данных"
@@ -329,7 +449,7 @@ def render_quality(snapshot: dict, s: dict) -> str:
         badges = " ".join(f"<span class='badge {'ok' if x['enabled'] else 'off'}'>{esc(x['protocol'])} : {int(x['port']) if x['port'] else 'неизвестно'}</span>" for x in items) or "<span class=muted>Протоколы не настроены</span>"
         dependencies.append(f"<article class=card><b>{esc(node['label'])}</b><p class=muted>{esc(node['host'])} · {'Включён' if node['enabled'] else 'Отключён'}</p>{badges}<p>→ Общая выдача подписки → {int(deps.get('users',0))} активных пользователей</p><small>Статус включения взят из базы; доступность — в таблице измерений.</small></article>")
     dep_html = "".join(dependencies) or "<p class=muted>Нет данных основной панели</p>"
-    route_result = f"<div class=flash><b>{esc(route.get('target',''))} → {esc(route.get('direction',''))}</b><details><summary>Почему выбран этот маршрут?</summary><p>{esc(route.get('reason',''))}</p><small>Правило: {esc(route.get('matched','по умолчанию'))} · опубликовано r{esc(route.get('revision','—'))}</small></details></div>" if route else ""
+    route_result = render_route_evidence(route)
     backup_result = f"<p class={'ok' if backup.get('ok') else 'off'}>{'Проверка восстановления пройдена' if backup.get('ok') else 'Проверка не пройдена'}</p><p>{esc(backup.get('note',''))}</p><p class=muted>Проверено: {esc(', '.join(backup.get('databases',[]) + backup.get('key_files',[])) or '—')}</p><p class=warn>Отсутствует в архиве: {esc(', '.join(backup.get('missing',[])) or 'нет обязательных пропусков')}</p><small>{esc(stamp(backup.get('checked_at')))}</small>" if backup else "<p class=muted>Восстановление ещё не проверялось</p>"
     client_quality_html = render_client_quality(snapshot.get("client_quality", {}))
     return f"""<style>.quality-page details.card{{margin-top:10px}}.quality-page summary{{cursor:pointer;font-weight:650}}.quality-page .quality-table{{max-height:240px;overflow:auto}}.quality-page pre{{white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow:auto}}.quality-page table{{min-width:0}}.quality-page td{{overflow-wrap:anywhere}}.quality-page .grid{{align-items:start}}.quality-page .stat{{padding:9px;font-size:12px}}.quality-page .stat b{{margin-top:2px;font-size:21px}}.quality-page .card{{padding:12px}}.quality-page h2{{font-size:16px;margin:0 0 8px}}.quality-page p{{margin:8px 0;font-size:12px}}.quality-page form{{display:flex;align-items:flex-end;gap:8px}}.quality-page form label{{flex:1;min-width:0;margin:0}}.quality-page form button{{flex-shrink:0;padding:9px 12px}}.quality-page .flash{{margin-top:8px;padding:10px;font-size:12px}}.quality-page .quality-details{{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}}.panel-shell:has(.quality-page) .tabs>a{{min-height:35px;padding:8px 12px}}@media(max-width:900px){{.quality-page table{{min-width:650px}}.quality-page .quality-details{{grid-template-columns:1fr}}.quality-page form{{flex-wrap:wrap}}}}</style><section class=quality-page><div class=reference-kpis>
@@ -340,7 +460,7 @@ def render_quality(snapshot: dict, s: dict) -> str:
     <div class=grid style='margin-top:12px'>
     <section class=card><div class=section-head><h2>Подписка глазами APK</h2><form method=post action=/operator/actions><input type=hidden name=return_tab value=quality><button name=action value=inspect_subscription>Проверить</button></form></div>
     <p class=muted>Последний ответ одной подписки. Ссылки и ключи скрыты.</p>{awg_note}<div class=quality-protocols>{protocol_tiles}</div><details style='margin-top:10px'><summary>Формат и совместимость</summary><div class=quality-table><table><thead><tr><th>Протокол</th><th>Серверов</th><th>Формат</th></tr></thead><tbody>{sub_rows}</tbody></table></div><small>{esc(' · '.join(str(sub[k]) for k in ('source','encoding','warning') if sub.get(k)))}</small><pre>SHA-256: {esc(sub.get('sha256','нет данных'))}</pre></details></section>
-    <section class=card><h2>Почему выбран этот маршрут?</h2><form method=post action=/operator/actions><input type=hidden name=return_tab value=quality><label>Домен, IP или URL<input name=route_target maxlength=1024 required placeholder='youtube.com' value='{esc(route.get('target',''))}'></label><button name=action value=explain_route>Проверить правило</button></form>{route_result}<p class=muted>DNS: {esc(s.get('routing_dns_resolver') or s.get('routing_dns_mode','vpn_only'))}. Введённый URL не открывается и не сканируется.</p></section>
+    <section class=card><h2>Симулятор маршрута</h2><form method=post action=/operator/actions><input type=hidden name=return_tab value=quality><label>Домен, IP или URL<input name=route_target maxlength=1024 required placeholder='youtube.com' value='{esc(route.get('target',''))}'></label><button name=action value=explain_route>Предпросмотр</button></form>{route_result}<p class=muted>DNS: {esc(s.get('routing_dns_resolver') or s.get('routing_dns_mode','vpn_only'))}. Проверяется опубликованная политика. RU-списки и правила сохранённого профиля APK не загружаются; доступность цели и пинг не измеряются. Введённый URL не открывается и не сканируется.</p></section>
     </div>{client_quality_html}<details class=card style='margin-top:12px'><summary>Состояние сервисов и нод · {len(snapshot['health'])} целей · последние 24 часа</summary><div class=quality-table><table><thead><tr><th>Цель</th><th>Успешные проверки</th><th>Доступность</th><th>Задержка ответа</th><th>Последний замер</th></tr></thead><tbody>{health_rows}</tbody></table></div><p class=muted>Это проверки с VDS. Потери пакетов и скорость конкретного VPN-протокола требуют отдельного измерения и здесь не вычисляются из TCP-пинга. <a href='/operator?tab=quality'>Обновить показатели →</a></p></details><div class=quality-details>
     <details class=card><summary>Карта зависимостей: ноды → протоколы → подписки</summary><div class=grid style='margin-top:12px'>{dep_html}</div><p class=muted>Панельная маршрутизация r{esc(s.get('routing_revision','1'))} и DNS применяются в APK к выбранному профилю. Индивидуальные ограничения основной панели могут изменить набор серверов пользователя.</p></details>
     <details class=card><summary>Обновления и уведомления · {esc(snapshot['version'])}</summary><div class=quality-table><table><thead><tr><th>Устройство</th><th>versionCode</th><th>Запрос политики</th><th>Проверка обновления</th><th>Загрузка</th><th>Разрешение уведомлений</th></tr></thead><tbody>{client_rows}</tbody></table></div><p class=muted>Версия — сообщение клиента, не независимая проверка установки. Запрос политики не доказывает показ уведомления. Старые APK не сообщают разрешение и установку: для них отображается «неизвестно».</p></details>

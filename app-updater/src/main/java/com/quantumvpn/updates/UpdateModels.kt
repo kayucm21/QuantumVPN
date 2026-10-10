@@ -76,6 +76,10 @@ sealed interface UpdateState {
         val etaSeconds: Long? = null,
     ) : UpdateState
     data class Ready(val candidate: UpdateCandidate) : UpdateState
+    /** Download verification is complete, but only Android can confirm installation. */
+    data class Installing(val candidate: UpdateCandidate?, val requiresUserAction: Boolean = false) : UpdateState
+    data class Installed(val versionName: String, val versionCode: Long) : UpdateState
+    data class InstallCancelled(val candidate: UpdateCandidate? = null) : UpdateState
     data class Failure(val message: String, val candidate: UpdateCandidate? = null) : UpdateState
 }
 

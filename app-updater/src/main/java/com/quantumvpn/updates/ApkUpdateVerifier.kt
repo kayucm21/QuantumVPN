@@ -21,6 +21,7 @@ data class ApkIdentity(
     val versionCode: Long,
     val minSdk: Int,
     val signing: SigningIdentity,
+    val targetSdk: Int = 0,
 )
 
 object UpdateInstallPolicy {
@@ -108,6 +109,7 @@ class AndroidApkUpdateVerifier(private val context: Context) : ApkUpdateVerifier
             versionCode = versionCode,
             minSdk = info.applicationInfo?.minSdkVersion ?: 1,
             signing = signing,
+            targetSdk = info.applicationInfo?.targetSdkVersion ?: 0,
         )
     }
 

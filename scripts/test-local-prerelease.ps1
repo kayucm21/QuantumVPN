@@ -31,7 +31,9 @@ try {
     Assert-Test ($properties['name'] -ceq 'Quantum VPN') 'Java Unicode escapes decode exactly'
     [IO.File]::WriteAllText($propertiesFixture, 'sdk.dir=\\\\server\\Android SDK' + "`n")
     Assert-Test ((Read-Properties $propertiesFixture)['sdk.dir'] -ceq '\\server\Android SDK') 'UNC path decoding preserves leading double slash'
-    Assert-Throws { . $packager -Version '5.11.3' -VersionCode 501103099 -PublishAt ([DateTimeOffset]'2026-10-06T00:00:00.500+03:00') -ExpectedSigner $signerFixture } 'Moscow midnight'
+    Assert-Throws { . $packager -Version '5.11.3' -VersionCode 501103099 -PublishAt ([DateTimeOffset]'2026-10-06T00:00:00.500+03:00') -ExpectedSigner $signerFixture } 'whole hour'
+    . $packager -Version '5.12.0' -VersionCode 501200099 -PublishAt ([DateTimeOffset]'2026-10-11T07:00:00+03:00') -ExpectedSigner $signerFixture
+    Assert-Test ($publication.ToUnixTimeSeconds() -eq ([DateTimeOffset]'2026-10-11T04:00:00Z').ToUnixTimeSeconds()) 'Explicit 07:00 Moscow packaging binds 04:00 UTC'
     $immediateFixture = [DateTimeOffset]'2026-10-07T15:42:31+03:00'
     Assert-Throws { . $packager -Immediate -Version '5.11.3' -VersionCode 501103099 -PublishAt $immediateFixture -ExpectedSigner $signerFixture } 'must exceed'
     . $packager -Immediate -Version '5.11.4' -VersionCode 501104099 -PublishAt $immediateFixture -ExpectedSigner $signerFixture

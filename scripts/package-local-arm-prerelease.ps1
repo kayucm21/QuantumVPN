@@ -17,7 +17,7 @@ $folder = Join-Path $projectRoot "artifacts/$Version"
 $publication = $PublishAt.ToOffset([TimeSpan]::FromHours(3))
 if ($Immediate) {
     if ($Version -ceq '5.11.2' -or $VersionCode -le 501103099) { throw 'Immediate release must exceed the 5.11.3 versionCode' }
-} elseif ($publication.TimeOfDay.Ticks -ne 0) { throw 'Release must be at Moscow midnight' }
+} elseif (($publication.TimeOfDay.Ticks % [TimeSpan]::TicksPerHour) -ne 0) { throw 'Release must be at an explicit whole hour in Moscow' }
 function Read-Properties([string]$Path) {
     $out = @{}
     foreach ($line in [IO.File]::ReadAllLines($Path)) {

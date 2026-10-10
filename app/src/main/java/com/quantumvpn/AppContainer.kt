@@ -145,6 +145,10 @@ class AppContainer(
     )
     // Process-owned: cleanup runs on app start, never on Activity rotation.
     val systemApkInstaller = com.quantumvpn.updates.SystemApkUpdateInstaller(appContext)
+    val sessionApkInstaller = com.quantumvpn.updates.SessionApkUpdateInstaller(appContext) {
+        updateController.onInstallerStaged()
+        systemApkInstaller.finishInstallerHandoff()
+    }
     val recentServersStore = RecentServersStore(appContext)
     val favoriteServersStore = FavoriteServersStore(appContext)
     val pinnedServersStore = PinnedServersStore(appContext)

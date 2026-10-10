@@ -27,6 +27,7 @@ internal fun AuroraStartup2026(
     ready: Boolean, update: UpdateState, servers: Int, reduceMotion: Boolean,
     rulesReady: Boolean = true, rulesDetail: String = "Локальные правила",
     serversChecked: Boolean = true, reachableServers: Int? = null,
+    onCancelUpdate: () -> Unit = {},
     onFinished: () -> Unit,
 ) {
     val canFinish = startupFinishAllowed(ready, update) && rulesReady && serversChecked
@@ -45,7 +46,11 @@ internal fun AuroraStartup2026(
     val updateSettled = startupFinishAllowed(true, update)
     val status = when (update) {
         is UpdateState.Downloading -> "Загружаем обновление ${update.candidate.metadata.versionName}"
-        is UpdateState.Ready -> "Пакет проверен · подтвердите установку Android"
+        is UpdateState.Ready -> "Пакет проверен · готовим системную установку"
+        is UpdateState.Installing -> if (update.requiresUserAction) "Подтвердите установку в окне Android"
+            else "Пакет передан Android · ожидаем результат"
+        is UpdateState.Installed -> "Версия ${update.versionName} установлена · проверено"
+        is UpdateState.InstallCancelled -> "Установка отменена · временный APK удалён"
         is UpdateState.Available -> "Новая версия найдена · готовим загрузку"
         is UpdateState.Checking, is UpdateState.RetryingViaVpn -> "Проверяем обновления"
         is UpdateState.Failure -> "Не удалось проверить обновление · повторим позже"
@@ -94,7 +99,8 @@ internal fun AuroraStartup2026(
                     append(download.etaSeconds?.let { "осталось ${it.coerceAtLeast(1)} с" } ?: "время уточняется")
                 }, color = muted, fontSize = 12.sp)
             } else {
-                if (!canFinish && !reduceMotion && update !is UpdateState.Ready) {
+                if (!canFinish && !reduceMotion && update !is UpdateState.Ready &&
+                    !(update is UpdateState.Installing && update.requiresUserAction)) {
                     LinearProgressIndicator(color = cyan, trackColor = Color(0xFF23415C), modifier = Modifier.fillMaxWidth())
                 }
                 Text(rulesDetail, color = muted, fontSize = 11.sp, modifier = Modifier.padding(top = 12.dp), textAlign = TextAlign.Center)
@@ -104,8 +110,9 @@ internal fun AuroraStartup2026(
             }
             Spacer(Modifier.height(22.dp))
             Text("Версия ${BuildConfig.VERSION_NAME} · Quantum 2.0", color = muted, fontSize = 11.sp)
-            if (download != null || update is UpdateState.Ready || update is UpdateState.Available) {
-                Text("Установка — после вашего подтверждения в Android.", color = muted, fontSize = 11.sp, textAlign = TextAlign.Center)
+            if (download != null || update is UpdateState.Ready || update is UpdateState.Available || update is UpdateState.Installing) {
+                Text("Автоустановка — только если разрешит Android. Иначе понадобится системное подтверждение.", color = muted, fontSize = 11.sp, textAlign = TextAlign.Center)
+                OutlinedButton(onClick = onCancelUpdate, modifier = Modifier.padding(top = 12.dp)) { Text("Отменить обновление") }
             }
         }
     }

@@ -38,6 +38,24 @@ class ScheduleParsingTests(unittest.TestCase):
         target = DEPLOY.parse_schedule("2026-10-04T00:00:00+03:00", now=now)
         self.assertEqual(target, int(datetime(2026, 10, 3, 21, tzinfo=timezone.utc).timestamp()))
 
+    def test_seven_moscow_is_four_utc_not_local_pc_time(self):
+        now = int(datetime(2026, 10, 10, 14, tzinfo=timezone.utc).timestamp())
+        target = DEPLOY.parse_schedule("2026-10-11T07:00:00+03:00", now=now)
+        self.assertEqual(target, int(datetime(2026, 10, 11, 4, tzinfo=timezone.utc).timestamp()))
+
+    def test_every_whole_moscow_hour_is_explicit_and_exact(self):
+        now = int(datetime(2026, 10, 9, tzinfo=timezone.utc).timestamp())
+        for hour in range(24):
+            text = f"2026-10-11T{hour:02}:00:00+03:00"
+            expected = datetime.fromisoformat(text).timestamp()
+            self.assertEqual(DEPLOY.parse_schedule(text, now=now), int(expected))
+
+    def test_non_hour_and_invalid_hour_are_rejected(self):
+        now = int(datetime(2026, 10, 9, tzinfo=timezone.utc).timestamp())
+        for clock in ("24:00:00", "07:01:00", "07:00:01", "7:00:00", "07:00:00.000"):
+            with self.subTest(clock=clock), self.assertRaises(ValueError):
+                DEPLOY.parse_schedule(f"2026-10-11T{clock}+03:00", now=now)
+
     def test_ambiguous_non_midnight_or_past_dates_rejected(self):
         now = int(datetime(2026, 10, 3, 16, tzinfo=timezone.utc).timestamp())
         for value in ("2026-10-04T00:00:00", "2026-10-04T00:00:00Z", "2026-10-04T00:00:00+08:00",

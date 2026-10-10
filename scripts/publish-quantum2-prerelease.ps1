@@ -1,7 +1,7 @@
 #requires -Version 7.2
 <#
 Read-only by default. -Publish is the only mutation and is forbidden before
-the verified PublishAt. Scheduled publication requires Moscow midnight;
+the verified PublishAt. Scheduled publication requires an explicit whole Moscow hour;
 -Immediate explicitly permits a new locally packaged immediate bundle.
 The default preserves v5.11.2; later versions
 must carry an identical publish_at_epoch in their local build metadata.
@@ -31,7 +31,7 @@ $script:PublishAt = $PublishAt.ToOffset([TimeSpan]::FromHours(3))
 if ($Immediate) {
     if (-not $PSBoundParameters.ContainsKey('Version') -or -not $PSBoundParameters.ContainsKey('VersionCode') -or -not $PSBoundParameters.ContainsKey('PublishAt')) { throw 'Immediate release requires explicit version, versionCode and PublishAt' }
     if ($Version -ceq '5.11.2' -or $VersionCode -le 501103099) { throw 'Immediate release must exceed the 5.11.3 versionCode' }
-} elseif ($script:PublishAt.TimeOfDay.Ticks -ne 0) { throw 'Release must be at Moscow midnight' }
+} elseif (($script:PublishAt.TimeOfDay.Ticks % [TimeSpan]::TicksPerHour) -ne 0) { throw 'Release must be at an explicit whole hour in Moscow' }
 $script:Immediate = [bool]$Immediate
 if ($Version -ceq '5.11.2' -and ($VersionCode -ne 501102099 -or $script:Deadline -ne 1791061200)) { throw 'Legacy release identity and deadline are immutable' }
 if ($Version -cne '5.11.2' -and $VersionCode -le 501102099) { throw 'New release versionCode must exceed the published 5.11.2 versionCode' }

@@ -42,7 +42,10 @@ try {
     . $publisher
     Assert-Test ($script:Version -ceq '5.11.2' -and $script:VersionCode -eq 501102099 -and $script:Deadline -eq 1791061200) 'Legacy defaults unchanged'
     Assert-Throws { . $publisher -Version '5.11.2' -VersionCode 501102099 -PublishAt ([DateTimeOffset]'2026-10-03T00:00:00+03:00') } 'immutable'
-    Assert-Throws { . $publisher -Version '5.11.3' -VersionCode 501103099 -PublishAt ([DateTimeOffset]'2026-10-06T00:00:00.001+03:00') } 'Moscow midnight'
+    Assert-Throws { . $publisher -Version '5.11.3' -VersionCode 501103099 -PublishAt ([DateTimeOffset]'2026-10-06T00:00:00.001+03:00') } 'whole hour'
+    . $publisher -Version '5.12.0' -VersionCode 501200099 -PublishAt ([DateTimeOffset]'2026-10-11T07:00:00+03:00')
+    Assert-Test ($script:Deadline -eq ([DateTimeOffset]'2026-10-11T04:00:00Z').ToUnixTimeSeconds() -and $script:Tag -ceq 'v5.12.0') '07:00 Moscow publisher binds exact deadline and tag'
+    Assert-Throws { . $publisher -Version '5.11.2' -VersionCode 501102099 -PublishAt ([DateTimeOffset]'2026-10-04T07:00:00+03:00') } 'immutable'
     Assert-Throws { . $publisher -Version '5.11.3' -VersionCode 501102099 -PublishAt $timeFixture } 'must exceed'
     Assert-Throws { . $publisher -Immediate } 'requires explicit'
     Assert-Throws { . $publisher -Immediate -Version '5.11.3' -VersionCode 501103099 -PublishAt $immediateFixture } 'must exceed'

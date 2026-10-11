@@ -15,3 +15,8 @@ tools/assets/routing-catalog-seed.LICENSE.txt text eol=lf
 tools/quantumvpn_mtproto*.py text eol=lf
 tools/install-mtproto*.py text eol=lf
 tools/refresh-mtproto-upstream.py text eol=lf
+# Automation migration/verifier source pins must survive Windows checkouts.
+tools/install-automation-stack-vds.py text eol=lf
+tools/migrate-openclaw-only-vds.py text eol=lf
+tools/remove-n8n-stale-build-vds.py text eol=lf
+tools/verify-openclaw-model-vds.py text eol=lf

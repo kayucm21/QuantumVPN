@@ -40,6 +40,13 @@ class FourCatalogTests(unittest.TestCase):
             self.assertEqual(result['counts']['verified'], 0)
             self.assertEqual(result['counts']['partial'], 1)
 
+    def test_unsaved_warning_has_scoped_browser_evidence(self):
+        row = next(row for row in four.catalog(group='panel')['items'] if row['id'] == 38)
+        self.assertEqual(row['status'], 'verified')
+        self.assertIn('34', row['note'])
+        self.assertIn('Chrome', row['note'])
+        self.assertIn('не гарантирует', row['note'])
+
 
 if __name__ == '__main__':
     unittest.main()

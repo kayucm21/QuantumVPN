@@ -85,6 +85,8 @@ def aurora_css() -> str:
     .aurora-logout { display: block; margin: 20px 4px 0; padding: 12px 8px; color: #a6bbce; border-top: 1px solid #25394d; font-size: 12px; text-decoration: none; }
     .aurora-logout:hover { color: #edf8ff; background: #14283a; }
     .aurora-sidebar-badge, .sidebar-badge { display: inline-block; margin: 12px 10px 0; padding: 4px 8px; color: #a5dccc; background: #143128; border: 1px solid #34584b; border-radius: 5px; font-size: 9px; letter-spacing: .06em; }
+    .aurora-unsaved-status { margin: 10px 0 0; padding: 8px 10px; color: #ffd08a; background: #322b22; border: 1px solid #68553b; border-radius: 6px; font-size: 11px; }
+    .aurora-unsaved-status[hidden] { display: none !important; }
     .panel-content > .hero {
       height: auto; min-height: 73px; padding: 17px 0; margin: 0 0 22px;
       background: transparent; border: 0; border-bottom: 1px solid #22364b;
@@ -585,6 +587,126 @@ def aurora_script() -> str:
           });
         });
 
+      };
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once: true});
+      else start();
+    })();
+    </script>""" + aurora_unsaved_script()
+
+
+def aurora_unsaved_script() -> str:
+    """Warn before losing edited settings, without persisting or exposing values.
+
+    The small allowlist deliberately excludes transient scanner/reveal/passkey
+    forms. Native submits retain their existing validation and CSRF handling.
+    A submit exempts only its own form, only for the next same-window unload;
+    editing another form still asks the browser to warn before discarding it.
+    The warning is browser-controlled (not guaranteed on mobile/app termination).
+    Fragment replacements must emit the existing aurora:refresh event before
+    accepting edits so that newly added settings receive their loaded baseline.
+    """
+    return r"""<script>
+    (() => {
+      'use strict';
+      const start = () => {
+        const panel = document.querySelector('.panel-content');
+        if (!panel || panel.dataset.auroraUnsavedReady === 'true') return;
+        panel.dataset.auroraUnsavedReady = 'true';
+        const paths = new Set(['/operator/policy', '/operator/protocols',
+          '/operator/upload', '/operator/resources', '/operator/admins',
+          '/operator/cards', '/operator/cards/wallet', '/operator/device',
+          '/operator/network/ai']);
+        const forms = new Map();
+        let listening = false, submitGrant = null;
+        const editable = control => control.name && !control.matches(':disabled') && !control.readOnly &&
+          (control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement ||
+            (control instanceof HTMLInputElement && !['hidden', 'button', 'submit', 'reset', 'image'].includes(control.type)));
+        const controls = form => Array.from(form.elements).filter(editable);
+        const value = control => {
+          if (control.type === 'checkbox' || control.type === 'radio') return control.checked;
+          if (control.type === 'file') return JSON.stringify(Array.from(control.files || [], file =>
+            [file.name, file.size, file.type, file.lastModified]));
+          if (control instanceof HTMLSelectElement) return JSON.stringify(Array.from(control.options,
+            option => [option.value, option.selected]));
+          return control.value;
+        };
+        const eligible = form => {
+          if (!(form instanceof HTMLFormElement) || !panel.contains(form) || form.method.toLowerCase() !== 'post') return false;
+          const target = new URL(form.action, location.href);
+          return target.origin === location.origin && (paths.has(target.pathname) ||
+            (target.pathname === '/operator/routing' && form.id === 'routing-policy'));
+        };
+        const track = () => {
+          forms.forEach((_, form) => { if (!panel.contains(form)) forms.delete(form); });
+          panel.querySelectorAll('form').forEach(form => {
+            if (!eligible(form)) return;
+            const fields = controls(form);
+            if (!fields.length) return;
+            if (forms.has(form)) {
+              const baseline = forms.get(form).baseline;
+              baseline.forEach((_, control) => { if (control.form !== form) baseline.delete(control); });
+              fields.forEach(control => { if (!baseline.has(control)) baseline.set(control, value(control)); });
+              return;
+            }
+            const baseline = new Map(fields.map(control => [control, value(control)]));
+            const note = document.createElement('p');
+            note.className = 'aurora-unsaved-status'; note.hidden = true;
+            note.setAttribute('role', 'status'); note.setAttribute('aria-live', 'polite');
+            note.textContent = 'Есть несохранённые изменения. Сохраните эту форму перед выходом.';
+            form.append(note);
+            forms.set(form, {baseline, note, dirty: false});
+          });
+        };
+        const refresh = () => {
+          forms.forEach((state, form) => {
+            if (!panel.contains(form)) { forms.delete(form); return; }
+            // The original field set also survives temporarily disabled controls
+            // during a request. Hidden tokens and transient fields are never read.
+            state.dirty = Array.from(state.baseline).some(([control, original]) =>
+              control.form === form && value(control) !== original);
+            state.note.hidden = !state.dirty;
+          });
+          const dirty = Array.from(forms.values()).some(state => state.dirty);
+          if (dirty && !listening) { window.addEventListener('beforeunload', beforeLeave); listening = true; }
+          if (!dirty && listening) { window.removeEventListener('beforeunload', beforeLeave); listening = false; }
+        };
+        const beforeLeave = event => {
+          const grant = submitGrant; submitGrant = null;
+          refresh();
+          const savedForm = grant && Date.now() - grant.at < 1500 ? grant.form : null;
+          if (Array.from(forms).some(([form, state]) => state.dirty && form !== savedForm)) {
+            event.preventDefault(); event.returnValue = '';
+          }
+        };
+        track();
+        const changed = event => {
+          const control = event.target;
+          if (!control || !forms.has(control.form)) return;
+          submitGrant = null; refresh();
+        };
+        document.addEventListener('input', changed);
+        document.addEventListener('change', changed);
+        document.addEventListener('reset', event => {
+          if (forms.has(event.target)) { submitGrant = null; queueMicrotask(refresh); }
+        });
+        document.addEventListener('click', () => { submitGrant = null; refresh(); });
+        document.addEventListener('submit', event => {
+          const form = event.target, button = event.submitter;
+          submitGrant = null;
+          if (!(form instanceof HTMLFormElement) || !panel.contains(form)) return;
+          const method = ((button && button.getAttribute('formmethod')) || form.method).toLowerCase();
+          const target = (button && button.getAttribute('formtarget')) || form.target || '_self';
+          const action = new URL((button && button.getAttribute('formaction')) || form.action, location.href);
+          if (method !== 'post' || target.toLowerCase() !== '_self' || action.href !== new URL(form.action, location.href).href) return;
+          if (!form.noValidate && !(button && button.formNoValidate) && !form.checkValidity()) return;
+          queueMicrotask(() => {
+            // Later async handlers can cancel native navigation. Such a request
+            // does not mean edited settings were saved, even when it succeeds.
+            if (!event.defaultPrevented && forms.has(form)) submitGrant = {form, at: Date.now()};
+          });
+        });
+        window.addEventListener('pageshow', () => { submitGrant = null; refresh(); });
+        panel.addEventListener('aurora:refresh', () => { track(); refresh(); });
       };
       if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once: true});
       else start();

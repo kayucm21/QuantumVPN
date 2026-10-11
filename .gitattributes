@@ -24,3 +24,5 @@ tools/diagnose-openclaw-model-vds.py text eol=lf
 tools/research-openclaw-rpc-vds.py text eol=lf
 tools/test_verify_openclaw_model_vds.py text eol=lf
 tools/test_diagnose_openclaw_model_vds.py text eol=lf
+tools/remove-openclaw-vds.py text eol=lf
+tools/test_remove_openclaw_vds.py text eol=lf

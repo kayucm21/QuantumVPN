@@ -1,18 +1,17 @@
-# Quantum 4.0 automation stack: private OpenClaw service
+# Quantum 4.0 automation stack: retired installation history
 
-The current deployment is **OpenClaw only**, following the owner's explicit
-n8n removal request. On 2026-10-11 the reviewed migration removed n8n's runtime,
-state, environment, systemd unit and isolated account. OpenClaw then passed a
-600-second continuous readiness test without a restart, but later auto-restarted
-after the first bounded model test. A Gateway model response has **not** yet
-been verified; this is not a ready
-autonomous AI administrator or a replacement for the existing Quantum bot.
-The incomplete n8n build scratch directory was separately removed and its
-absence verified. Details and remaining model/workflow gates are recorded below.
+Both n8n and OpenClaw are now removed from the active VDS installation at the
+owner's request. On 2026-10-11 at 16:28 UTC (2026-10-12 in Asia/Irkutsk), a fresh
+read-only check confirmed the completed OpenClaw removal: package, working state,
+systemd unit, isolated account/group and server access artifact are absent.
+Generated metadata is credential-free and retains only shared Node proofs.
+Ollama/Qwen, VPN, both panels, DNS/proxies, APK releases and backups were preserved.
+See `docs/remove-openclaw-vds.md` for the exact scope and verification outcome.
 
-The earlier two-service installation details below are retained as historical
-provenance, not instructions to reinstall n8n. Neither service was granted root
-access or panel credentials.
+The earlier two-service installation and failure details below are historical
+provenance, not current access instructions or authorization to reinstall either
+service. Neither service ever had root access or panel credentials. The Gateway
+model response was not successfully verified before removal.
 
 ## Reviewed upstreams and version pins
 
@@ -169,7 +168,11 @@ discovery, periodic heartbeat and Telegram channels disabled. The existing bot
 token is not reused or taken over. Tools may later be added only as a reviewed
 allowlist and isolated execution contract, not by granting unrestricted root.
 
-## Current private access
+## Historical private access (retired)
+
+The following tunnel/token instructions no longer work: OpenClaw and its server
+access artifact have been removed. The private Windows handoff is an obsolete
+historical file, not an active credential. Do not use this section for access.
 
 Create an SSH tunnel from a trusted computer:
 

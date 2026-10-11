@@ -328,3 +328,54 @@ Security references:
 [OpenClaw hardened baseline](https://docs.openclaw.ai/gateway/security/hardened-baseline),
 [OpenClaw tool policy](https://docs.openclaw.ai/gateway/config-tools/tool-policy),
 [OpenClaw Ollama configuration](https://docs.openclaw.ai/providers/ollama/configuration).
+
+## Requested OpenClaw-only conversion (prepared, not applied)
+
+The owner explicitly requested complete removal of n8n and continued OpenClaw
+installation. The separate `tools/migrate-openclaw-only-vds.py` defaults to a
+read-only inventory; the historical installer and its 43 safety tests are
+unchanged. A fresh read-only inventory passed after the latest panel deployment:
+2365 MiB available RAM, n8n database/editor ready, OpenClaw still contained.
+
+The reviewed removal scope is exactly the n8n release directory, n8n state
+directory, `n8n.env`, `quantum-n8n.service` and isolated `qvpn-n8n` account/group.
+Shared Node, OpenClaw, existing Ollama, VPN/DNS/panels and public ports are not
+removal targets. Existing n8n state is approximately 52 MiB and its release
+approximately 1.78 GB. Removing this state is irreversible without a previous
+backup. This tool does not delete existing backup archives.
+
+Completed-manifest/journal conversion is anchored to the exact old manifest,
+journal, access artifact and unit digests. Root-private durable intent records
+each deletion before it starts. Every ancestor and target is checked without
+following symlinks; internal dependency symlinks are unlinked, not traversed;
+foreign devices/mounts/special files/owners are rejected. Atomic CAS replacements
+and directory fsync support recovery before/after replacement and after a
+partial deletion. Only an explicitly started removal target may be absent.
+On successful completion the audit intent is compacted to hashes and health
+facts, erasing its recovery copy of the old n8n encryption key. Private records
+remain root `0600` under a root `0700` directory.
+
+The OpenClaw-only unit changes only `MemoryMax=768M` to `1024M` and adds
+`OPENCLAW_NO_RESPAWN=1`; heap384 MiB, CPU25%, zero swap, loopback, read-only
+configuration, tool deny-all and the existing isolation remain unchanged.
+1024 MiB is below the former combined1408 MiB automation budget. The pinned
+2026.9.9 `dist/entry.respawn-3dMNRLSy.mjs` explicitly returns no startup respawn
+plan for this flag; Gateway arguments and heap are not changed. Automatic
+updates are disabled already and remain disabled. Readiness requires600
+continuous seconds with HTTP/loopback checks, unchanged restart count, actual
+1024 MiB/CPU25%/zero-swap properties and the correct isolated MainPID owner.
+This covers the observed312–391 second restart interval, not unlimited uptime.
+The durable fixed worker has320 MiB/CPU20%/zero-swap/IOWeight10 and1800 seconds.
+
+The partial stale builder directory
+`/opt/quantum-automation/releases/q4-20261010/qvpn-n8n-build-gqoa6z5j` is not
+currently included in deletion: its root/hidden lock and top n8n package
+descriptor are missing, so package provenance has not been established. This
+remaining cache is explicitly reported, rather than deleted by a broad glob.
+
+23 offline tests currently pass, including generated-record preservation,
+private ACL rejection on converted resume, CAS/inode refusal, partial deletion
+and account recovery, completed-intent compaction, fixed worker bounds and
+runtime-budget/restart checks. No live migration or model inference has occurred
+at this documentation checkpoint. A lightweight authenticated Gateway RPC model
+test remains a separate approval gate; the heavyweight CLI smoke is not run.

@@ -40,7 +40,8 @@ The checksum-verified npm source's real resolver, identity matcher and selective
 rebuild class were exercised locally with mocked Arborist execution: only the
 exact registry identity is allowed/selected and bundled traversal is disabled.
 No npm installation or lifecycle script ran in this compatibility test. All
-28 offline/audited-source tests passed; this is still not service health proof.
+28 offline/audited-source tests passed for that compatibility change; this is
+still not service health proof.
 
 OpenClaw's published npm dependency graph contains bundled packages: they
 normally have `inBundle: true` but no separate `resolved` or `integrity` fields.
@@ -198,7 +199,32 @@ promotion and recording its completed checkpoint still requires inspection.
 Read-only inventory verifies the managed immutable manifest and rejects drift.
 
 Before either service starts, the pinned OpenClaw runtime validates its own
-configuration in a resource-bounded unprivileged process. Managed configuration
+configuration in a resource-bounded unprivileged process. Exit status zero alone
+is insufficient: bounded JSON output must explicitly contain `valid: true`.
+The actual 2026.9.9 validator rejected three legacy fields. Their replacements
+were checked against the promoted pinned primary source: Canvas is disabled by
+`plugins.entries.canvas.enabled: false` plus `config.host.enabled: false`
+(`config-p13HYgU8.mjs`, core-host predicate); memory plugins/embedding startup
+are disabled by `plugins.slots.memory: "none"` (`zod-schema-b5tlDVBo.mjs` and
+`gateway-startup-plugin-config-CMrbR8yD.mjs`). The retired
+`logging.redactSensitive` option is removed because `redact-BCoakatc.mjs`
+unconditionally uses built-in tools-mode redaction for configuration, file and
+transport log paths. All-tools denial, browser disabled, local-only model,
+token authentication, heartbeat disabled and loopback origins remain unchanged.
+
+Only an incomplete owned installation with both new services stopped may
+migrate that exact legacy JSON. The same journal gateway token determines the
+exact old/new bytes and SHA-256 values. A root-private durable intent precedes
+an atomic replacement; parent/file ownership, modes, no-follow file descriptors
+and inode identities are checked. The narrow pending-intent exception accepts
+only that target's exact old/new digests, not other file drift. Recovery covers
+crashes before intent, after intent/before replacement, and after replacement
+before its completed checkpoint; both credentials are retained. Completed
+manifests, active services, unknown content/tokens/paths and unsafe files are
+refused. The general journal writer's no-overwrite/no-changed-intent guards
+are unchanged. All 34 offline/audited-source tests passed after this change.
+
+Managed configuration
 is read-only to the runtime. The selected 16,384-token model context exceeds
 the actual pinned 2026.9.9 context guard's 4,000-token hard floor and 8,000-token
 warning floor. This is a schema/runtime compatibility check, not evidence of

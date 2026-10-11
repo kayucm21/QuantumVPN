@@ -114,6 +114,15 @@ disables bundled-dependency rebuild traversal. All 28 tests passed, including
 an opt-in compatibility test against the SHA-512-verified npm source with
 execution mocked. A default offline run skips only that external-source audit.
 This is not yet proof of service readiness or a successful model response.
+The next worker completed the exact selected OpenClaw postinstall and recorded
+the package checkpoint. It stopped before starting services because the actual
+pinned validator rejected three retired configuration fields. Their replacement
+memory/canvas controls and built-in redaction behavior were independently read
+from the promoted runtime source. An exact-token, old/new-digest migration now
+permits recovery only for that owned incomplete installation with both services
+stopped. Configuration validation requires both exit status zero and JSON
+`valid: true`. All 34 offline/audited-source tests passed; a completed service
+start and authenticated Gateway model response remain separate live gates.
 GitHub publication is separate from the VDS production schedule and must not
 make a Beta-updater release available before its authorized deadline.
 

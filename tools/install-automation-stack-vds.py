@@ -307,7 +307,7 @@ def n8n_environment(encryption_key):
         'NODE_OPTIONS': '--max-old-space-size=384',
     }
 
-def openclaw_config(token):
+def legacy_openclaw_config(token):
     if not re.fullmatch('[a-f0-9]{64}', token):
         raise GuardError('invalid_gateway_token')
     return {
@@ -341,6 +341,23 @@ def openclaw_config(token):
         'update': {'checkOnStart': False},
         'logging': {'level': 'warn', 'redactSensitive': 'tools'},
     }
+
+def openclaw_config(token):
+    config = legacy_openclaw_config(token)
+    del config['logging']['redactSensitive']  # Pinned runtime always redacts in tools mode.
+    del config['agents']['defaults']['memorySearch']
+    del config['canvasHost']
+    config['plugins']['slots'] = {'memory': 'none'}
+    config['plugins']['entries'] = {'canvas': {'enabled': False, 'config': {'host': {'enabled': False}}}}
+    return config
+
+def openclaw_schema_migration_record(value):
+    if PINS['openclaw_version'] != '2026.9.9':
+        raise GuardError('unreviewed_openclaw_schema_version')
+    token = value['credentials']['token']
+    return {'id': 'openclaw-2026-9-9-schema-v2', 'path': STATE + '/openclaw/openclaw.json',
+            'old_sha256': hashlib.sha256(json.dumps(legacy_openclaw_config(token), indent=2).encode()).hexdigest(),
+            'new_sha256': hashlib.sha256(json.dumps(openclaw_config(token), indent=2).encode()).hexdigest()}
 
 def service_unit(name):
     if name not in USERS:
@@ -428,6 +445,10 @@ def validate_journal(value):
             raise GuardError('unsafe_journal_path')
         if not isinstance(sha, str) or not re.fullmatch('[a-f0-9]{64}', sha):
             raise GuardError('invalid_journal_digest')
+    if 'openclaw_schema_migration' in value:
+        record = openclaw_schema_migration_record(value)
+        if value['openclaw_schema_migration'] != record or files.get(record['path']) not in (record['old_sha256'], record['new_sha256']):
+            raise GuardError('invalid_openclaw_schema_migration')
     return value
 """
 exec(COMMON)
@@ -517,7 +538,21 @@ def read_journal():
     value = validate_journal(json.loads(target.read_text()))
     for path, expected in value['files'].items():
         target_file = Path(path)
-        if target_file.is_symlink() or (target_file.exists() and digest(path) != expected):
+        actual = digest(path) if target_file.exists() and not target_file.is_symlink() else None
+        pending = value.get('openclaw_schema_migration')
+        if pending and path == pending['path']:
+            if actual is None:
+                raise GuardError('missing_openclaw_migration_target')
+            if expected == pending['old_sha256']:
+                assert_openclaw_migration_scope()
+            if expected == pending['old_sha256'] and actual == pending['new_sha256']:
+                # Only the interrupted atomic replacement of this exact owned
+                # schema migration may precede its final journal checkpoint.
+                data, _ = read_owned_openclaw_config()
+                if hashlib.sha256(data).hexdigest() != pending['new_sha256']:
+                    raise GuardError('openclaw_migration_file_drift')
+                continue
+        if target_file.is_symlink() or (target_file.exists() and actual != expected):
             raise GuardError('journal_file_drift')
     return value
 
@@ -532,6 +567,11 @@ def save_journal(value):
             json.dump(value, handle, sort_keys=True); handle.flush(); os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
         os.replace(temporary, directory / 'install-journal.json')
+        parent_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
     finally:
         if Path(temporary).exists():
             Path(temporary).unlink()
@@ -552,6 +592,99 @@ def journal_write(value, path, data, mode=0o600, uid=0, gid=0):
             raise GuardError('journal_file_drift')
     else:
         write_new(path, data, mode=mode, uid=uid, gid=gid)
+
+def assert_openclaw_migration_scope():
+    manifest = Path(PRIVATE) / 'manifest.json'
+    if manifest.exists() or manifest.is_symlink():
+        raise GuardError('migration_requires_incomplete_install')
+    for unit in SERVICES.values():
+        result = command(['systemctl', 'show', unit, '-p', 'ActiveState', '-p', 'SubState'], check=False)
+        values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        if result.returncode or values.get('ActiveState') not in ('inactive', 'failed') or values.get('SubState') not in ('dead', 'failed'):
+            raise GuardError('migration_requires_stopped_services')
+
+def read_owned_openclaw_config():
+    account = pwd.getpwnam(USERS['openclaw'])
+    validate_service_accounts([account])
+    parent = Path(STATE) / 'openclaw'
+    info = parent.lstat()
+    if parent.resolve() != parent or not stat.S_ISDIR(info.st_mode) or info.st_uid != account.pw_uid or info.st_gid != account.pw_gid or stat.S_IMODE(info.st_mode) != 0o700:
+        raise GuardError('unsafe_openclaw_migration_parent')
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = None
+    try:
+        opened_parent = os.fstat(parent_fd)
+        if (opened_parent.st_dev, opened_parent.st_ino) != (info.st_dev, info.st_ino) or opened_parent.st_uid != account.pw_uid or opened_parent.st_gid != account.pw_gid or stat.S_IMODE(opened_parent.st_mode) != 0o700:
+            raise GuardError('openclaw_migration_parent_changed')
+        fd = os.open('openclaw.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        info = os.fstat(fd)
+        entry = os.stat('openclaw.json', dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != account.pw_uid or info.st_gid != account.pw_gid or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 64000 or (info.st_dev, info.st_ino) != (entry.st_dev, entry.st_ino):
+            raise GuardError('unsafe_openclaw_migration_file')
+        data = os.read(fd, 64001)
+        if len(data) != info.st_size:
+            raise GuardError('openclaw_migration_read_changed')
+        return data, (info.st_dev, info.st_ino, opened_parent.st_dev, opened_parent.st_ino)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
+
+def replace_owned_openclaw_config(data, identity):
+    account = pwd.getpwnam(USERS['openclaw'])
+    parent = Path(STATE) / 'openclaw'
+    # Re-open the checked parent and compare its identity before replacing.
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = None
+    try:
+        parent_info = os.fstat(directory)
+        if (parent_info.st_dev, parent_info.st_ino) != identity[2:] or parent_info.st_uid != account.pw_uid or parent_info.st_gid != account.pw_gid or stat.S_IMODE(parent_info.st_mode) != 0o700:
+            raise GuardError('openclaw_migration_parent_changed')
+        candidate = 'openclaw-schema-' + secrets.token_hex(8)
+        fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        temporary = candidate
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data); handle.flush(); os.fchmod(handle.fileno(), 0o600)
+            os.fchown(handle.fileno(), account.pw_uid, account.pw_gid); os.fsync(handle.fileno())
+        current = os.stat('openclaw.json', dir_fd=directory, follow_symlinks=False)
+        parent_entry = parent.lstat()
+        if (current.st_dev, current.st_ino) != identity[:2] or (parent_entry.st_dev, parent_entry.st_ino) != identity[2:]:
+            raise GuardError('openclaw_migration_inode_changed')
+        os.replace(temporary, 'openclaw.json', src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+        os.close(directory)
+
+def migrate_openclaw_schema(value):
+    record = openclaw_schema_migration_record(value)
+    expected = value['files'].get(record['path'])
+    if expected is None or expected == record['new_sha256']:
+        return
+    if expected != record['old_sha256']:
+        raise GuardError('unreviewed_openclaw_schema_migration')
+    assert_openclaw_migration_scope()
+    data, identity = read_owned_openclaw_config()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual not in (record['old_sha256'], record['new_sha256']):
+        raise GuardError('openclaw_migration_file_drift')
+    if value.get('openclaw_schema_migration') not in (None, record):
+        raise GuardError('invalid_openclaw_schema_migration')
+    value['openclaw_schema_migration'] = record
+    save_journal(value)  # Durable exact old/new intent before atomic replacement.
+    if actual == record['old_sha256']:
+        replacement = json.dumps(openclaw_config(value['credentials']['token']), indent=2).encode()
+        replace_owned_openclaw_config(replacement, identity)
+    verified, _ = read_owned_openclaw_config()
+    if hashlib.sha256(verified).hexdigest() != record['new_sha256']:
+        raise GuardError('openclaw_migration_write_failed')
+    value['files'][record['path']] = record['new_sha256']
+    save_journal(value)
+    output({'phase': 'openclaw_schema_migrated', 'pinned_runtime': PINS['openclaw_version']})
 
 def checkpoint(value, step, paths, lock_digest=None):
     value['files'].update({str(p): digest(p) for p in paths})
@@ -584,7 +717,7 @@ def managed_inventory():
         if digest(p) != sha:
             raise GuardError('managed_file_drift')
     cfg = json.loads((Path(STATE) / 'openclaw/openclaw.json').read_text())
-    if cfg.get('tools', {}).get('deny') != ['*'] or cfg.get('gateway', {}).get('bind') != 'loopback' or cfg.get('channels') != {}:
+    if cfg.get('tools', {}).get('deny') != ['*'] or cfg.get('gateway', {}).get('bind') != 'loopback' or cfg.get('channels') != {} or cfg.get('plugins', {}).get('slots', {}).get('memory') != 'none' or cfg.get('plugins', {}).get('entries', {}).get('canvas') != {'enabled': False, 'config': {'host': {'enabled': False}}}:
         raise GuardError('openclaw_security_policy_drift')
     return {
         'install_id': INSTALL_ID, 'pins': PINS,
@@ -837,8 +970,12 @@ def validate_openclaw_runtime(release, account):
             str(release / 'node/bin/node'), str(release / 'openclaw/node_modules/openclaw/openclaw.mjs'),
             'config', 'validate', '--json']
     result = command(argv, timeout=105, check=False)
-    if result.returncode:
-        target = Path(PRIVATE) / 'openclaw-config-check.log'
+    try:
+        valid = len(result.stdout) <= 32000 and json.loads(result.stdout).get('valid') is True
+    except (ValueError, AttributeError):
+        valid = False
+    if result.returncode or not valid:
+        target = Path(PRIVATE) / ('openclaw-config-check-' + str(os.getpid()) + '.log')
         if not target.exists():
             write_new(target, (result.stdout + '\n' + result.stderr)[-32000:])
         raise GuardError('openclaw_pinned_runtime_config_rejected')
@@ -961,6 +1098,7 @@ def apply(do_resume=False):
                 checkpoint(journal, name, [release / name / 'package.json', release / name / 'package-lock.json', release / name / 'node_modules' / name / 'package.json'], lock_digest)
             locks[name] = journal['steps'][name]['lock_digest']
         key, token = journal['credentials']['key'], journal['credentials']['token']
+        migrate_openclaw_schema(journal)
         env = n8n_environment(key)
         # EnvironmentFile quoting protects JSON and spaces; no secrets in argv.
         env_text = '\n'.join(k + '=' + json.dumps(v) for k, v in env.items()) + '\n'

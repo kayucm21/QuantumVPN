@@ -442,10 +442,154 @@ Module._load = function(id, parent, main) {
         self.assertFalse(cfg['tools']['elevated']['enabled'])
         self.assertEqual({}, cfg['channels'])
         self.assertFalse(cfg['browser']['enabled'])
-        self.assertFalse(cfg['canvasHost']['enabled'])
+        self.assertNotIn('canvasHost', cfg)
+        self.assertNotIn('redactSensitive', cfg['logging'])
+        self.assertNotIn('memorySearch', cfg['agents']['defaults'])
+        self.assertEqual('none', cfg['plugins']['slots']['memory'])
+        self.assertEqual({'enabled': False, 'config': {'host': {'enabled': False}}}, cfg['plugins']['entries']['canvas'])
         self.assertEqual('http://127.0.0.1:11434', cfg['models']['providers']['ollama']['baseUrl'])
         self.assertGreaterEqual(cfg['models']['providers']['ollama']['models'][0]['contextWindow'], 8000)
         self.assertEqual(['ollama'], cfg['plugins']['allow'])
+
+    @staticmethod
+    def migration_fixture():
+        value = {'schema': 1, 'install_id': module.INSTALL_ID, 'pins': module.PINS,
+                 'steps': {}, 'credentials': {'key': 'a' * 64, 'token': 'b' * 64}, 'files': {}}
+        record = module.openclaw_schema_migration_record(value)
+        value['files'][record['path']] = record['old_sha256']
+        return value, record
+
+    def test_exact_schema_migration_intent_rejects_foreign_paths_hashes_tokens(self):
+        value, record = self.migration_fixture()
+        value['openclaw_schema_migration'] = record
+        module.validate_journal(value)
+        for field, change in [('path', '/etc/foreign.json'), ('old_sha256', 'c' * 64),
+                              ('new_sha256', 'd' * 64), ('id', 'unreviewed')]:
+            bad = copy.deepcopy(value); bad['openclaw_schema_migration'][field] = change
+            with self.assertRaisesRegex(module.GuardError, 'invalid_openclaw_schema_migration'):
+                module.validate_journal(bad)
+        bad = copy.deepcopy(value); bad['credentials']['token'] = 'e' * 64
+        with self.assertRaisesRegex(module.GuardError, 'invalid_openclaw_schema_migration'):
+            module.validate_journal(bad)
+
+    def test_actual_schema_migration_recovers_three_crash_states_and_keeps_credentials(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'migrate_openclaw_schema')
+        old = json.dumps(module.legacy_openclaw_config('b' * 64), indent=2).encode()
+        new = json.dumps(module.openclaw_config('b' * 64), indent=2).encode()
+        for has_intent, current in [(False, old), (True, old), (True, new)]:
+            value, record = self.migration_fixture()
+            if has_intent: value['openclaw_schema_migration'] = record
+            saved=[]; state={'bytes': current}
+            def save(journal):
+                module.validate_journal(journal); saved.append(copy.deepcopy(journal))
+            def replace(data, identity):
+                self.assertEqual((1, 2, 3, 4), identity)
+                self.assertEqual(record, saved[-1]['openclaw_schema_migration'])
+                self.assertEqual(record['old_sha256'], saved[-1]['files'][record['path']])
+                state['bytes'] = data
+            ns={'openclaw_schema_migration_record': module.openclaw_schema_migration_record,
+                'GuardError': module.GuardError, 'openclaw_config': module.openclaw_config,
+                'hashlib': module.hashlib, 'json': json, 'PINS': module.PINS,
+                'assert_openclaw_migration_scope': Mock(), 'save_journal': save, 'output': Mock(),
+                'read_owned_openclaw_config': lambda: (state['bytes'], (1, 2, 3, 4)),
+                'replace_owned_openclaw_config': Mock(side_effect=replace)}
+            exec(compile(ast.Module(body=[node], type_ignores=[]), '<schema-migration>', 'exec'), ns)
+            ns['migrate_openclaw_schema'](value)
+            self.assertEqual(new, state['bytes'])
+            self.assertEqual({'key': 'a' * 64, 'token': 'b' * 64}, value['credentials'])
+            self.assertEqual(record['new_sha256'], value['files'][record['path']])
+            self.assertEqual(2, len(saved))
+            self.assertEqual(int(current == old), ns['replace_owned_openclaw_config'].call_count)
+            ns['migrate_openclaw_schema'](value)
+            self.assertEqual(2, len(saved))  # Complete recovery is idempotent.
+
+    def test_actual_read_journal_accepts_only_exact_pending_schema_target_drift(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'read_journal')
+        value, record = self.migration_fixture(); value['openclaw_schema_migration'] = record
+        new = json.dumps(module.openclaw_config('b' * 64), indent=2).encode()
+        ns={'Path': Path, 'PRIVATE': module.PRIVATE, 'stat': stat, 'json': json,
+            'GuardError': module.GuardError, 'validate_journal': module.validate_journal,
+            'hashlib': module.hashlib, 'digest': Mock(return_value=record['new_sha256']),
+            'assert_openclaw_migration_scope': Mock(), 'read_owned_openclaw_config': Mock(return_value=(new, (1,2,3,4)))}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<migration-read-journal>', 'exec'), ns)
+        info=SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG|0o600)
+        with patch.object(Path, 'exists', return_value=True), patch.object(Path, 'is_symlink', return_value=False), patch.object(Path, 'lstat', return_value=info), patch.object(Path, 'read_text', return_value=json.dumps(value)) as read:
+            self.assertEqual(value, ns['read_journal']())
+            ns['assert_openclaw_migration_scope'].assert_called_once()
+            value['files'][module.STATE + '/n8n/foreign.json'] = 'c' * 64
+            read.return_value = json.dumps(value)
+            with self.assertRaisesRegex(module.GuardError, 'journal_file_drift'):
+                ns['read_journal']()
+            del value['files'][module.STATE + '/n8n/foreign.json']
+            read.return_value = json.dumps(value)
+            ns['digest'].return_value = 'd' * 64
+            with self.assertRaisesRegex(module.GuardError, 'journal_file_drift'):
+                ns['read_journal']()
+
+    def test_actual_migration_reader_pins_nofollow_directory_file_owners_and_inodes(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'read_owned_openclaw_config')
+        account=SimpleNamespace(pw_uid=985,pw_gid=979)
+        parent=SimpleNamespace(st_mode=stat.S_IFDIR|0o700,st_uid=985,st_gid=979,st_dev=3,st_ino=4)
+        file=SimpleNamespace(st_mode=stat.S_IFREG|0o600,st_uid=985,st_gid=979,st_dev=1,st_ino=2,st_size=3)
+        def fake_os(file_info=file,entry=file,parent_info=parent):
+            return SimpleNamespace(O_RDONLY=1,O_DIRECTORY=2,O_NOFOLLOW=4,O_NONBLOCK=8,
+                open=Mock(side_effect=[10,11]),fstat=Mock(side_effect=[parent_info,file_info]),
+                stat=Mock(return_value=entry),read=Mock(return_value=b'abc'),close=Mock())
+        ns={'Path':Path,'STATE':module.STATE,'USERS':module.USERS,'stat':stat,
+            'GuardError':module.GuardError,'validate_service_accounts':module.validate_service_accounts,
+            'pwd':SimpleNamespace(getpwnam=Mock(return_value=account))}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<migration-file-reader>', 'exec'), ns)
+        with patch.object(Path,'lstat',return_value=parent),patch.object(Path,'resolve',new=lambda self:self):
+            ns['os']=fake_os()
+            self.assertEqual((b'abc',(1,2,3,4)),ns['read_owned_openclaw_config']())
+            self.assertEqual(1|4|8,ns['os'].open.call_args_list[1].args[1])
+            for changed in [dict(st_mode=stat.S_IFLNK|0o600),dict(st_mode=stat.S_IFIFO|0o600),
+                            dict(st_uid=0),dict(st_gid=0),dict(st_mode=stat.S_IFREG|0o644)]:
+                bad=SimpleNamespace(**{**file.__dict__,**changed});ns['os']=fake_os(file_info=bad)
+                with self.assertRaisesRegex(module.GuardError,'unsafe_openclaw_migration_file'):
+                    ns['read_owned_openclaw_config']()
+                ns['os'].read.assert_not_called()
+            ns['os']=fake_os(entry=SimpleNamespace(**{**file.__dict__,'st_ino':99}))
+            with self.assertRaisesRegex(module.GuardError,'unsafe_openclaw_migration_file'):
+                ns['read_owned_openclaw_config']()
+            for changed in [dict(st_ino=99),dict(st_uid=0),dict(st_gid=0),dict(st_mode=stat.S_IFDIR|0o777)]:
+                ns['os']=fake_os(parent_info=SimpleNamespace(**{**parent.__dict__,**changed}))
+                with self.assertRaisesRegex(module.GuardError,'openclaw_migration_parent_changed'):
+                    ns['read_owned_openclaw_config']()
+
+    def test_actual_migration_scope_refuses_manifest_active_units_and_failed_query(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'assert_openclaw_migration_scope')
+        good = subprocess.CompletedProcess([], 0, stdout='ActiveState=inactive\nSubState=dead\n')
+        ns={'Path': Path, 'PRIVATE': module.PRIVATE, 'SERVICES': module.SERVICES,
+            'GuardError': module.GuardError, 'command': Mock(return_value=good)}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<migration-scope>', 'exec'), ns)
+        with patch.object(Path, 'exists', return_value=False), patch.object(Path, 'is_symlink', return_value=False):
+            ns['assert_openclaw_migration_scope']()
+            self.assertEqual(2, ns['command'].call_count)
+            for result in [subprocess.CompletedProcess([], 0, stdout='ActiveState=active\nSubState=running\n'),
+                           subprocess.CompletedProcess([], 1, stdout='ActiveState=inactive\nSubState=dead\n')]:
+                ns['command'].return_value = result
+                with self.assertRaisesRegex(module.GuardError, 'migration_requires_stopped_services'):
+                    ns['assert_openclaw_migration_scope']()
+        with patch.object(Path, 'exists', return_value=True):
+            with self.assertRaisesRegex(module.GuardError, 'migration_requires_incomplete_install'):
+                ns['assert_openclaw_migration_scope']()
+
+    def test_actual_runtime_config_requires_json_valid_true_not_only_exit_zero(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'validate_openclaw_runtime')
+        ns={'Path': Path, 'PRIVATE': module.PRIVATE, 'STATE': module.STATE, 'PROTECTED_PATHS': module.PROTECTED_PATHS,
+            'PINS': module.PINS, 'GuardError': module.GuardError, 'json': json,
+            'os': SimpleNamespace(getpid=lambda: 123), 'command': Mock(), 'write_new': Mock(), 'output': Mock()}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<config-validation>', 'exec'), ns)
+        account=SimpleNamespace(pw_name='qvpn-openclaw')
+        with patch.object(Path, 'exists', return_value=False):
+            for code, stdout in [(0, '{"valid":false}'), (0, '{}'), (0, '[]'), (0, 'unparseable'), (2, '{"valid":true}')]:
+                ns['command'].return_value = subprocess.CompletedProcess([], code, stdout=stdout, stderr='')
+                with self.assertRaisesRegex(module.GuardError, 'openclaw_pinned_runtime_config_rejected'):
+                    ns['validate_openclaw_runtime'](Path('owned-release'), account)
+            ns['command'].return_value = subprocess.CompletedProcess([], 0, stdout='{"valid":true}', stderr='')
+            ns['validate_openclaw_runtime'](Path('owned-release'), account)
+        ns['output'].assert_called_once()
 
     def test_n8n_credentials_and_code_not_exposed(self):
         env = module.n8n_environment('b' * 64)

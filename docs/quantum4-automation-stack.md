@@ -27,6 +27,31 @@ native prebuild downloads) and the official OpenClaw package postinstall, under 
 unprivileged resource-bounded build account. No `curl | sh` or unpinned `latest`
 installation is used.
 
+OpenClaw's published npm dependency graph contains bundled packages: they
+normally have `inBundle: true` but no separate `resolved` or `integrity` fields.
+Only two exact reviewed carriers are supported: the pinned OpenClaw archive
+above and npm **11.20.0**, official
+`https://registry.npmjs.org/npm/-/npm-11.20.0.tgz`, SHA-512
+`dF3EDFwbYN+N5RUip+ZYDe0NeURK5BgqKOcvT1iNtUYhTMTl0FwWhBuXrS7KtXyduqyTMS5aaQaregnHDAxNgw==`.
+For each carrier, bounded compressed input (160 MiB / 120 seconds, 1 MiB reads)
+is first spooled to a private disk-backed `TemporaryFile` and verified against
+its exact SHA-512. **Only then is any gzip/tar metadata parsed.** This ordering
+also prevents unverified GNU LongName/PAX headers from causing large hidden
+payload allocations before member validation. No tar member is extracted or
+executed; safe paths/types, 20,000 members, 512 MiB declared payload and 2 MiB
+package descriptor limits are still checked on the verified archive.
+
+Each bundled lock entry must match a real package root's exact path, name and
+version inside the verified carrier. Arbitrary carriers, orphan bundles, bundles
+with their own URL/integrity, external URLs and mismatches are rejected. Installed
+bundled package descriptors are checked again after `npm ci` and postinstall.
+On 2026-10-11, an isolated local package-lock-only audit (no lifecycle or `npm ci`)
+resolved 561 lock entries, including 146 bundled entries. Both exact carrier
+archives independently provided all 146 matching descriptor facts. Its canonical
+lock SHA-256 was
+`29e91d637fdc1b5189a3658f7a8b9c50b9f3ec057b0d20bfcf07eed26df21ca4`.
+This is dependency/provenance evidence, not a successful VDS installation claim.
+
 The [n8n npm method](https://docs.n8n.io/hosting/installation/npm/) remains
 available for the pinned 2.x version; the documentation announces deprecation
 from n8n 3.0. This deployment deliberately does not introduce a Docker daemon or
@@ -84,8 +109,27 @@ hides protected panel/proxy state, and permits writes only in the corresponding
 service state directory. Each service has CPU, process and memory limits;
 combined memory maxima are 1216 MiB, with no swap. Native dependency builds have
 a separate 1536 MiB / 35% CPU limit and never overlap.
-Each native package build has an explicit 1800-second maximum. Node headers
+Each native dependency build has an explicit 1800-second maximum. Build jobs
+are restricted to one. The isolated-vm upstream install script hardcodes `-j4`
+then `-jmax`; environment-only jobs=1 does not override that script. Therefore
+its compilation invokes the node-gyp CLI bundled inside the checksum-pinned
+Node archive directly with `--jobs=1`; package files/scripts are not modified.
+SQLite3 is separately rebuilt from source. Node headers
 come from the official Node HTTPS distribution and node-gyp checksum checks.
+
+One installation-only runtime exception was approved on 2026-10-10 for
+`qvpn-automation-build-955461-n8n-native.service`: after proving its exact
+unprivileged account/PID/held installer lock, both existing panels active, two
+CPUs and 1.41 idle-core equivalents over three seconds, its CPU quota was
+changed **35% → 55%** with `systemctl set-property --runtime` (exit code 0).
+The same PID, 1536 MiB memory limit, zero swap and 1800-second deadline were
+verified unchanged. No VPN, panel, model or other unit received this change;
+the default future build quota remains 35%.
+That attempt reached the explicit 1800-second timeout with 20/27 isolated-vm
+objects compiled, before package promotion. The parent exited, lock was free,
+and no owned build/service remained active before the single-job resume path
+was allowed. Package caches/stages belonging to the failed build were cleaned
+by its existing scoped finalizer; protected panel state was not removed.
 
 Both editors bind only to loopback. No firewall, DNS, nginx, VPN, proxy secret,
 subscription or Android build changes are performed. There are no public
@@ -124,7 +168,8 @@ The remote application requires free ports, enough available memory/disk and
 build prerequisites. Existing foreign paths/users/units are refused.
 
 Before installation, protected configuration hashes and active services are
-recorded. After start, both HTTP health endpoints, loopback-only listeners and
+recorded. After start, HTTP checks require n8n's database-connected/migrated
+`/healthz/readiness` plus editor `GET /`, and OpenClaw's UI. Loopback-only listeners and
 protected configuration are checked before enabling boot startup. On failure,
 newly created services are stopped/disabled; owned state and private diagnostic
 logs are retained rather than deleted. A failed incomplete installation is not

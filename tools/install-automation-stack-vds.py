@@ -102,7 +102,116 @@ def validate_pins(pins):
         if not value.startswith('sha512-') or len(raw) != 64:
             raise GuardError('invalid_package_digest')
 
-def validate_lock(lock, name, pins):
+def package_path_name(path):
+    # Only actual package roots, never package subdirectories or aliases.
+    if not isinstance(path, str) or '\\' in path or str(PurePosixPath(path)) != path:
+        return None
+    parts = PurePosixPath(path).parts
+    index, name = 0, None
+    while index < len(parts):
+        if parts[index] != 'node_modules' or index + 1 >= len(parts):
+            return None
+        index += 1
+        name = parts[index]
+        if name.startswith('@'):
+            if index + 1 >= len(parts):
+                return None
+            name += '/' + parts[index + 1]
+            index += 1
+        if not re.fullmatch(r'(?:@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*', name):
+            return None
+        index += 1
+    return name
+
+def bundled_parent_specs(name, pins):
+    if name != 'openclaw':
+        return {}
+    # The only two reviewed bundle carriers. No arbitrary archive/host allowlist.
+    return {
+        'node_modules/openclaw': {
+            'name': 'openclaw', 'version': pins['openclaw_version'],
+            'resolved': 'https://registry.npmjs.org/openclaw/-/openclaw-' + pins['openclaw_version'] + '.tgz',
+            'integrity': pins['openclaw_integrity'],
+        },
+        'node_modules/npm': {
+            'name': 'npm', 'version': '11.20.0',
+            'resolved': 'https://registry.npmjs.org/npm/-/npm-11.20.0.tgz',
+            'integrity': 'sha512-dF3EDFwbYN+N5RUip+ZYDe0NeURK5BgqKOcvT1iNtUYhTMTl0FwWhBuXrS7KtXyduqyTMS5aaQaregnHDAxNgw==',
+        },
+    }
+
+def validate_bundle_parent(lock, parent, spec):
+    entry = lock['packages'].get(parent, {})
+    if entry.get('inBundle') or entry.get('link') or any(entry.get(k) != spec[k] for k in ('version', 'resolved', 'integrity')):
+        raise GuardError('bundled_parent_pin_mismatch')
+
+def bundle_archive_packages(stream, spec):
+    # First spool bounded compressed bytes to a private disk file and verify
+    # SHA-512. tarfile interprets hidden GNU/PAX payloads before yielding members,
+    # so even tar headers must remain unparsed until this authenticity gate.
+    # No archive member is extracted or executed.
+    import tarfile, tempfile, time
+    started = time.monotonic()
+    archive_hash, compressed_size = hashlib.sha512(), 0
+    packages, root, seen, unpacked = {}, None, set(), 0
+    with tempfile.TemporaryFile(mode='w+b', prefix='qvpn-bundle-audit-') as compressed:
+        while True:
+            if time.monotonic() - started > 120:
+                raise GuardError('bundled_archive_read_budget')
+            content = stream.read(1024 * 1024)
+            compressed_size += len(content)
+            if len(content) > 1024 * 1024 or compressed_size > 160 * 1024 * 1024 or time.monotonic() - started > 120:
+                raise GuardError('bundled_archive_read_budget')
+            if not content:
+                break
+            archive_hash.update(content); compressed.write(content)
+        actual = 'sha512-' + base64.b64encode(archive_hash.digest()).decode()
+        if actual != spec['integrity']:
+            raise GuardError('bundled_archive_integrity_mismatch')
+        compressed.seek(0)
+        with tarfile.open(fileobj=compressed, mode='r|gz') as archive:
+            for member in archive:
+                path = PurePosixPath(member.name)
+                if not path.parts or path.parts[0] != 'package' or path.is_absolute() or '..' in path.parts or '\\' in member.name or ':' in member.name or not (member.isfile() or member.isdir()) or member.name in seen:
+                    raise GuardError('unsafe_bundled_archive_member')
+                seen.add(member.name); unpacked += member.size
+                if len(seen) > 20000 or unpacked > 512 * 1024 * 1024:
+                    raise GuardError('bundled_archive_member_budget')
+                relative = '/'.join(path.parts[1:-1])
+                package_name = package_path_name(relative)
+                if member.isfile() and path.name == 'package.json' and (member.name == 'package/package.json' or package_name):
+                    if member.size > 2 * 1024 * 1024:
+                        raise GuardError('bundled_descriptor_budget')
+                    descriptor = json.load(archive.extractfile(member))
+                    if member.name == 'package/package.json':
+                        root = descriptor
+                    else:
+                        if descriptor.get('name') != package_name or not isinstance(descriptor.get('version'), str):
+                            raise GuardError('bundled_archive_package_identity_mismatch')
+                        packages[relative] = {'name': package_name, 'version': descriptor['version']}
+    if not isinstance(root, dict) or root.get('name') != spec['name'] or root.get('version') != spec['version'] or not isinstance(root.get('bundleDependencies'), list) or not root['bundleDependencies']:
+        raise GuardError('bundled_archive_parent_identity_mismatch')
+    return packages
+
+def bundled_provenance(lock, name, pins, archive_loader):
+    specs, needed, facts = bundled_parent_specs(name, pins), set(), {}
+    for path, entry in lock.get('packages', {}).items():
+        if entry.get('inBundle'):
+            parents = [p for p in specs if path.startswith(p + '/node_modules/')]
+            if len(parents) != 1:
+                raise GuardError('unreviewed_bundled_parent')
+            parent = parents[0]
+            validate_bundle_parent(lock, parent, specs[parent])
+            needed.add(parent)
+    for parent in sorted(needed):
+        spec = specs[parent]
+        for relative, package in archive_loader(spec).items():
+            if not package_path_name(relative) or package.get('name') != package_path_name(relative):
+                raise GuardError('unsafe_bundled_provenance_path')
+            facts[parent + '/' + relative] = {**package, 'parent': parent, 'parent_integrity': spec['integrity']}
+    return facts
+
+def validate_lock(lock, name, pins, bundles=None):
     if lock.get('lockfileVersion') != 3 or not isinstance(lock.get('packages'), dict):
         raise GuardError('invalid_dependency_lock')
     top = lock['packages'].get('node_modules/' + name, {})
@@ -114,8 +223,18 @@ def validate_lock(lock, name, pins):
     for path, entry in lock['packages'].items():
         if not path:
             continue
-        if not path.startswith('node_modules/') or '..' in PurePosixPath(path).parts or entry.get('link'):
+        if not package_path_name(path) or entry.get('link'):
             raise GuardError('unsafe_dependency_path')
+        if entry.get('inBundle'):
+            fact = (bundles or {}).get(path, {})
+            parent = fact.get('parent')
+            spec = bundled_parent_specs(name, pins).get(parent)
+            if entry.get('inBundle') is not True or 'resolved' in entry or 'integrity' in entry or not spec or not path.startswith(parent + '/node_modules/'):
+                raise GuardError('unverified_bundled_dependency')
+            validate_bundle_parent(lock, parent, spec)
+            if fact.get('parent_integrity') != spec['integrity'] or fact.get('name') != package_path_name(path) or fact.get('version') != entry.get('version') or (entry.get('name') is not None and entry['name'] != fact['name']):
+                raise GuardError('bundled_dependency_provenance_mismatch')
+            continue
         resolved = entry.get('resolved', '')
         integrity = entry.get('integrity', '')
         if not resolved.startswith('https://registry.npmjs.org/') or '/..' in resolved:
@@ -517,12 +636,13 @@ def install_node(release):
     if result != 'v' + PINS['node_version']:
         raise GuardError('node_version_mismatch')
 
-def npm_command(release, stage, account, args, label):
+def npm_command(release, stage, account, args, label, direct_node_gyp=False):
     path = str(release / 'node/bin') + ':/usr/bin:/bin'
     env = {'PATH': path, 'HOME': str(stage), 'NODE_OPTIONS': '--max-old-space-size=768',
            'npm_config_cache': str(stage / '.cache'), 'npm_config_update_notifier': 'false',
            'npm_config_registry': 'https://registry.npmjs.org/', 'npm_config_audit': 'false',
-           'npm_config_fund': 'false'}
+           'npm_config_fund': 'false', 'npm_config_jobs': '1',
+           'npm_package_config_node_gyp_jobs': '1', 'MAKEFLAGS': '-j1'}
     argv = [
         'systemd-run', '--quiet', '--wait', '--pipe', '--collect',
         '--unit=qvpn-automation-build-' + str(os.getpid()) + '-' + label,
@@ -537,7 +657,14 @@ def npm_command(release, stage, account, args, label):
     ]
     for key, value in env.items():
         argv.extend(['--setenv=' + key + '=' + value])
-    argv.extend([str(release / 'node/bin/node'), str(release / 'node/lib/node_modules/npm/bin/npm-cli.js'), *args])
+    entrypoint = release / ('node/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js' if direct_node_gyp else 'node/lib/node_modules/npm/bin/npm-cli.js')
+    if direct_node_gyp:
+        # This tool is supplied by the SHA-256-pinned official Node archive.
+        # isolated-vm's upstream install script forces -j4/-jmax, overriding
+        # environment jobs=1. Compile directly without any prebuild downloader.
+        if label != 'n8n-isolated-vm' or args != ['rebuild', '--directory=node_modules/isolated-vm', '--release', '--jobs=1'] or release.resolve() != Path(RELEASE) or stage.is_symlink() or stage.resolve().parent != release or not stage.name.startswith('qvpn-n8n-build-') or account.pw_name != 'qvpn-automation-build' or not entrypoint.is_file() or entrypoint.is_symlink():
+            raise GuardError('unexpected_native_build_entrypoint')
+    argv.extend([str(release / 'node/bin/node'), str(entrypoint), *args])
     result = command(argv, timeout=1860, check=False)
     if result.returncode:
         # Retain a root-private diagnostic, never echo npm's data into chat.
@@ -545,6 +672,50 @@ def npm_command(release, stage, account, args, label):
         if not diagnostic.exists():
             write_new(diagnostic, (result.stdout + '\n' + result.stderr)[-128000:])
         raise GuardError('npm_' + label + '_failed')
+
+def build_n8n_native(release, stage, account, common):
+    # Synchronous calls: no overlapping native module compiler units.
+    npm_command(release, stage, account, ['rebuild', 'sqlite3', '--build-from-source', '--foreground-scripts', *common], 'n8n-sqlite3')
+    npm_command(release, stage, account, ['rebuild', '--directory=node_modules/isolated-vm', '--release', '--jobs=1'], 'n8n-isolated-vm', direct_node_gyp=True)
+
+def validate_native_versions(stage, lock):
+    found = set()
+    for path, entry in lock['packages'].items():
+        name = PurePosixPath(path).name
+        if name not in ('sqlite3', 'isolated-vm'):
+            continue
+        package = stage / path / 'package.json'
+        if not package.is_file() or package.is_symlink():
+            raise GuardError('native_package_missing')
+        installed = json.loads(package.read_text())
+        if installed.get('name') != name or installed.get('version') != entry.get('version'):
+            raise GuardError('native_package_version_drift')
+        found.add(name)
+    if found != {'sqlite3', 'isolated-vm'}:
+        raise GuardError('native_package_lock_missing')
+
+def load_bundled_archive(spec):
+    # Called only with the two exact reviewed registry URL/SHA-512 specs.
+    if spec not in bundled_parent_specs('openclaw', PINS).values():
+        raise GuardError('unreviewed_bundled_archive_spec')
+    with urllib.request.urlopen(spec['resolved'], timeout=45) as response:
+        if response.status != 200 or response.geturl() != spec['resolved']:
+            raise GuardError('bundled_archive_redirect_or_status')
+        return bundle_archive_packages(response, spec)
+
+def validate_installed_bundles(stage, lock, bundles):
+    for path, entry in lock['packages'].items():
+        if not entry.get('inBundle'):
+            continue
+        fact = bundles.get(path, {})
+        if fact.get('name') != package_path_name(path) or fact.get('version') != entry.get('version'):
+            raise GuardError('installed_bundled_provenance_missing')
+        target = stage.joinpath(*PurePosixPath(path).parts) / 'package.json'
+        if not target.is_file() or target.is_symlink() or target.resolve() != target or not target.resolve().is_relative_to(stage.resolve()):
+            raise GuardError('unsafe_installed_bundled_package')
+        descriptor = json.loads(target.read_text())
+        if descriptor.get('name') != fact.get('name') or descriptor.get('version') != fact.get('version'):
+            raise GuardError('installed_bundled_package_identity_mismatch')
 
 def install_package(release, name, account):
     # PrivateTmp hides the host /var/tmp. Stage below the owned release root,
@@ -560,18 +731,26 @@ def install_package(release, name, account):
         output({'phase': 'resolve_' + name})
         npm_command(release, stage, account, ['install', '--package-lock-only', '--ignore-scripts', *common], name + '-lock')
         lock = json.loads((stage / 'package-lock.json').read_text())
-        lock_digest = validate_lock(lock, name, PINS)
+        if any(entry.get('inBundle') for entry in lock['packages'].values()):
+            output({'phase': 'verify_bundled_archive_provenance'})
+        bundles = bundled_provenance(lock, name, PINS, load_bundled_archive)
+        lock_digest = validate_lock(lock, name, PINS, bundles)
         output({'phase': 'install_' + name, 'dependency_lock_sha256': lock_digest})
         npm_command(release, stage, account, ['ci', '--ignore-scripts', *common], name + '-ci')
-        if validate_lock(json.loads((stage / 'package-lock.json').read_text()), name, PINS) != lock_digest:
+        if validate_lock(json.loads((stage / 'package-lock.json').read_text()), name, PINS, bundles) != lock_digest:
             raise GuardError('dependency_lock_changed')
+        validate_installed_bundles(stage, lock, bundles)
         if name == 'n8n':
             output({'phase': 'build_n8n_native_from_source', 'packages': ['sqlite3', 'isolated-vm']})
-            npm_command(release, stage, account, ['rebuild', 'sqlite3', 'isolated-vm', '--build-from-source', '--foreground-scripts', *common], name + '-native')
+            build_n8n_native(release, stage, account, common)
+            validate_native_versions(stage, lock)
         else:
             # Official package postinstall contract, no dependency lifecycle scripts.
             output({'phase': 'prepare_openclaw_bundled_plugins'})
             npm_command(release, stage, account, ['rebuild', 'openclaw', '--allow-scripts=openclaw', '--foreground-scripts', *common], name + '-plugins')
+        if validate_lock(json.loads((stage / 'package-lock.json').read_text()), name, PINS, bundles) != lock_digest:
+            raise GuardError('dependency_lock_changed_after_build')
+        validate_installed_bundles(stage, lock, bundles)
         installed = json.loads((stage / 'node_modules' / name / 'package.json').read_text())
         if installed.get('name') != name or installed.get('version') != PINS[name + '_version']:
             raise GuardError('installed_package_mismatch')
@@ -599,9 +778,12 @@ def service_probe(name):
         return False
     port = PORTS[name]
     try:
-        with urllib.request.urlopen('http://127.0.0.1:' + str(port) + ('/healthz' if name == 'n8n' else '/'), timeout=5) as r:
-            if r.status != 200:
-                return False
+        # /healthz alone responds before n8n's database is connected/migrated.
+        paths = ('/healthz/readiness', '/') if name == 'n8n' else ('/',)
+        for path in paths:
+            with urllib.request.urlopen('http://127.0.0.1:' + str(port) + path, timeout=5) as r:
+                if r.status != 200:
+                    return False
     except Exception:
         return False
     listeners = command(['ss', '-lntH', 'sport = :' + str(port)]).stdout.splitlines()
@@ -858,7 +1040,9 @@ if PAYLOAD is not None:
         # A successful oneshot worker remains active/exited for inspection;
         # it is completed, not an in-flight installer. Still refuse running,
         # starting, or stop-in-progress owned jobs, in addition to the flock.
-        units=run(['systemctl','list-units','--type=service','--state=active,activating,deactivating','--no-legend','--plain','qvpn-automation-build-*','qvpn-automation-install-*']).stdout.splitlines()
+        unit_inventory=run(['systemctl','list-units','--type=service','--state=active,activating,deactivating','--no-legend','--plain','qvpn-automation-build-*','qvpn-automation-install-*'])
+        if unit_inventory.returncode:fail('owned_worker_inventory_failed')
+        units=unit_inventory.stdout.splitlines()
         for line in units:
             fields=line.split()
             if len(fields)<4 or fields[3]!='exited':fail('owned_build_or_worker_still_active')
@@ -892,7 +1076,9 @@ else:
     m=json.loads(manifest_path.read_text())
     if m.get('install_id')!=EXPECTED_INSTALL_ID or m.get('job_id')!=JOB_ID or hashlib.sha256(source.read_bytes()).hexdigest()!=m.get('source_sha256'):fail('worker_identity_or_source_drift')
     state={}
-    for line in run(['systemctl','show',UNIT,'-p','ActiveState','-p','SubState','-p','Result','-p','ExecMainStatus']).stdout.splitlines():
+    unit_state=run(['systemctl','show',UNIT,'-p','ActiveState','-p','SubState','-p','Result','-p','ExecMainStatus'])
+    if unit_state.returncode:fail('owned_worker_status_failed')
+    for line in unit_state.stdout.splitlines():
         if '=' in line:
             k,v=line.split('=',1);state[k]=v
     progress=[];log=JOB/'progress.log'

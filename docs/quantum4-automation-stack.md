@@ -257,6 +257,49 @@ heap, swap, native-build or model-smoke budgets. All 43 offline/audited-source
 tests passed for this recovery patch. This is a source/test result, not proof
 that the revised services have been started successfully on the VDS.
 
+## Actual deployment outcome, 2026-10-11
+
+The single approved durable worker `ad472fa4bfff4b6a9e61ec0ec5d69ee8`
+subsequently returned `Installed` with exit status zero. The immutable manifest,
+both HTTP readiness gates, loopback-only listeners, enabled units and the
+protected configuration comparison passed **at that installation checkpoint**.
+This checkpoint was not a soak test and did not prove long-term stability.
+
+A later fresh handoff gate found OpenClaw unhealthy despite `ActiveState=active`:
+its restart counter reached 73. Five recent exits were `killed/9/KILL`, spaced
+312–391 seconds apart. Kernel events identify the owned
+`quantum-openclaw.service` cgroup (`CONSTRAINT_MEMCG`) with killed Gateway
+anonymous RSS approximately 697–699 MiB under its 768 MiB total cgroup maximum.
+No V8 heap-OOM, module, bind, configuration or permission failure was observed in
+that bounded diagnosis. The latest sampled host `MemAvailable` was 1758 MiB;
+the existing Ollama service was approximately 155 MiB current, 1382 MiB historical
+peak, with no model loaded. These facts are not a model-success claim.
+
+After exact owned unit digest/state checks, scoped failure containment
+stopped and disabled **only** `quantum-openclaw.service`. Its configuration,
+immutable manifest and resource limits remain unchanged. n8n remained enabled
+and active; a fresh database readiness/editor/loopback gate passed, as did
+current protected-service health. No inference request, additional install
+worker, heap/cap increase or change to Ollama/VPN/DNS was performed.
+
+The private owner-only Windows handoff is in
+`C:/Users/Admin/Desktop/Quantum4.0-Доступ/access.json` and `README.md`.
+The README explicitly marks OpenClaw stopped/unavailable, the model reply
+unverified, all tools denied and Telegram integration disabled. The access
+artifact was retrieved from the root-owned `0700` directory / `0600` source via
+host-key-pinned SFTP, verified before/after download and never printed or added
+to Git. n8n requires the owner's first-run email/password creation.
+
+The historical protected-tree fingerprint now differs for
+`/etc/quantumvpn-mtproto`; it is **not** silently rewritten in the manifest.
+Metadata identifies `proxy-multi.conf` as the only recently dated regular file
+in that directory (root:root `0600`, 2026-10-11 02:17:43 UTC). The other three
+files have older mtimes, but no per-file pre-install baseline exists, so this
+does not establish exact content-change attribution. Current proxy services
+remain healthy. No MTProto contents/configuration were changed during this
+handoff. Repairing OpenClaw's sustained-memory failure and verifying a bounded
+authenticated Gateway model reply remain separate pending work.
+
 Managed configuration
 is read-only to the runtime. The selected 16,384-token model context exceeds
 the actual pinned 2026.9.9 context guard's 4,000-token hard floor and 8,000-token
@@ -273,7 +316,8 @@ and timing facts are returned. The integrity-verified pinned
 Gateway errors rather than falling back to embedded inference. This test
 creates one owned chat session and diagnostic file but sends no Telegram reply.
 
-This installer proves service availability, isolation and health; it does not
+The installation health checkpoint proves momentary availability and isolation,
+not sustained readiness (see the later OpenClaw regression above). It does not
 prove a working Telegram integration, automated node administration or model
 answer quality. Those require separate configured credentials, scoped workflow
 reviews, functional tests and approval gates.

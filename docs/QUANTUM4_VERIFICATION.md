@@ -159,6 +159,26 @@ remained available after cold start. The heavier CLI model smoke was withheld:
 the existing Ollama model-loading peak plus its CLI allowance exceeded that
 headroom. No existing Ollama, VPN, panel or proxy service was stopped, and no
 additional runtime limits were raised to force a successful test.
+The later post-publication handoff gate detected an important regression: n8n remained
+database/editor-ready with zero restarts, but OpenClaw no longer passed HTTP
+readiness. It had restarted 73 times. A bounded read-only kernel/exit audit
+identified repeated `CONSTRAINT_MEMCG` kills in its own 768 MiB cgroup
+(approximately 697 MiB anonymous RSS), not V8 heap exceptions or host-wide
+OOM. Its initial installation/readiness result is therefore historical, not
+proof of ongoing stability. Only this newly installed Gateway service was
+authorized for stop/disable containment; no new memory limits or model
+inference were authorized. OpenClaw is not a completed live AI integration,
+and its interface/model access must remain marked unavailable/pending until
+the resource regression is fixed and repeated health/inference gates pass.
+Containment was then confirmed: the exact owned OpenClaw unit was stopped and
+disabled, while n8n remained active. Independent read-only inventory still
+validated the immutable manifest, reported the Gateway port free and about
+2041 MiB available, and the post-containment production network check passed.
+No protected service was stopped. A later historical snapshot comparison
+noticed a change in the MTProto configuration directory, so the earlier
+installation-time unchanged-tree result must not be generalized to all later
+runtime configuration. Current MTProto readiness was separately verified;
+the installer manifest/baseline was not rewritten to conceal that difference.
 GitHub publication is separate from the VDS production schedule and must not
 make a Beta-updater release available before its authorized deadline.
 

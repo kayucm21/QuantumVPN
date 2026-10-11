@@ -73,8 +73,20 @@ also require confirmation under Android's policy.
   signing material and public app API. Network checks also confirmed the
   existing main panel, Xray, native MTProto and diagnostic WARP paths;
   this does not establish the client's latency or video throughput.
-- Roadmap status: three scoped verified features, five partial, 92 planned.
+- Roadmap status: four scoped verified features, five partial, 91 planned.
   See the authenticated Product → Quantum 4.0 ledger for the exact scope.
+- On 11 October, item #38 adds a settings-loss warning to the explicit editable
+  POST-form allowlist, including externally associated routing fields. Three
+  local tests passed, with 34 real headless-Chrome assertions covering reset,
+  invalid/cancelled submits, bfcache, multiple dirty forms, delayed native POST,
+  dynamic fields, new tabs and downloads. Values remain in memory only; no
+  browser storage, network request or field-value notification is added. Native
+  browser warnings are not guaranteed on mobile application termination.
+  Existing HTTP tests passed 9/9 and roadmap/UI tests 10/10. The source-only CAS
+  deployment passed with public APIs, settings and signing identity unchanged;
+  its source rollback snapshot is `aurora-5958b12083d940369f674fb1580c4017`.
+  Post-deployment production network checks passed for both panels, both ARM
+  update APIs/downloads and MTProto. APK version and release time were untouched.
 - The post-publication Network-center verifier now pins the deployed 5.12.0
   identity rather than the previous 5.11.4 baseline. All 17 offline verifier
   tests passed; the independent live check passed for both panels, routing
@@ -181,5 +193,72 @@ runtime configuration. Current MTProto readiness was separately verified;
 the installer manifest/baseline was not rewritten to conceal that difference.
 GitHub publication is separate from the VDS production schedule and must not
 make a Beta-updater release available before its authorized deadline.
+
+## OpenClaw-only conversion, 11 October 2026
+
+The owner requested full removal of the owned n8n installation. The reviewed
+worker `0ca7d186b6dd4707ab74ba991e1c4096` finished successfully at 11:33 UTC:
+the n8n release, state, environment, service unit and isolated account/group
+were removed, and the exact owned installation records were converted. The
+completed root-private audit is schema2 with recovery secrets erased. Previous
+backup archives, shared Node, Ollama, VPN, DNS and panels were not deletion
+targets. Deleted n8n working data can only be recovered from a prior backup.
+
+OpenClaw passed 600 continuous seconds of HTTP/loopback readiness with no
+restart during the soak, its isolated UID, 1024 MiB maximum, CPU25% and zero
+swap. Its 384 MiB heap, read-only configuration, disabled updates and tool
+deny-all policy remain in place. This addresses the earlier owned-cgroup
+regression, but does not prove unlimited uptime, model quality, Telegram
+integration or autonomous node administration. A fresh read-only inventory
+at 15:20 UTC still passed the completed conversion and HTTP readiness; it
+reported 1994 MiB available RAM and 29242 MiB free disk.
+
+The separately reviewed exact-path cleanup of the owned partial n8n build
+directory was dispatched as worker `6f298fc8bd9d4664bccb09816f9c4464` at 15:20
+UTC. Its preflight found 68066 files / 217052937 bytes. At 15:28 UTC the worker
+had exited successfully with `ScratchRemoved`; an independent read-only
+inventory confirmed state `done`, zero files/bytes and target absence. No
+shared runtime or backup archive was removed. The migration tests passed
+23/23 and cleanup tests 12/12. The original installer tests passed with one
+external-source opt-in audit skipped (43 tests discovered).
+
+The lightweight Gateway-only model verifier passed 17 offline tests. Its
+default is read-only preflight; explicit inference requires completed schema2,
+exact private ACL/config/runtime/source/model identity, at least 1920 MiB
+available RAM and the reviewed Ollama peak allowance. It runs as the isolated
+service UID without tools, heavy CLI or embedded fallback and requires a
+correlated successful final reply plus actual Ollama/Qwen terminal receipt.
+Read-only preflight passed at 15:28 UTC with 2097 MiB available RAM and an
+observed Ollama peak of 1383 MiB. One explicit no-tools Gateway inference
+then failed with the sanitized code `gateway_rpc_rejected`; no successful model
+reply is claimed. The Gateway remained HTTP-ready. At 15:32 UTC only 1816 MiB
+was available, so another inference was refused by the unchanged 1920 MiB
+headroom guard. Read-only failure diagnosis is the next gate; no model unload,
+service restart or resource/security limit increase was used to force a pass.
+
+Read-only diagnosis at 15:48 UTC found the same Gateway PID, zero restarts,
+1961 MiB available RAM, no loaded Ollama model and 30 owned file-log records
+with six timeout keyword hits. Its then-current cgroup had zero OOM/kill
+counts. Those hits were not correlated to the test and are not a root cause.
+At 15:52 a later read-only preflight failed Gateway HTTP readiness. At 15:53
+the Gateway had auto-restarted (new PID, NRestarts=1), its PrivateTmp log and
+cgroup counters had reset, and HTTP readiness was still false during startup.
+The earlier 600-second soak does not establish stable inference operation.
+No second inference was sent. The installed agent remains unverified.
+The same HTTP-readiness refusal recurred at 15:59 UTC after the automatic
+restart. A safe RPC rejection diagnostic now preserves only fixed stage/code/
+status enums and category booleans (19 offline tests). The read-only failure
+helper passed 23 tests, with no raw log messages, tokens, inference, unloads
+or service changes. Further manager-journal diagnosis was not executed: the
+delegated diagnostic turn was rejected by the service safety guard, and no
+alternate execution path was used for that blocked action. Neither this
+incomplete diagnosis nor current reset counters justify a root-cause claim or
+increased resource limits. OpenClaw installation is not functionally complete.
+
+Independent production checks at 11:34, 15:24 and 16:01 UTC passed both panels, routing forms
+and catalog, both ARM update APIs/download HEADs, MTProto upstreams and the
+diagnostic WARP IPv4/IPv6 path. They are server-side checks, not client latency,
+video throughput or proof of subscriber WARP routing. APK identity, signing
+and publication time remain unchanged.
 
 No credentials, proxy secrets or device diagnostics are included in this report.

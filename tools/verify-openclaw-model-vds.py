@@ -185,13 +185,35 @@ def validate_hello(hello):
     auth=hello.get('auth',{});server=hello.get('server',{});features=hello.get('features',{})
     if hello.get('type')!='hello-ok' or hello.get('protocol')!=4 or server.get('version')!='2026.9.9' or auth.get('method')!='token' or auth.get('role')!='operator' or auth.get('scopes')!=['operator.write'] or 'agent' not in features.get('methods',[]):raise GuardError('gateway_authenticated_hello_required')
 
+class RPCRejected(GuardError):
+    def __init__(self,frame,expect_final,accepted):
+        super().__init__('gateway_rpc_rejected')
+        error=frame.get('error');error=error if isinstance(error,dict) else {}
+        payload=frame.get('payload');payload=payload if isinstance(payload,dict) else {}
+        code=error.get('code')
+        message=error.get('message')
+        message=message[:32768].lower() if isinstance(message,str) else ''
+        self.safe_details={
+            'phase':'agent_after_acceptance' if expect_final and accepted else 'agent_preacceptance' if expect_final else 'connect',
+            'accepted':bool(accepted),
+            'server_code':code if isinstance(code,str) and code in ('INVALID_REQUEST','UNAVAILABLE','AUTH_FAILED','MISSING_SCOPE','SCOPE_MISSING') else 'other',
+            'terminal_status':payload.get('status') if payload.get('status') in ('error','timeout') else 'other',
+            'category_flags':{
+                'timeout':'timeout' in message or 'timed out' in message,
+                'permission':'permission denied' in message or 'eacces' in message or 'eperm' in message,
+                'missing_file':'enoent' in message or 'no such file' in message,
+                'context':'context' in message and any(term in message for term in ('small','exceed','length','window')),
+                'scope':'scope' in message and any(term in message for term in ('missing','required','denied')),
+            },
+        }
+
 def await_response(ws,request_id,expect_final=False,run_id=None):
     accepted=False
     while True:
         frame=ws.receive()
         if frame.get('type')=='event':continue
         if frame.get('type')!='res' or frame.get('id')!=request_id:raise GuardError('gateway_response_correlation')
-        if frame.get('ok') is not True:raise GuardError('gateway_rpc_rejected')
+        if frame.get('ok') is not True:raise RPCRejected(frame,expect_final,accepted)
         payload=frame.get('payload')
         if not isinstance(payload,dict):raise GuardError('gateway_response_payload_schema')
         if expect_final and payload.get('status')=='accepted':
@@ -254,7 +276,7 @@ def verify_main(do_smoke=False):
 def remote_script(model_smoke=False):
     return '\n'.join(['PINS='+repr(migration.base.PINS), migration.base.COMMON,
         migration.base.REMOTE, 'import grp', migration.MIGRATION, RPC,
-        f"try:\n verify_main({model_smoke!r})\nexcept GuardError as e:\n output({{'status':'Blocked','code':str(e),'model_verified':False}});raise SystemExit(2)\nexcept Exception as e:\n output({{'status':'Failed','code':type(e).__name__,'model_verified':False}});raise SystemExit(3)"])
+        f"try:\n verify_main({model_smoke!r})\nexcept RPCRejected as e:\n output({{'status':'Blocked','code':'gateway_rpc_rejected','model_verified':False,'rpc':e.safe_details}});raise SystemExit(2)\nexcept GuardError as e:\n output({{'status':'Blocked','code':str(e),'model_verified':False}});raise SystemExit(2)\nexcept Exception as e:\n output({{'status':'Failed','code':type(e).__name__,'model_verified':False}});raise SystemExit(3)"])
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)

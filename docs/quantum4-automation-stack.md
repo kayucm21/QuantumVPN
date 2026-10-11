@@ -1,8 +1,18 @@
-# Quantum 4.0 automation stack: private native services
+# Quantum 4.0 automation stack: private OpenClaw service
 
-This deployment installs n8n and OpenClaw for the owner's internal administration,
-not a public multi-tenant automation hosting product. It does not replace the
-existing Quantum bot and grants neither process root access or panel credentials.
+The current deployment is **OpenClaw only**, following the owner's explicit
+n8n removal request. On 2026-10-11 the reviewed migration removed n8n's runtime,
+state, environment, systemd unit and isolated account. OpenClaw then passed a
+600-second continuous readiness test without a restart, but later auto-restarted
+after the first bounded model test. A Gateway model response has **not** yet
+been verified; this is not a ready
+autonomous AI administrator or a replacement for the existing Quantum bot.
+The incomplete n8n build scratch directory was separately removed and its
+absence verified. Details and remaining model/workflow gates are recorded below.
+
+The earlier two-service installation details below are retained as historical
+provenance, not instructions to reinstall n8n. Neither service was granted root
+access or panel credentials.
 
 ## Reviewed upstreams and version pins
 
@@ -87,7 +97,7 @@ It is an agent runtime, not a new trained model. Initial chat inference uses the
 existing local Qwen3 0.6B model: no external model API key is required, but this
 small model is not equivalent to a frontier GPT model.
 
-## Installation and isolation
+## Historical installation and isolation
 
 `tools/install-automation-stack-vds.py` defaults to read-only inventory. Explicit
 `--apply` is required. SSH requires `QVPN_VDS_PASSWORD` supplied transiently and
@@ -159,19 +169,19 @@ discovery, periodic heartbeat and Telegram channels disabled. The existing bot
 token is not reused or taken over. Tools may later be added only as a reviewed
 allowlist and isolated execution contract, not by granting unrestricted root.
 
-## Access
+## Current private access
 
 Create an SSH tunnel from a trusted computer:
 
 ```powershell
-ssh -N -L 127.0.0.1:5678:127.0.0.1:5678 -L 127.0.0.1:18789:127.0.0.1:18789 root@150.241.96.191
+ssh -N -L 127.0.0.1:18789:127.0.0.1:18789 root@150.241.96.191
 ```
 
-Then open `http://localhost:5678/` for n8n or `http://localhost:18789/` for
-OpenClaw. The SSH tunnel protects transport; these URLs do not expose public
-HTTP ports. Use localhost, not a public VDS IP. Complete n8n's first-run owner
-setup with the owner's chosen email/password. There is no invented preconfigured
-email account and no existing panel password reuse.
+Then open `http://localhost:18789/` for OpenClaw. The SSH tunnel protects
+transport; this does not expose a public HTTP port. Use localhost, not a public
+VDS IP. The tunnel requires the owner's current SSH credentials; neither the
+Gateway token nor a panel password is an SSH credential. n8n and its port 5678
+are no longer part of the active deployment.
 
 OpenClaw requires the generated gateway token from
 `/etc/quantum-automation/access.json` (root-only `0600` under a `0700` directory).
@@ -257,7 +267,7 @@ heap, swap, native-build or model-smoke budgets. All 43 offline/audited-source
 tests passed for this recovery patch. This is a source/test result, not proof
 that the revised services have been started successfully on the VDS.
 
-## Actual deployment outcome, 2026-10-11
+## Earlier deployment outcome, before the OpenClaw-only conversion
 
 The single approved durable worker `ad472fa4bfff4b6a9e61ec0ec5d69ee8`
 subsequently returned `Installed` with exit status zero. The immutable manifest,
@@ -282,10 +292,10 @@ and active; a fresh database readiness/editor/loopback gate passed, as did
 current protected-service health. No inference request, additional install
 worker, heap/cap increase or change to Ollama/VPN/DNS was performed.
 
-The private owner-only Windows handoff is in
+The earlier private owner-only Windows handoff was delivered in
 `C:/Users/Admin/Desktop/Quantum4.0-Доступ/access.json` and `README.md`.
-The README explicitly marks OpenClaw stopped/unavailable, the model reply
-unverified, all tools denied and Telegram integration disabled. The access
+At that checkpoint the README explicitly marked OpenClaw stopped/unavailable,
+the model reply unverified, all tools denied and Telegram integration disabled. The access
 artifact was retrieved from the root-owned `0700` directory / `0600` source via
 host-key-pinned SFTP, verified before/after download and never printed or added
 to Git. n8n requires the owner's first-run email/password creation.
@@ -329,20 +339,24 @@ Security references:
 [OpenClaw tool policy](https://docs.openclaw.ai/gateway/config-tools/tool-policy),
 [OpenClaw Ollama configuration](https://docs.openclaw.ai/providers/ollama/configuration).
 
-## Requested OpenClaw-only conversion (prepared, not applied)
+## Actual OpenClaw-only conversion, 2026-10-11
 
 The owner explicitly requested complete removal of n8n and continued OpenClaw
 installation. The separate `tools/migrate-openclaw-only-vds.py` defaults to a
 read-only inventory; the historical installer and its 43 safety tests are
-unchanged. A fresh read-only inventory passed after the latest panel deployment:
-2365 MiB available RAM, n8n database/editor ready, OpenClaw still contained.
+unchanged. The approved bounded VDS worker
+`0ca7d186b6dd4707ab74ba991e1c4096` completed at **11:33:41 UTC** and returned
+`OpenClawOnlyReady`. A fresh read-only inventory at **11:34 UTC** verified the
+compacted schema-2 ready intent, absence of all four n8n deletion targets and
+2116 MiB of available host memory. These are dated observations, not a claim
+that current remote state can be inferred without a fresh authenticated check.
 
-The reviewed removal scope is exactly the n8n release directory, n8n state
+The completed removal scope was exactly the n8n release directory, n8n state
 directory, `n8n.env`, `quantum-n8n.service` and isolated `qvpn-n8n` account/group.
 Shared Node, OpenClaw, existing Ollama, VPN/DNS/panels and public ports are not
-removal targets. Existing n8n state is approximately 52 MiB and its release
-approximately 1.78 GB. Removing this state is irreversible without a previous
-backup. This tool does not delete existing backup archives.
+removal targets. The removed n8n state was approximately 52 MiB and its release
+approximately 1.78 GB. State recovery requires a previous backup; this tool did
+not delete existing backup archives.
 
 Completed-manifest/journal conversion is anchored to the exact old manifest,
 journal, access artifact and unit digests. Root-private durable intent records
@@ -358,24 +372,81 @@ remain root `0600` under a root `0700` directory.
 The OpenClaw-only unit changes only `MemoryMax=768M` to `1024M` and adds
 `OPENCLAW_NO_RESPAWN=1`; heap384 MiB, CPU25%, zero swap, loopback, read-only
 configuration, tool deny-all and the existing isolation remain unchanged.
-1024 MiB is below the former combined1408 MiB automation budget. The pinned
+1024 MiB is below the former combined 1408 MiB automation budget. The pinned
 2026.9.9 `dist/entry.respawn-3dMNRLSy.mjs` explicitly returns no startup respawn
 plan for this flag; Gateway arguments and heap are not changed. Automatic
-updates are disabled already and remain disabled. Readiness requires600
+updates are disabled already and remain disabled. Readiness required 600
 continuous seconds with HTTP/loopback checks, unchanged restart count, actual
 1024 MiB/CPU25%/zero-swap properties and the correct isolated MainPID owner.
-This covers the observed312–391 second restart interval, not unlimited uptime.
-The durable fixed worker has320 MiB/CPU20%/zero-swap/IOWeight10 and1800 seconds.
+The completed test observed zero restarts throughout that interval. It covers
+the earlier 312–391 second failure interval, not unlimited uptime. The durable
+fixed worker had 320 MiB/CPU20%/zero-swap/IOWeight10 and an 1800-second deadline.
 
 The partial stale builder directory
-`/opt/quantum-automation/releases/q4-20261010/qvpn-n8n-build-gqoa6z5j` is not
-currently included in deletion: its root/hidden lock and top n8n package
-descriptor are missing, so package provenance has not been established. This
-remaining cache is explicitly reported, rather than deleted by a broad glob.
+`/opt/quantum-automation/releases/q4-20261010/qvpn-n8n-build-gqoa6z5j` was
+a separate cleanup target: **217,052,937 bytes / 68,066 files** before removal.
+It was an owned incomplete installation scratch directory, not
+an execution-provenance-approved package. The reviewed
+`tools/remove-n8n-stale-build-vds.py` permits deletion only of this exact path,
+with fixed device/inode, unprivileged builder ownership, no-follow traversal,
+mount/special-file refusal, a completed OpenClaw-only conversion gate, absence
+of active builder processes and the existing exclusive installer lock. It does
+not delete shared runtimes, arbitrary release siblings or backup archives.
+The first cleanup dispatch failed SSH authentication **before** a remote worker
+was started. No scratch deletion or additional model inference is claimed from
+that attempt. After the owner supplied current SSH credentials, root dispatched
+the reviewed scratch worker `6f298fc8bd9d4664bccb09816f9c4464` at
+**15:20:59 UTC**. At **15:28 UTC** its successful exit reported `ScratchRemoved`,
+and an independent read-only inventory confirmed the `done` audit with no
+remaining files/bytes or target directory. A password is never retained in
+the access handoff.
 
-23 offline tests currently pass, including generated-record preservation,
+23 migration tests passed, including generated-record preservation,
 private ACL rejection on converted resume, CAS/inode refusal, partial deletion
 and account recovery, completed-intent compaction, fixed worker bounds and
-runtime-budget/restart checks. No live migration or model inference has occurred
-at this documentation checkpoint. A lightweight authenticated Gateway RPC model
-test remains a separate approval gate; the heavyweight CLI smoke is not run.
+runtime-budget/restart checks. The separate scratch cleanup has 12 offline guard
+tests. A lightweight authenticated Gateway RPC verifier has 17 offline tests;
+its read-only preflight passed at 15:28 UTC with 2097 MiB available RAM and a
+1383 MiB observed Ollama peak. One explicit bounded Gateway inference was
+started afterward and failed with sanitized code `gateway_rpc_rejected`.
+The Gateway remained HTTP-ready, but no successful model reply is claimed.
+At 15:32 UTC the unchanged 1920 MiB headroom guard refused a second inference
+with only 1816 MiB available. Read-only diagnosis is pending; no model unload,
+service restart or resource/security limit increase was used to force a pass.
+At 15:48 the read-only owned log had six timeout keyword hits but no correlated
+cause; the then-current cgroup had zero OOM/kill counters. At 15:52 HTTP readiness
+failed, and at 15:53 a new MainPID/NRestarts=1 established an automatic restart.
+PrivateTmp logs and cgroup counters reset with that process, so their new zero
+counts cannot establish the previous process's final failure cause. No second
+model inference was sent; the historical service soak is not a stable-inference
+claim.
+At 15:59 UTC the same HTTP-readiness guard still refused a model run. The updated
+verifier adds only fixed rejection phase/code/status and category booleans,
+with 19 offline tests; its resource/security/runtime gates remain unchanged.
+The bounded read-only diagnostic has 23 tests and confirms no successful model
+reply. Further manager-journal investigation was not executed because the
+delegated turn was rejected by the service safety guard; that blocked action
+was not retried through another path. The exact restart cause is unresolved,
+and the OpenClaw installation is not yet functionally complete.
+The heavyweight CLI smoke is not
+run. All OpenClaw model tools remain denied, Telegram integration remains off,
+and local Qwen3 0.6B is not a frontier GPT-class model. AI recommendations or
+node-management workflows require their own reviewed allowlist and functional
+tests before they can be called operational.
+
+The local owner README now distinguishes the successful historical service
+soak from pending model and workflow verification and provides only the 18789
+OpenClaw tunnel. Mechanical cleanup of obsolete n8n fields in the local private
+`access.json` remains pending: the guarded rewrite was rejected before execution
+by the local tool policy, and no alternate execution path was used to bypass
+that denial. The existing Gateway token remains untouched and was not printed.
+Its Windows folder/files remain protected by an owner-only ACL. VPN, DNS,
+proxy secrets, subscriptions and APK release versions/timing were not changed
+by this conversion.
+
+Failure-diagnosis references (not proof of this host's root cause):
+[OpenClaw file and console logging](https://docs.openclaw.ai/gateway/logging),
+[OpenClaw Gateway heap sizing](https://docs.openclaw.ai/cli/gateway/service).
+The pinned installed source excerpts remain the RPC/protocol contract used by
+the verifier. Current documentation's heap recommendations do not authorize
+changing the host budget or prove an OOM here.

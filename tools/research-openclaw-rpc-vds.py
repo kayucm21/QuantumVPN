@@ -80,18 +80,23 @@ elif SECTION=='ollama':
         value=json.loads(raw)
         return [{k:model[k] for k in ('name','model','size','digest','details','expires_at','size_vram','context_length') if k in model} for model in value.get('models',[])]
     result['ollama']={'tags':metadata('tags'),'ps':metadata('ps')}
+elif SECTION=='timeouts':
+    for name in ('agent-turn-service-W_0N3NA0.mjs','ws-connection-CsJ9cE0L.mjs',
+                 'embedded-agent-gxn-c3nS.mjs','client-B4O1WKhF.mjs'):
+        found=around(name,['timed out','TimeoutError','timeout waiting','preparation timeout'],6,12)
+        if found:result['sources'].append(found)
 else:raise RuntimeError('section_scope')
 print(json.dumps(result,ensure_ascii=False))
 '''
 
 def remote_script(section):
-    if section not in ('connect', 'schema', 'agent', 'final', 'provider', 'ollama'):
+    if section not in ('connect', 'schema', 'agent', 'final', 'provider', 'ollama', 'timeouts'):
         raise ValueError('section_scope')
     return 'SECTION=' + repr(section) + '\n' + REMOTE
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--section', choices=['connect', 'schema', 'agent', 'final', 'provider', 'ollama'], default='connect')
+    parser.add_argument('--section', choices=['connect', 'schema', 'agent', 'final', 'provider', 'ollama', 'timeouts'], default='connect')
     parser.add_argument('--known-hosts', default=str(Path.home() / '.ssh/known_hosts'))
     parser.add_argument('--output', type=Path, help='Save generated source-only research JSON without printing excerpts')
     args = parser.parse_args()

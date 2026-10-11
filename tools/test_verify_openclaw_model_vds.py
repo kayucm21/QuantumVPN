@@ -166,6 +166,31 @@ class ModelVerifierTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'gateway_rpc_rejected') as caught:self.n['await_response'](ws,'connect')
         self.assertNotIn('private',str(caught.exception));self.n['output'].assert_not_called()
 
+    def test_rejection_phase_code_and_categories_only(self):
+        failure={'type':'res','id':'request','ok':False,
+                 'error':{'code':'UNAVAILABLE','message':'private-token run timed out','details':{'key':'secret'}},
+                 'payload':{'status':'timeout','runId':'private-run','summary':'private-prompt'}}
+        for expect_final,accepted,phase in ((False,False,'connect'),(True,False,'agent_preacceptance'),(True,True,'agent_after_acceptance')):
+            ws=Mock();ws.receive.side_effect=([{'type':'res','id':'request','ok':True,'payload':{'status':'accepted','runId':'run'}}] if accepted else [])+[failure]
+            with self.assertRaises(self.n['RPCRejected']) as caught:
+                self.n['await_response'](ws,'request',expect_final,'run')
+            details=caught.exception.safe_details
+            self.assertEqual(phase,details['phase']);self.assertEqual(accepted,details['accepted'])
+            self.assertEqual('UNAVAILABLE',details['server_code']);self.assertEqual('timeout',details['terminal_status'])
+            self.assertTrue(details['category_flags']['timeout'])
+            for secret in ('private-token','private-run','private-prompt','secret'):
+                self.assertNotIn(secret,json.dumps(details));self.assertNotIn(secret,str(caught.exception))
+
+    def test_rejection_unknown_or_malformed_fields_not_echoed(self):
+        for error,payload in (({'code':'private-token','message':['secret']},{'status':['private']}),
+                              (['private'],['private']),
+                              ({'code':{'private':'secret'},'message':'x'*32768+'timeout'},{})):
+            exception=self.n['RPCRejected']({'error':error,'payload':payload},True,False)
+            self.assertEqual('other',exception.safe_details['server_code'])
+            self.assertEqual('other',exception.safe_details['terminal_status'])
+            self.assertFalse(exception.safe_details['category_flags']['timeout'])
+            self.assertNotIn('private',json.dumps(exception.safe_details))
+
     def test_private_config_real_nofollow_acl_and_inode_reader(self):
         n=self.n;n['STATE']='/var/lib/quantum-automation';n['stat']=__import__('stat')
         for key,value in {'O_RDONLY':0,'O_NOFOLLOW':131072,'O_NONBLOCK':2048}.items():setattr(n['os'],key,value)

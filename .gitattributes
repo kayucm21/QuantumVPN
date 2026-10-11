@@ -20,3 +20,7 @@ tools/install-automation-stack-vds.py text eol=lf
 tools/migrate-openclaw-only-vds.py text eol=lf
 tools/remove-n8n-stale-build-vds.py text eol=lf
 tools/verify-openclaw-model-vds.py text eol=lf
+tools/diagnose-openclaw-model-vds.py text eol=lf
+tools/research-openclaw-rpc-vds.py text eol=lf
+tools/test_verify_openclaw_model_vds.py text eol=lf
+tools/test_diagnose_openclaw_model_vds.py text eol=lf

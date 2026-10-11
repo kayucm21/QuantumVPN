@@ -123,6 +123,19 @@ permits recovery only for that owned incomplete installation with both services
 stopped. Configuration validation requires both exit status zero and JSON
 `valid: true`. All 34 offline/audited-source tests passed; a completed service
 start and authenticated Gateway model response remain separate live gates.
+That resume passed configuration validation but stopped at its live health
+gate. The kernel identified `CONSTRAINT_MEMCG` in the new OpenClaw unit, not
+global host memory exhaustion; fail-closed cleanup stopped both new services.
+About 2.8 GiB remained available, and independent production verification
+still passed for both VPN panels, current ARM API/downloads and MTProto.
+The reviewed recovery increases only OpenClaw's service cap from 576 to
+768 MiB, retains n8n's 640 MiB, both 25% CPU limits, zero swap and existing
+heap limits, and requires at least 2000 MiB available before installation.
+An exact owned-unit digest migration preserves stopped/incomplete-install
+guards; service starts are serialized with bounded readiness windows and a
+final simultaneous health check. This change is not itself live health proof.
+All 43 offline/audited-source installer tests passed for the resource recovery;
+the generated exact legacy unit SHA-256 matched the stopped VDS unit.
 GitHub publication is separate from the VDS production schedule and must not
 make a Beta-updater release available before its authorized deadline.
 

@@ -359,7 +359,7 @@ def openclaw_schema_migration_record(value):
             'old_sha256': hashlib.sha256(json.dumps(legacy_openclaw_config(token), indent=2).encode()).hexdigest(),
             'new_sha256': hashlib.sha256(json.dumps(openclaw_config(token), indent=2).encode()).hexdigest()}
 
-def service_unit(name):
+def legacy_service_unit(name):
     if name not in USERS:
         raise GuardError('unknown_service')
     executable = {
@@ -421,6 +421,20 @@ LimitCORE=0
 WantedBy=multi-user.target
 '''
 
+def service_unit(name):
+    unit = legacy_service_unit(name)
+    if name == 'openclaw':
+        # Measured CONSTRAINT_MEMCG OOM, not host exhaustion. This exact
+        # service-only change keeps heap, CPU, swap and isolation unchanged.
+        unit = unit.replace('\nMemoryMax=576M\n', '\nMemoryMax=768M\n')
+    return unit
+
+def openclaw_budget_migration_record():
+    return {'id': 'openclaw-service-memory-768-v1',
+            'path': '/etc/systemd/system/' + SERVICES['openclaw'],
+            'old_sha256': hashlib.sha256(legacy_service_unit('openclaw').encode()).hexdigest(),
+            'new_sha256': hashlib.sha256(service_unit('openclaw').encode()).hexdigest()}
+
 def validate_journal(value):
     if not isinstance(value, dict) or value.get('schema') != 1 or value.get('install_id') != INSTALL_ID or value.get('pins') != PINS:
         raise GuardError('foreign_or_invalid_install_journal')
@@ -449,6 +463,10 @@ def validate_journal(value):
         record = openclaw_schema_migration_record(value)
         if value['openclaw_schema_migration'] != record or files.get(record['path']) not in (record['old_sha256'], record['new_sha256']):
             raise GuardError('invalid_openclaw_schema_migration')
+    if 'openclaw_budget_migration' in value:
+        record = openclaw_budget_migration_record()
+        if value['openclaw_budget_migration'] != record or files.get(record['path']) not in (record['old_sha256'], record['new_sha256']):
+            raise GuardError('invalid_openclaw_budget_migration')
     return value
 """
 exec(COMMON)
@@ -525,6 +543,7 @@ def write_new(path, data, mode=0o600, uid=0, gid=0):
         raise GuardError('refuse_existing_file')
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     with os.fdopen(fd, 'wb') as f:
+        os.fchmod(f.fileno(), mode)  # Explicit intended mode despite worker UMask=0077.
         f.write(data if isinstance(data, bytes) else data.encode()); f.flush(); os.fsync(f.fileno())
     os.chown(target, uid, gid)
 
@@ -551,6 +570,17 @@ def read_journal():
                 data, _ = read_owned_openclaw_config()
                 if hashlib.sha256(data).hexdigest() != pending['new_sha256']:
                     raise GuardError('openclaw_migration_file_drift')
+                continue
+        budget = value.get('openclaw_budget_migration')
+        if budget and path == budget['path']:
+            if actual is None:
+                raise GuardError('missing_openclaw_budget_target')
+            if expected == budget['old_sha256']:
+                assert_openclaw_migration_scope()
+            if expected == budget['old_sha256'] and actual == budget['new_sha256']:
+                data, _ = read_owned_openclaw_unit()
+                if hashlib.sha256(data).hexdigest() != budget['new_sha256']:
+                    raise GuardError('openclaw_budget_file_drift')
                 continue
         if target_file.is_symlink() or (target_file.exists() and actual != expected):
             raise GuardError('journal_file_drift')
@@ -685,6 +715,88 @@ def migrate_openclaw_schema(value):
     value['files'][record['path']] = record['new_sha256']
     save_journal(value)
     output({'phase': 'openclaw_schema_migrated', 'pinned_runtime': PINS['openclaw_version']})
+
+def read_owned_openclaw_unit():
+    parent = Path('/etc/systemd/system')
+    info = parent.lstat()
+    if parent.resolve() != parent or not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o755:
+        raise GuardError('unsafe_openclaw_budget_parent')
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = None
+    try:
+        opened_parent = os.fstat(parent_fd)
+        if (opened_parent.st_dev, opened_parent.st_ino) != (info.st_dev, info.st_ino) or opened_parent.st_uid != 0 or opened_parent.st_gid != 0 or stat.S_IMODE(opened_parent.st_mode) != 0o755:
+            raise GuardError('openclaw_budget_parent_changed')
+        fd = os.open(SERVICES['openclaw'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        info = os.fstat(fd)
+        entry = os.stat(SERVICES['openclaw'], dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) not in (0o600, 0o644) or info.st_size > 16000 or (info.st_dev, info.st_ino) != (entry.st_dev, entry.st_ino):
+            raise GuardError('unsafe_openclaw_budget_file')
+        data = os.read(fd, 16001)
+        if len(data) != info.st_size:
+            raise GuardError('openclaw_budget_read_changed')
+        # The old worker's UMask produced root0600 despite requested0644.
+        # Permit it only for the exact reviewed old bytes; new bytes require644.
+        if stat.S_IMODE(info.st_mode) == 0o600 and hashlib.sha256(data).hexdigest() != openclaw_budget_migration_record()['old_sha256']:
+            raise GuardError('unsafe_openclaw_budget_legacy_mode')
+        return data, (info.st_dev, info.st_ino, opened_parent.st_dev, opened_parent.st_ino)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
+
+def replace_owned_openclaw_unit(data, identity):
+    parent = Path('/etc/systemd/system')
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = None
+    try:
+        parent_info = os.fstat(directory)
+        if (parent_info.st_dev, parent_info.st_ino) != identity[2:] or parent_info.st_uid != 0 or parent_info.st_gid != 0 or stat.S_IMODE(parent_info.st_mode) != 0o755:
+            raise GuardError('openclaw_budget_parent_changed')
+        candidate = 'quantum-openclaw-budget-' + secrets.token_hex(8)
+        fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=directory)
+        temporary = candidate
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data); handle.flush(); os.fchmod(handle.fileno(), 0o644)
+            os.fchown(handle.fileno(), 0, 0); os.fsync(handle.fileno())
+        current = os.stat(SERVICES['openclaw'], dir_fd=directory, follow_symlinks=False)
+        parent_entry = parent.lstat()
+        if (current.st_dev, current.st_ino) != identity[:2] or (parent_entry.st_dev, parent_entry.st_ino) != identity[2:]:
+            raise GuardError('openclaw_budget_inode_changed')
+        os.replace(temporary, SERVICES['openclaw'], src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+        os.close(directory)
+
+def migrate_openclaw_budget(value):
+    record = openclaw_budget_migration_record()
+    expected = value['files'].get(record['path'])
+    if expected is None or expected == record['new_sha256']:
+        return
+    if expected != record['old_sha256']:
+        raise GuardError('unreviewed_openclaw_budget_migration')
+    assert_openclaw_migration_scope()
+    data, identity = read_owned_openclaw_unit()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual not in (record['old_sha256'], record['new_sha256']):
+        raise GuardError('openclaw_budget_file_drift')
+    if value.get('openclaw_budget_migration') not in (None, record):
+        raise GuardError('invalid_openclaw_budget_migration')
+    value['openclaw_budget_migration'] = record
+    save_journal(value)  # Exact intent is durable before the unit is replaced.
+    if actual == record['old_sha256']:
+        replace_owned_openclaw_unit(service_unit('openclaw').encode(), identity)
+    verified, _ = read_owned_openclaw_unit()
+    if hashlib.sha256(verified).hexdigest() != record['new_sha256']:
+        raise GuardError('openclaw_budget_write_failed')
+    value['files'][record['path']] = record['new_sha256']
+    save_journal(value)
+    output({'phase': 'openclaw_budget_migrated', 'memory_max_mb': 768})
 
 def checkpoint(value, step, paths, lock_digest=None):
     value['files'].update({str(p): digest(p) for p in paths})
@@ -951,6 +1063,23 @@ def service_probe(name):
         raise GuardError('unexpected_public_listener')
     return True
 
+def start_private_services():
+    # Cold database migration and Gateway import have separate bounded windows;
+    # do not overlap their first-boot CPU/memory bursts.
+    for name in USERS:
+        command(['systemctl', 'start', SERVICES[name]])
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            if service_probe(name):
+                output({'phase': 'private_service_ready', 'service': name})
+                break
+            time.sleep(3)
+        else:
+            raise GuardError('private_service_health_failed_' + name)
+    # n8n may have regressed while OpenClaw was starting: check both again.
+    if not all(service_probe(name) for name in USERS):
+        raise GuardError('private_service_health_failed_final')
+
 def validate_openclaw_runtime(release, account):
     argv = ['systemd-run', '--quiet', '--wait', '--pipe', '--collect',
             '--unit=qvpn-openclaw-config-check-' + str(os.getpid()),
@@ -1047,7 +1176,7 @@ def apply(do_resume=False):
     info = inventory()
     if os.getuid() != 0 or info['platform'] != 'x86_64':
         raise GuardError('unsupported_platform_or_user')
-    if info['memory_mb'] < 3500 or info['available_memory_mb'] < 1800 or info['disk_free_mb'] < 8000:
+    if info['memory_mb'] < 3500 or info['available_memory_mb'] < 2000 or info['disk_free_mb'] < 8000:
         raise GuardError('insufficient_resource_budget')
     if not all(info['ports_free'].values()) or not all(info['prerequisites'].values()):
         raise GuardError('missing_prerequisite_or_port_conflict')
@@ -1099,6 +1228,7 @@ def apply(do_resume=False):
             locks[name] = journal['steps'][name]['lock_digest']
         key, token = journal['credentials']['key'], journal['credentials']['token']
         migrate_openclaw_schema(journal)
+        migrate_openclaw_budget(journal)
         env = n8n_environment(key)
         # EnvironmentFile quoting protects JSON and spaces; no secrets in argv.
         env_text = '\n'.join(k + '=' + json.dumps(v) for k, v in env.items()) + '\n'
@@ -1123,15 +1253,7 @@ def apply(do_resume=False):
         command(['systemd-analyze', 'verify', *map(str, unit_paths.values())], timeout=30)
         command(['systemctl', 'daemon-reload'])
         output({'phase': 'start_private_services'})
-        for name in USERS:
-            command(['systemctl', 'start', SERVICES[name]])
-        deadline = time.monotonic() + 180
-        while time.monotonic() < deadline:
-            if all(service_probe(name) for name in USERS):
-                break
-            time.sleep(3)
-        else:
-            raise GuardError('private_service_health_failed')
+        start_private_services()
         if protected_snapshot() != before or any(active and not is_active(u) for u, active in protected_active.items()):
             raise GuardError('protected_service_drift')
         immutable = [release / 'node/bin/node', Path(PRIVATE) / 'n8n.env',

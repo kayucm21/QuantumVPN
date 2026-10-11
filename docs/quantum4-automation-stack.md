@@ -123,7 +123,10 @@ Services run as `qvpn-n8n` / `qvpn-openclaw`, with no extra groups, capabilities
 sudo, Docker socket or host command tools. Systemd makes the system read-only,
 hides protected panel/proxy state, and permits writes only in the corresponding
 service state directory. Each service has CPU, process and memory limits;
-combined memory maxima are 1216 MiB, with no swap. Native dependency builds have
+combined memory maxima are 1408 MiB (n8n 640 MiB, OpenClaw 768 MiB), with no swap.
+Both runtime CPU quotas remain 25%; the Node heap limit remains 384 MiB.
+Installation requires at least 2000 MiB of currently available host memory.
+Native dependency builds have
 a separate 1536 MiB / 35% CPU limit and never overlap.
 Each native dependency build has an explicit 1800-second maximum. Build jobs
 are restricted to one. The isolated-vm upstream install script hardcodes `-j4`
@@ -223,6 +226,36 @@ before its completed checkpoint; both credentials are retained. Completed
 manifests, active services, unknown content/tokens/paths and unsafe files are
 refused. The general journal writer's no-overwrite/no-changed-intent guards
 are unchanged. All 34 offline/audited-source tests passed after this change.
+
+The subsequent first-boot health gate failed: the kernel recorded
+`CONSTRAINT_MEMCG` with `oom_memcg=/system.slice/quantum-openclaw.service`,
+killing the Gateway process at approximately 489 MiB anonymous RSS under the
+old 576 MiB cgroup maximum. This was a service cgroup OOM, not a host-wide OOM.
+The fail-closed handler stopped and disabled both new services; no final
+manifest or successful model inference/access handoff was produced. n8n had
+startup/migration output but did not prove database readiness before rollback.
+After stop the cgroups were removed, so retained `memory.current/peak/events`
+and anon/file accounting are unavailable; host available memory was 2783 MiB.
+Protected panels, proxies and Ollama remained active.
+
+The reviewed recovery changes only the owned OpenClaw service maximum from
+576 to 768 MiB (+192 MiB), with both services stopped and no completed manifest.
+An exact old/new unit digest record precedes the atomic replacement. The old
+worker's `UMask=0077` left its otherwise exact root-owned legacy unit at `0600`;
+only those exact old bytes may use `0600` or `0644`. New bytes require root-owned
+`0644`, explicitly applied before fsync. Parent/file no-follow descriptors,
+root ownership, fixed path and inode checks remain mandatory. Pending recovery
+accepts only the fixed target's old/new digests; arbitrary unit or file drift
+is still refused. n8n's existing `0600` unit is not chmod-ed or migrated.
+New file creation explicitly honors its requested mode despite the worker
+umask; private-file defaults remain `0600`.
+
+Cold starts are serialized: each service has its own 300-second readiness
+window, then both are checked again before manifest creation and boot enable.
+This reduces overlapping first-boot memory/CPU bursts without increasing CPU,
+heap, swap, native-build or model-smoke budgets. All 43 offline/audited-source
+tests passed for this recovery patch. This is a source/test result, not proof
+that the revised services have been started successfully on the VDS.
 
 Managed configuration
 is read-only to the runtime. The selected 16,384-token model context exceeds

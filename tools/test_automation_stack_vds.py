@@ -613,6 +613,196 @@ Module._load = function(id, parent, main) {
             for path in ['/var/lib/quantumvpn-operator', '/opt/quantumvpn-operator', '/etc/quantumvpn-operator', '/etc/quantumvpn-dns']:
                 self.assertIn('-' + path, unit)
         self.assertIn('Environment=OPENCLAW_CONFIG_READONLY=1', module.service_unit('openclaw'))
+        self.assertIn('MemoryMax=640M\n', module.service_unit('n8n'))
+        self.assertIn('MemoryMax=768M\n', module.service_unit('openclaw'))
+        self.assertEqual(module.legacy_service_unit('n8n'), module.service_unit('n8n'))
+        self.assertEqual(module.legacy_service_unit('openclaw').replace('\nMemoryMax=576M\n', '\nMemoryMax=768M\n'), module.service_unit('openclaw'))
+
+    @staticmethod
+    def budget_fixture():
+        value = {'schema': 1, 'install_id': module.INSTALL_ID, 'pins': module.PINS,
+                 'steps': {}, 'credentials': {'key': 'a' * 64, 'token': 'b' * 64}, 'files': {}}
+        record = module.openclaw_budget_migration_record()
+        value['files'][record['path']] = record['old_sha256']
+        return value, record
+
+    def test_exact_budget_migration_rejects_foreign_paths_digests_and_memory_values(self):
+        value, record = self.budget_fixture()
+        value['openclaw_budget_migration'] = record
+        module.validate_journal(value)
+        for field, change in [('path', '/etc/systemd/system/nginx.service'), ('old_sha256', 'c' * 64),
+                              ('new_sha256', 'd' * 64), ('id', 'unreviewed')]:
+            bad = copy.deepcopy(value); bad['openclaw_budget_migration'][field] = change
+            with self.assertRaisesRegex(module.GuardError, 'invalid_openclaw_budget_migration'):
+                module.validate_journal(bad)
+        bad = copy.deepcopy(value); bad['files'][record['path']] = 'e' * 64
+        with self.assertRaisesRegex(module.GuardError, 'invalid_openclaw_budget_migration'):
+            module.validate_journal(bad)
+
+    def test_actual_budget_migration_recovers_three_crash_states_without_config_or_key_changes(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'migrate_openclaw_budget')
+        old = module.legacy_service_unit('openclaw').encode()
+        new = module.service_unit('openclaw').encode()
+        for has_intent, current in [(False, old), (True, old), (True, new)]:
+            value, record = self.budget_fixture()
+            if has_intent: value['openclaw_budget_migration'] = record
+            saved=[]; state={'bytes': current}
+            def save(journal):
+                module.validate_journal(journal); saved.append(copy.deepcopy(journal))
+            def replace(data, identity):
+                self.assertEqual((1,2,3,4), identity)
+                self.assertEqual(record, saved[-1]['openclaw_budget_migration'])
+                self.assertEqual(record['old_sha256'], saved[-1]['files'][record['path']])
+                state['bytes'] = data
+            ns={'openclaw_budget_migration_record': module.openclaw_budget_migration_record,
+                'GuardError': module.GuardError, 'service_unit': module.service_unit,
+                'hashlib': module.hashlib, 'assert_openclaw_migration_scope': Mock(),
+                'save_journal': save, 'output': Mock(),
+                'read_owned_openclaw_unit': lambda: (state['bytes'], (1,2,3,4)),
+                'replace_owned_openclaw_unit': Mock(side_effect=replace)}
+            exec(compile(ast.Module(body=[node], type_ignores=[]), '<budget-migration>', 'exec'), ns)
+            ns['migrate_openclaw_budget'](value)
+            self.assertEqual(new, state['bytes'])
+            self.assertEqual({'key': 'a' * 64, 'token': 'b' * 64}, value['credentials'])
+            self.assertEqual(record['new_sha256'], value['files'][record['path']])
+            self.assertEqual(2, len(saved))
+            self.assertEqual(int(current == old), ns['replace_owned_openclaw_unit'].call_count)
+            ns['migrate_openclaw_budget'](value)
+            self.assertEqual(2, len(saved))
+
+    def test_actual_read_journal_budget_exception_is_exact_pending_target_only(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'read_journal')
+        value, record = self.budget_fixture(); value['openclaw_budget_migration'] = record
+        ns={'Path':Path,'PRIVATE':module.PRIVATE,'stat':stat,'json':json,'GuardError':module.GuardError,
+            'validate_journal':module.validate_journal,'hashlib':module.hashlib,
+            'digest':Mock(return_value=record['new_sha256']),'assert_openclaw_migration_scope':Mock(),
+            'read_owned_openclaw_unit':Mock(return_value=(module.service_unit('openclaw').encode(),(1,2,3,4)))}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<budget-journal-reader>', 'exec'), ns)
+        info=SimpleNamespace(st_uid=0,st_mode=stat.S_IFREG|0o600)
+        with patch.object(Path,'exists',return_value=True),patch.object(Path,'is_symlink',return_value=False),patch.object(Path,'lstat',return_value=info),patch.object(Path,'read_text',return_value=json.dumps(value)) as read:
+            self.assertEqual(value,ns['read_journal']())
+            ns['assert_openclaw_migration_scope'].assert_called_once()
+            value['files'][module.STATE+'/openclaw/openclaw.json']='c'*64;read.return_value=json.dumps(value)
+            with self.assertRaisesRegex(module.GuardError,'journal_file_drift'):ns['read_journal']()
+            del value['files'][module.STATE+'/openclaw/openclaw.json']
+            value['files'][record['path']]=record['new_sha256'];read.return_value=json.dumps(value)
+            ns['digest'].return_value=record['old_sha256']
+            with self.assertRaisesRegex(module.GuardError,'journal_file_drift'):ns['read_journal']()
+        value['files'][record['path']]=record['old_sha256']
+        with patch.object(Path,'exists',new=lambda p:p.name=='install-journal.json'),patch.object(Path,'is_symlink',return_value=False),patch.object(Path,'lstat',return_value=info),patch.object(Path,'read_text',return_value=json.dumps(value)):
+            with self.assertRaisesRegex(module.GuardError,'missing_openclaw_budget_target'):ns['read_journal']()
+
+    def test_actual_budget_reader_rejects_unsafe_parent_file_owner_mode_and_inode(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'read_owned_openclaw_unit')
+        parent=SimpleNamespace(st_mode=stat.S_IFDIR|0o755,st_uid=0,st_gid=0,st_dev=3,st_ino=4)
+        file=SimpleNamespace(st_mode=stat.S_IFREG|0o644,st_uid=0,st_gid=0,st_dev=1,st_ino=2,st_size=3)
+        def fake_os(file_info=file,entry=file,parent_info=parent):
+            return SimpleNamespace(O_RDONLY=1,O_DIRECTORY=2,O_NOFOLLOW=4,O_NONBLOCK=8,
+                open=Mock(side_effect=[10,11]),fstat=Mock(side_effect=[parent_info,file_info]),
+                stat=Mock(return_value=entry),read=Mock(return_value=b'abc'),close=Mock())
+        ns={'Path':Path,'SERVICES':module.SERVICES,'stat':stat,'GuardError':module.GuardError,
+            'hashlib':module.hashlib,'openclaw_budget_migration_record':module.openclaw_budget_migration_record}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<budget-unit-reader>','exec'),ns)
+        with patch.object(Path,'lstat',return_value=parent),patch.object(Path,'resolve',new=lambda self:self):
+            ns['os']=fake_os()
+            self.assertEqual((b'abc',(1,2,3,4)),ns['read_owned_openclaw_unit']())
+            self.assertEqual(1|4|8,ns['os'].open.call_args_list[1].args[1])
+            for changed in [dict(st_mode=stat.S_IFLNK|0o644),dict(st_mode=stat.S_IFIFO|0o644),dict(st_uid=985),dict(st_gid=979),dict(st_mode=stat.S_IFREG|0o666)]:
+                bad=SimpleNamespace(**{**file.__dict__,**changed});ns['os']=fake_os(file_info=bad)
+                with self.assertRaisesRegex(module.GuardError,'unsafe_openclaw_budget_file'):ns['read_owned_openclaw_unit']()
+                ns['os'].read.assert_not_called()
+            ns['os']=fake_os(entry=SimpleNamespace(**{**file.__dict__,'st_ino':99}))
+            with self.assertRaisesRegex(module.GuardError,'unsafe_openclaw_budget_file'):ns['read_owned_openclaw_unit']()
+            for changed in [dict(st_ino=99),dict(st_uid=985),dict(st_gid=979),dict(st_mode=stat.S_IFDIR|0o777)]:
+                ns['os']=fake_os(parent_info=SimpleNamespace(**{**parent.__dict__,**changed}))
+                with self.assertRaisesRegex(module.GuardError,'openclaw_budget_parent_changed'):ns['read_owned_openclaw_unit']()
+
+    def test_actual_budget_legacy_0600_is_only_exact_old_bytes_and_new_requires_0644(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n,ast.FunctionDef) and n.name=='read_owned_openclaw_unit')
+        parent=SimpleNamespace(st_mode=stat.S_IFDIR|0o755,st_uid=0,st_gid=0,st_dev=3,st_ino=4)
+        ns={'Path':Path,'SERVICES':module.SERVICES,'stat':stat,'GuardError':module.GuardError,
+            'hashlib':module.hashlib,'openclaw_budget_migration_record':module.openclaw_budget_migration_record}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<legacy-unit-mode>','exec'),ns)
+        for data,mode,allowed in [(module.legacy_service_unit('openclaw').encode(),0o600,True),
+                                  (module.legacy_service_unit('openclaw').encode(),0o644,True),
+                                  (module.service_unit('openclaw').encode(),0o600,False),
+                                  (module.service_unit('openclaw').encode(),0o644,True),
+                                  (b'unreviewed',0o600,False)]:
+            file=SimpleNamespace(st_mode=stat.S_IFREG|mode,st_uid=0,st_gid=0,st_dev=1,st_ino=2,st_size=len(data))
+            ns['os']=SimpleNamespace(O_RDONLY=1,O_DIRECTORY=2,O_NOFOLLOW=4,O_NONBLOCK=8,
+                open=Mock(side_effect=[10,11]),fstat=Mock(side_effect=[parent,file]),stat=Mock(return_value=file),read=Mock(return_value=data),close=Mock())
+            with patch.object(Path,'lstat',return_value=parent),patch.object(Path,'resolve',new=lambda self:self):
+                if allowed:self.assertEqual(data,ns['read_owned_openclaw_unit']()[0])
+                else:
+                    with self.assertRaisesRegex(module.GuardError,'unsafe_openclaw_budget_legacy_mode'):ns['read_owned_openclaw_unit']()
+
+    def test_actual_write_new_honors_intended_mode_before_write_and_fsync(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n,ast.FunctionDef) and n.name=='write_new')
+        events=[]
+        handle=Mock();handle.__enter__=Mock(return_value=handle);handle.__exit__=Mock(return_value=False);handle.fileno.return_value=10
+        handle.write.side_effect=lambda data:events.append(('write',data))
+        os_mock=SimpleNamespace(O_WRONLY=1,O_CREAT=2,O_EXCL=4,O_NOFOLLOW=8,
+            open=Mock(return_value=10),fdopen=Mock(return_value=handle),
+            fchmod=Mock(side_effect=lambda fd,mode:events.append(('mode',mode))),
+            fsync=Mock(side_effect=lambda fd:events.append(('fsync',fd))),chown=Mock())
+        ns={'Path':Path,'GuardError':module.GuardError,'os':os_mock}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<new-file-mode>','exec'),ns)
+        with patch.object(Path,'exists',return_value=False),patch.object(Path,'is_symlink',return_value=False):
+            for mode in [0o600,0o644]:
+                events.clear();ns['write_new']('owned-new-file',b'bytes',mode=mode)
+                self.assertEqual([('mode',mode),('write',b'bytes'),('fsync',10)],events)
+
+    def test_actual_budget_replace_is_nofollow_root_0644_and_inode_guarded(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n,ast.FunctionDef) and n.name=='replace_owned_openclaw_unit')
+        parent=SimpleNamespace(st_mode=stat.S_IFDIR|0o755,st_uid=0,st_gid=0,st_dev=3,st_ino=4)
+        entry=SimpleNamespace(st_dev=1,st_ino=2)
+        events=[];handle=Mock();handle.__enter__=Mock(return_value=handle);handle.__exit__=Mock(return_value=False);handle.fileno.return_value=11
+        def os_fixture(current=entry):
+            return SimpleNamespace(O_RDONLY=1,O_DIRECTORY=2,O_NOFOLLOW=4,O_WRONLY=8,O_CREAT=16,O_EXCL=32,
+                open=Mock(side_effect=[10,11]),fstat=Mock(return_value=parent),stat=Mock(return_value=current),fdopen=Mock(return_value=handle),
+                fchmod=Mock(side_effect=lambda fd,mode:events.append(('mode',mode))),
+                fchown=Mock(side_effect=lambda fd,uid,gid:events.append(('owner',uid,gid))),
+                fsync=Mock(side_effect=lambda fd:events.append(('fsync',fd))),
+                replace=Mock(side_effect=lambda *args,**kwargs:events.append(('replace',args,kwargs))),unlink=Mock(),close=Mock())
+        ns={'Path':Path,'SERVICES':module.SERVICES,'stat':stat,'GuardError':module.GuardError,
+            'secrets':SimpleNamespace(token_hex=Mock(return_value='fixed'))}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<budget-unit-replace>','exec'),ns)
+        with patch.object(Path,'lstat',return_value=parent):
+            ns['os']=os_fixture();ns['replace_owned_openclaw_unit'](b'bytes',(1,2,3,4))
+            self.assertEqual(8|16|32|4,ns['os'].open.call_args_list[1].args[1])
+            self.assertEqual(('mode',0o644),events[0]);self.assertEqual(('owner',0,0),events[1])
+            self.assertEqual(('fsync',11),events[2]);self.assertEqual(('fsync',10),events[-1])
+            ns['os'].replace.assert_called_once_with('quantum-openclaw-budget-fixed','quantum-openclaw.service',src_dir_fd=10,dst_dir_fd=10)
+            ns['os']=os_fixture(SimpleNamespace(st_dev=1,st_ino=99))
+            with self.assertRaisesRegex(module.GuardError,'openclaw_budget_inode_changed'):ns['replace_owned_openclaw_unit'](b'bytes',(1,2,3,4))
+            ns['os'].replace.assert_not_called()
+
+    def test_actual_apply_requires_2000mb_available_before_any_mutation(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n,ast.FunctionDef) and n.name=='apply')
+        info={'platform':'x86_64','memory_mb':3915,'available_memory_mb':1999,'disk_free_mb':27000,'ports_free':{'n8n':False},'prerequisites':{}}
+        ns={'managed_inventory':Mock(return_value=None),'inventory':Mock(return_value=info),
+            'os':SimpleNamespace(getuid=lambda:0),'GuardError':module.GuardError}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<budget-preflight>','exec'),ns)
+        with self.assertRaisesRegex(module.GuardError,'insufficient_resource_budget'):ns['apply'](True)
+        info['available_memory_mb']=2000
+        with self.assertRaisesRegex(module.GuardError,'missing_prerequisite_or_port_conflict'):ns['apply'](True)
+
+    def test_actual_serial_start_waits_each_readiness_and_rechecks_both_before_success(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'start_private_services')
+        events=[]
+        ns={'USERS':module.USERS,'SERVICES':module.SERVICES,'GuardError':module.GuardError,
+            'time':SimpleNamespace(monotonic=Mock(return_value=0),sleep=Mock()),'output':Mock(),
+            'command':Mock(side_effect=lambda argv:events.append(('start',argv[2]))),
+            'service_probe':Mock(side_effect=lambda name:events.append(('probe',name)) or True)}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<serial-start>','exec'),ns)
+        ns['start_private_services']()
+        self.assertEqual([('start','quantum-n8n.service'),('probe','n8n'),('start','quantum-openclaw.service'),('probe','openclaw'),('probe','n8n'),('probe','openclaw')],events)
+        ns['service_probe'].side_effect=[True,True,False]
+        with self.assertRaisesRegex(module.GuardError,'private_service_health_failed_final'):ns['start_private_services']()
+        ns['command'].reset_mock();ns['time'].monotonic.side_effect=[0,1,301];ns['service_probe'].side_effect=[False]
+        with self.assertRaisesRegex(module.GuardError,'private_service_health_failed_n8n'):ns['start_private_services']()
+        ns['command'].assert_called_once_with(['systemctl','start','quantum-n8n.service'])
+        ns['time'].sleep.assert_called_once_with(3)
 
     def test_resume_journal_rejects_foreign_paths_pins_and_secrets(self):
         journal = {'schema': 1, 'install_id': module.INSTALL_ID, 'pins': module.PINS,

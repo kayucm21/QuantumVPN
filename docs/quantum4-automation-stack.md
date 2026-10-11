@@ -27,6 +27,21 @@ native prebuild downloads) and the official OpenClaw package postinstall, under 
 unprivileged resource-bounded build account. No `curl | sh` or unpinned `latest`
 installation is used.
 
+The OpenClaw project manifest declares only
+`allowScripts: {"openclaw@2026.9.9": true}`. npm **11.20.0** rejects a
+project-scoped `--allow-scripts` CLI flag with `EALLOWSCRIPTS` before executing
+postinstall; that was the observed failure of the 2026-10-11 resume, not a
+postinstall/model failure. In this npm version unmatched policy entries are
+advisory, **not a global deny-all**. Lifecycle scope is therefore enforced by
+`ci --ignore-scripts`, the exact `rebuild openclaw@2026.9.9` selector and
+`--rebuild-bundle=false`. The frozen lock must contain exactly one matching
+target, `node_modules/openclaw`; additional matching nested targets are refused.
+The checksum-verified npm source's real resolver, identity matcher and selective
+rebuild class were exercised locally with mocked Arborist execution: only the
+exact registry identity is allowed/selected and bundled traversal is disabled.
+No npm installation or lifecycle script ran in this compatibility test. All
+28 offline/audited-source tests passed; this is still not service health proof.
+
 OpenClaw's published npm dependency graph contains bundled packages: they
 normally have `inBundle: true` but no separate `resolved` or `integrity` fields.
 Only two exact reviewed carriers are supported: the pinned OpenClaw archive

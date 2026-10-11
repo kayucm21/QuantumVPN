@@ -45,6 +45,12 @@ also require confirmation under Android's policy.
 - A read-only check at 00:46 UTC on 11 October confirmed the same captured
   baseline, enabled schedule and notification setting. The current public
   version remained 5.11.4; its ARM downloads were available over HTTPS.
+- Under the current repository workflow, a separate GitHub prerelease draft
+  `v5.12.0` was prepared from the same exact build commit with six verified
+  assets (two APKs, two SHA-256 files, release metadata and build provenance).
+  It remains a draft, not a public Beta update. The guarded publisher returned
+  `NotDue` without mutation; public publication remains forbidden before the
+  same 07:00 Moscow deadline and requires both production ABI APIs to agree.
 
 ## Supplementary panel
 
@@ -74,7 +80,7 @@ The next CI run passed SDK setup and exposed a second pre-existing issue:
 permission. Git executable modes are now retained for `gradlew` and tracked
 `scripts/*.sh`; their file contents are unchanged.
 
-The latest `26253d5` CI run still failed before Gradle. A read-only local
+The `26253d5` CI run still failed before Gradle. A read-only local
 verification identified two further pre-existing gate mismatches: the root
 NOTICE retained old branding while the compiled resource already used
 QuantumVPN, and the manifest requests `WAKE_LOCK` and
@@ -83,6 +89,8 @@ policy. Only the stale root NOTICE branding was synchronized; the compiled
 resource, Android permission list and staged APKs were not changed. The
 permission/performance checks were not weakened. A successful remote CI
 build is still pending and must not be inferred from the local APK checks.
+The subsequent `e6f7914` CI run also completed with a failure; the existing
+permission-policy discrepancy was not bypassed to obtain a green check.
 
 The n8n/OpenClaw installation has its own guarded installer and health/model
 checks. Its outcome is not inferred from the Android or panel test results.
@@ -98,6 +106,13 @@ prohibition on arbitrary download sources. Compressed archives are bounded and
 SHA-512-verified in a private disk file before parsing any tar metadata; this
 also covers hidden GNU/PAX header allocation regressions. Its 25 offline tests
 passed, and the release packaging/publisher checks passed 88 offline assertions.
+The next resume passed bundle verification and `npm ci`, then stopped before
+postinstall because npm 11.20 rejects project-scoped `--allow-scripts` CLI
+configuration (`EALLOWSCRIPTS`). The reviewed correction declares only the exact
+`openclaw@2026.9.9` manifest policy, rebuilds that unique top-level target and
+disables bundled-dependency rebuild traversal. All 28 tests passed, including
+an opt-in compatibility test against the SHA-512-verified npm source with
+execution mocked. A default offline run skips only that external-source audit.
 This is not yet proof of service readiness or a successful model response.
 GitHub publication is separate from the VDS production schedule and must not
 make a Beta-updater release available before its authorized deadline.

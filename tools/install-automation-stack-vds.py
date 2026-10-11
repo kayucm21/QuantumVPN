@@ -102,6 +102,23 @@ def validate_pins(pins):
         if not value.startswith('sha512-') or len(raw) != 64:
             raise GuardError('invalid_package_digest')
 
+def deployment_package(name, pins):
+    if name not in ('n8n', 'openclaw'):
+        raise GuardError('unreviewed_deployment_package')
+    package = {'name': 'quantum-' + name + '-deployment', 'version': '1.0.0', 'private': True,
+               'dependencies': {name: pins[name + '_version']}}
+    if name == 'openclaw':
+        # npm 11.20 forbids CLI allow-scripts in project-scoped installs.
+        # Policy uses the exact registry package/version, never a name wildcard.
+        package['allowScripts'] = {'openclaw@' + pins['openclaw_version']: True}
+    return package
+
+def validate_openclaw_lifecycle_target(lock, pins):
+    targets = [path for path, entry in lock['packages'].items()
+               if package_path_name(path) == 'openclaw' and entry.get('version') == pins['openclaw_version']]
+    if targets != ['node_modules/openclaw']:
+        raise GuardError('openclaw_lifecycle_target_not_unique')
+
 def package_path_name(path):
     # Only actual package roots, never package subdirectories or aliases.
     if not isinstance(path, str) or '\\' in path or str(PurePosixPath(path)) != path:
@@ -717,14 +734,24 @@ def validate_installed_bundles(stage, lock, bundles):
         if descriptor.get('name') != fact.get('name') or descriptor.get('version') != fact.get('version'):
             raise GuardError('installed_bundled_package_identity_mismatch')
 
+def prepare_openclaw_plugins(release, stage, account, common):
+    if json.loads((stage / 'package.json').read_text()) != deployment_package('openclaw', PINS):
+        raise GuardError('openclaw_lifecycle_policy_drift')
+    validate_openclaw_lifecycle_target(json.loads((stage / 'package-lock.json').read_text()), PINS)
+    # Unmatched npm policy entries are advisory in 11.20. Select only the
+    # exact top package and explicitly disable traversal of its bundled
+    # dependencies; no other dependency lifecycle is rebuilt.
+    npm_command(release, stage, account,
+                ['rebuild', 'openclaw@' + PINS['openclaw_version'], '--rebuild-bundle=false', '--foreground-scripts', *common],
+                'openclaw-plugins')
+
 def install_package(release, name, account):
     # PrivateTmp hides the host /var/tmp. Stage below the owned release root,
     # where ReadWritePaths makes this exact directory visible to the build unit.
     stage = Path(tempfile.mkdtemp(prefix='qvpn-' + name + '-build-', dir=release))
     os.chown(stage, account.pw_uid, account.pw_gid); os.chmod(stage, 0o700)
     try:
-        package = {'name': 'quantum-' + name + '-deployment', 'version': '1.0.0', 'private': True,
-                   'dependencies': {name: PINS[name + '_version']}}
+        package = deployment_package(name, PINS)
         write_new(stage / 'package.json', json.dumps(package), uid=account.pw_uid, gid=account.pw_gid)
         write_new(stage / '.npmrc', 'build-from-source=true\n', uid=account.pw_uid, gid=account.pw_gid)
         common = ['--omit=dev', '--legacy-peer-deps', '--no-audit', '--no-fund']
@@ -747,7 +774,7 @@ def install_package(release, name, account):
         else:
             # Official package postinstall contract, no dependency lifecycle scripts.
             output({'phase': 'prepare_openclaw_bundled_plugins'})
-            npm_command(release, stage, account, ['rebuild', 'openclaw', '--allow-scripts=openclaw', '--foreground-scripts', *common], name + '-plugins')
+            prepare_openclaw_plugins(release, stage, account, common)
         if validate_lock(json.loads((stage / 'package-lock.json').read_text()), name, PINS, bundles) != lock_digest:
             raise GuardError('dependency_lock_changed_after_build')
         validate_installed_bundles(stage, lock, bundles)

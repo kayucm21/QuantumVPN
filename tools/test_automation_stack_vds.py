@@ -5,6 +5,7 @@ import copy
 import gzip
 import io
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -206,6 +207,115 @@ class AutomationSafetyTests(unittest.TestCase):
         with self.assertRaises(module.GuardError):
             ns['build_n8n_native']('release', 'owned-stage', 'account', [])
         self.assertEqual(1, ns['npm_command'].call_count)
+
+    def test_exact_openclaw_manifest_policy_and_unique_lifecycle_target(self):
+        package = module.deployment_package('openclaw', module.PINS)
+        self.assertEqual({'openclaw@2026.9.9': True}, package['allowScripts'])
+        self.assertEqual({'openclaw': '2026.9.9'}, package['dependencies'])
+        self.assertNotIn('allowScripts', module.deployment_package('n8n', module.PINS))
+        with self.assertRaisesRegex(module.GuardError, 'unreviewed_deployment_package'):
+            module.deployment_package('foreign', module.PINS)
+        entry = {'version': '2026.9.9'}
+        lock = {'packages': {'': {}, 'node_modules/openclaw': entry}}
+        module.validate_openclaw_lifecycle_target(lock, module.PINS)
+        for packages in [{}, {'node_modules/npm/node_modules/openclaw': entry},
+                         {**lock['packages'], 'node_modules/npm/node_modules/openclaw': entry}]:
+            with self.assertRaisesRegex(module.GuardError, 'openclaw_lifecycle_target_not_unique'):
+                module.validate_openclaw_lifecycle_target({'packages': packages}, module.PINS)
+
+    def test_actual_openclaw_rebuild_selects_exact_target_without_bundle_or_cli_policy(self):
+        node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'prepare_openclaw_plugins')
+        ns = {'json': json, 'PINS': module.PINS, 'GuardError': module.GuardError,
+              'deployment_package': module.deployment_package, 'validate_openclaw_lifecycle_target': module.validate_openclaw_lifecycle_target,
+              'npm_command': Mock()}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<openclaw-plugins>', 'exec'), ns)
+        package = module.deployment_package('openclaw', module.PINS)
+        lock = {'packages': {'node_modules/openclaw': {'version': '2026.9.9'}}}
+        def descriptor(path): return json.dumps(package if path.name == 'package.json' else lock)
+        common = ['--omit=dev', '--legacy-peer-deps', '--no-audit', '--no-fund']
+        with patch.object(Path, 'read_text', descriptor):
+            ns['prepare_openclaw_plugins']('release', Path('owned-stage'), 'account', common)
+        ns['npm_command'].assert_called_once_with('release', Path('owned-stage'), 'account',
+            ['rebuild', 'openclaw@2026.9.9', '--rebuild-bundle=false', '--foreground-scripts', *common], 'openclaw-plugins')
+        ns['npm_command'].reset_mock()
+        package['allowScripts'] = {'openclaw': True}
+        with patch.object(Path, 'read_text', descriptor):
+            with self.assertRaisesRegex(module.GuardError, 'openclaw_lifecycle_policy_drift'):
+                ns['prepare_openclaw_plugins']('release', Path('owned-stage'), 'account', common)
+        ns['npm_command'].assert_not_called()
+        package = module.deployment_package('openclaw', module.PINS)
+        lock['packages']['node_modules/npm/node_modules/openclaw'] = {'version': '2026.9.9'}
+        with patch.object(Path, 'read_text', descriptor):
+            with self.assertRaisesRegex(module.GuardError, 'openclaw_lifecycle_target_not_unique'):
+                ns['prepare_openclaw_plugins']('release', Path('owned-stage'), 'account', common)
+        ns['npm_command'].assert_not_called()
+
+    def test_actual_verified_npm_1120_resolver_matcher_and_rebuild_selection(self):
+        # Optional primary-source compatibility audit: set only to the already
+        # SHA-512-verified npm archive/runtime. No install/lifecycle/network call.
+        npm_root = os.environ.get('QVPN_NPM_AUDIT_ROOT')
+        node_exe = os.environ.get('QVPN_NODE_AUDIT_EXE')
+        if not npm_root or not node_exe:
+            self.skipTest('verified npm source audit runtime not provided')
+        script = r'''
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const Module = require('node:module');
+const npmRoot = process.argv[1];
+assert.equal(require(path.join(npmRoot, 'package.json')).version, '11.20.0');
+const originalLoad = Module._load;
+const manifest = JSON.parse(process.argv[2]);
+const matcher = require(path.join(npmRoot, 'node_modules/@npmcli/arborist/lib/script-allowed.js'));
+const definitions = require(path.join(npmRoot, 'node_modules/@npmcli/config/lib/definitions/definitions.js'));
+const flatOptions = {};
+definitions['rebuild-bundle'].flatten('rebuild-bundle', {'rebuild-bundle':false}, flatOptions);
+assert.equal(flatOptions.rebuildBundle,false);
+const top = {name:'openclaw', package:{version:'2026.9.9'}, version:'2026.9.9',
+ resolved:'https://registry.npmjs.org/openclaw/-/openclaw-2026.9.9.tgz', inBundle:false};
+let selected, options;
+class Arb {
+ constructor(opts) { options = opts; }
+ async loadActual() { return {inventory:{filter(fn) { return [top,
+ {...top, package:{version:'2026.9.8'}, version:'2026.9.8', resolved:'https://registry.npmjs.org/openclaw/-/openclaw-2026.9.8.tgz'},
+ {...top, inBundle:true}, {name:'undici', package:{version:'8.10.2'}}].filter(fn); }}}; }
+ async rebuild(opts) { selected = opts.nodes; }
+}
+Module._load = function(id, parent, main) {
+ if (id === '@npmcli/package-json') return {normalize:async()=>({content:manifest})};
+ if (id === '@npmcli/arborist') return Arb;
+ if (id === '../arborist-cmd.js') return class {static params=[]; constructor(npm){this.npm=npm;}};
+ if (id === '../utils/strict-allow-scripts-preflight.js') return async()=>{};
+ if (id === '../utils/check-allow-scripts.js') return async()=>[];
+ if (id === 'proc-log') return {log:{warn(){},silly(){}},output:{standard(){}}};
+ return originalLoad.call(this,id,parent,main);
+};
+(async()=>{
+ const resolve = require(path.join(npmRoot,'lib/utils/resolve-allow-scripts.js'));
+ const npm = {global:false,prefix:'/owned-stage',globalDir:'/unused',config:{get(){return undefined;}},
+ flatOptions};
+ const resolved = await resolve(npm);
+ assert.equal(resolved.source,'package.json');
+ assert.deepEqual(resolved.policy,{'openclaw@2026.9.9':true});
+ assert.equal(matcher(top,resolved.policy),true);
+ for (const foreign of [{...top,inBundle:true},
+  {...top,resolved:'https://registry.npmjs.org/openclaw/-/openclaw-2026.9.8.tgz'},
+  {...top,resolved:'https://registry.npmjs.org/foreign/-/foreign-2026.9.9.tgz'},
+  {...top,isRegistryDependency:false,resolved:'https://foreign.example/openclaw-2026.9.9.tgz'},
+  {...top,resolved:null,edgesIn:[]}]) assert.notEqual(matcher(foreign,resolved.policy),true);
+ await assert.rejects(resolve({...npm,config:{get(key,source){return source==='cli'?'openclaw':undefined;}}}),{code:'EALLOWSCRIPTS'});
+ const Rebuild = require(path.join(npmRoot,'lib/commands/rebuild.js'));
+ await new Rebuild(npm).exec(['openclaw@2026.9.9']);
+ assert.deepEqual(selected,[top]);
+ assert.equal(options.rebuildBundle,false);
+ assert.deepEqual(options.allowScripts,manifest.allowScripts);
+ process.stdout.write('VerifiedNpmPolicyAndSelectiveRebuildPassed');
+})().catch(error=>{process.stderr.write(error.name+': '+error.message);process.exitCode=1;});
+'''
+        result = subprocess.run([node_exe, '-e', script, npm_root,
+                                 json.dumps(module.deployment_package('openclaw', module.PINS))],
+                                capture_output=True, text=True, timeout=30, check=False)
+        self.assertEqual(0, result.returncode, result.stderr[-2000:])
+        self.assertEqual('VerifiedNpmPolicyAndSelectiveRebuildPassed', result.stdout)
 
     def test_actual_native_versions_match_frozen_dependency_graph(self):
         node = next(n for n in ast.parse(module.REMOTE).body if isinstance(n, ast.FunctionDef) and n.name == 'validate_native_versions')

@@ -60,6 +60,8 @@ class VerificationGuardsTests(unittest.TestCase):
         self.assertNotIn("_create_unverified_context", self.module.REMOTE_SOURCE)
         self.assertEqual(self.module.EXPECTED_BUILD, "4.0.0-foundation.1")
         self.assertEqual(self.remote["BUILD"], self.module.EXPECTED_BUILD)
+        self.assertEqual(self.remote["VERSION"], self.module.EXPECTED_VERSION)
+        self.assertEqual(self.remote["VERSION_CODE"], self.module.EXPECTED_CODE)
         self.assertNotIn("detector404", self.module.REMOTE_SOURCE)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
@@ -75,11 +77,11 @@ class VerificationGuardsTests(unittest.TestCase):
 
     def test_artifact_url_accepts_only_exact_tls_origin_and_abi_name(self):
         for abi in self.module.ABIS:
-            expected = f"{self.module.PUBLIC}/downloads/5.11.4/QuantumVPN-5.11.4-operator-debug-{abi}.apk"
+            expected = f"{self.module.PUBLIC}/downloads/5.12.0/QuantumVPN-5.12.0-operator-debug-{abi}.apk"
             self.assertEqual(self.module.artifact_url(expected, abi), expected)
             for value in (expected.replace("https:", "http:"), expected.replace("pecaocek.ignorelist.com", "evil.example"),
                           expected + "?token=private", expected + "#fragment", expected.replace(":8443", ""),
-                          expected.replace("5.11.4", "5.11.5"), "https://user:password@pecaocek.ignorelist.com:8443/private"):
+                          expected.replace("5.12.0", "5.12.1"), "https://user:password@pecaocek.ignorelist.com:8443/private"):
                 with self.subTest(value=value), self.assertRaises(self.module.CheckFailed):
                     self.module.artifact_url(value, abi)
 

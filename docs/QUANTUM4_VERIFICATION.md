@@ -51,6 +51,15 @@ also require confirmation under Android's policy.
   It remains a draft, not a public Beta update. The guarded publisher returned
   `NotDue` without mutation; public publication remains forbidden before the
   same 07:00 Moscow deadline and requires both production ABI APIs to agree.
+- After the deadline, read-only inspection at 10:16 UTC confirmed that the
+  existing VDS worker had promoted 5.12.0 / 501200099 and disabled the completed
+  schedule. SQLite integrity and package/signature identity checks passed.
+  Both legacy and updater APIs for both ARM ABIs returned the new version;
+  all four HTTPS APK HEAD checks returned 200 with the expected byte sizes.
+  The guarded GitHub publisher then returned `Published` for the separate
+  prerelease after checking both production ABI metadata, exact APK hashes,
+  all six mirrored assets, and the same unchanged source commit. No phone
+  notification delivery or completed installation is inferred from this.
 
 ## Supplementary panel
 
@@ -66,6 +75,10 @@ also require confirmation under Android's policy.
   this does not establish the client's latency or video throughput.
 - Roadmap status: three scoped verified features, five partial, 92 planned.
   See the authenticated Product → Quantum 4.0 ledger for the exact scope.
+- The post-publication Network-center verifier now pins the deployed 5.12.0
+  identity rather than the previous 5.11.4 baseline. All 17 offline verifier
+  tests passed; the independent live check passed for both panels, routing
+  catalog/forms, both ABI APIs/downloads, MTProto and diagnostic WARP.
 
 ## Separate remaining gates
 
@@ -136,6 +149,16 @@ guards; service starts are serialized with bounded readiness windows and a
 final simultaneous health check. This change is not itself live health proof.
 All 43 offline/audited-source installer tests passed for the resource recovery;
 the generated exact legacy unit SHA-256 matched the stopped VDS unit.
+The single approved recovery worker `ad472fa4bfff4b6a9e61ec0ec5d69ee8`
+then completed with exit status zero. An independent read-only inventory
+validated the immutable installation manifest and both active managed services.
+n8n database readiness/editor and OpenClaw UI returned HTTP 200, with listeners
+restricted to loopback; protected configuration remained unchanged. This is
+service readiness, not evidence of a successful model answer. Around 1.7 GiB
+remained available after cold start. The heavier CLI model smoke was withheld:
+the existing Ollama model-loading peak plus its CLI allowance exceeded that
+headroom. No existing Ollama, VPN, panel or proxy service was stopped, and no
+additional runtime limits were raised to force a successful test.
 GitHub publication is separate from the VDS production schedule and must not
 make a Beta-updater release available before its authorized deadline.
 

@@ -4,6 +4,27 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AuroraUiPolicyTest {
+    @Test fun compactHomeReservesHeightForButtonsWithoutShrinkingTouchTargets() {
+        assertEquals(136f, homePowerDiameterDp(480f, true), .001f)
+        assertEquals(150f, homePowerDiameterDp(500f, true), .001f)
+        assertEquals(200f, homePowerDiameterDp(640f, true), .001f)
+        assertEquals(224f, homePowerDiameterDp(800f, false), .001f)
+        assertEquals(136f, homePowerDiameterDp(Float.NaN, true), .001f)
+        assertEquals(136f, homePowerDiameterDp(Float.POSITIVE_INFINITY, true), .001f)
+        assertEquals(212f, homePowerDiameterDp(480f, true, 1.6f), .001f)
+        assertEquals(265f, homePowerDiameterDp(480f, true, 2f), .001f)
+        assertEquals(360f, homePowerDiameterDp(480f, true, 3f), .001f)
+        assertEquals(136f, homePowerDiameterDp(480f, true, Float.NaN), .001f)
+    }
+
+    @Test fun trafficRateUsesDecimalMegabitsAndNeverShowsOldTrafficWhileDisconnected() {
+        assertEquals("8,0 Мбит/с", liveTrafficRateText(1_000_000, true))
+        assertEquals("0,0 Мбит/с", liveTrafficRateText(-1, true))
+        assertEquals("—", liveTrafficRateText(1_000_000, false))
+        assertEquals("Нет замера", liveTrafficRateText(null, true))
+        assertEquals("—", liveTrafficRateText(null, false))
+        assertFalse(liveTrafficRateText(Long.MAX_VALUE, true).contains("-"))
+    }
     @Test fun quantum2CaptionReplacesOnlyTheLegacyDefault() {
         assertEquals("Больше свободы. Ближе к людям.", quantum2Tagline("HORIZON GLASS · 2026"))
         assertEquals("Больше свободы. Ближе к людям.", quantum2Tagline(""))

@@ -622,6 +622,7 @@ fun QuantumVpnAppV2(
                         dnsStatus = if (!connected) "С VPN" else if (state.settings.adBlockEnabled) "Фильтр" else "Активен",
                         routingLabel = routingLabel,
                         displayName = state.settings.displayName,
+                        onStatistics = { tab = V2Tab.Statistics },
                     )
                     V2Tab.Servers -> V2Servers(
                         groups, mainGroup?.tag, mainGroup?.selected, offlinePings, onSelectServer,
@@ -911,10 +912,12 @@ internal fun V2Home(
     dnsStatus: String = if (connected) "Активен" else "С VPN",
     routingLabel: String = "—",
     displayName: String = "",
+    onStatistics: () -> Unit = {},
 ) {
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     val hapticsEnabled = LocalAuroraHaptics.current
     val resources = LocalAppResources.current
+    var detailsOpen by rememberSaveable { mutableStateOf(false) }
     val stateText = when {
         busy -> if (connected) "Меняем соединение…" else "Устанавливаем соединение…"
         connected -> "Соединение защищено"
@@ -930,15 +933,34 @@ internal fun V2Home(
         busy -> "Подключение…"
         else -> "Подключиться"
     }
+    if (detailsOpen) {
+        AlertDialog(
+            onDismissRequest = { detailsOpen = false },
+            title = { Text("Детали соединения") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(stateText)
+                    Text("Сервер: $server")
+                    Text("Пинг: ${serverPingText(ping, pingMeasured)}", modifier = Modifier.testTag("home-ping"))
+                    Text("DNS: $dnsStatus", modifier = Modifier.testTag("home-dns"))
+                    Text("Правила: $routingLabel", modifier = Modifier.testTag("home-routing"))
+                    val sample = stats.samples.lastOrNull()?.takeIf { stats.statusStreamActive }
+                    Text("↓ ${liveTrafficRateText(sample?.downloadBytesPerSecond, connected)} · ↑ ${liveTrafficRateText(sample?.uploadBytesPerSecond, connected)}")
+                    Text("Это текущий трафик приложения, не предел скорости VPN. Проверка с VDS не измеряет путь до вашего телефона.", fontSize = 12.sp)
+                    TextButton(onClick = { detailsOpen = false; onSettings() }) { Text("Настройки соединения") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { detailsOpen = false; onStatistics() }) { Text("Статистика") } },
+            dismissButton = { TextButton(onClick = { detailsOpen = false }) { Text("Закрыть") } },
+        )
+    }
     V2AuroraBackdrop(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact = maxHeight < 680.dp || resources?.compactHome == true
         val largeText = LocalDensity.current.fontScale > 1.2f
         // Keep the three main actions above navigation on ordinary short screens.
         // Large accessibility text can scroll without shrinking any text or touch target.
-        val powerDiameter = if (largeText) 212.dp else if (compact) {
-            (maxHeight - 386.dp).coerceIn(136.dp, 186.dp)
-        } else 224.dp
+        val powerDiameter = homePowerDiameterDp(maxHeight.value, compact, LocalDensity.current.fontScale).dp
         Column(
             Modifier
                 .fillMaxSize()
@@ -948,11 +970,14 @@ internal fun V2Home(
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 AuroraQMark2026(Modifier.size(38.dp), Aurora.Mint)
-                AuroraHomeWordmark2026(
-                    name = resources?.text("brand_name", policy.branding.name) ?: policy.branding.name,
-                    textColor = Aurora.Text, accent = Aurora.Mint,
-                    modifier = Modifier.weight(1f).padding(start = 8.dp, end = 8.dp),
-                )
+                Column(Modifier.weight(1f).padding(start = 8.dp, end = 8.dp)) {
+                    AuroraHomeWordmark2026(
+                        name = resources?.text("brand_name", policy.branding.name) ?: policy.branding.name,
+                        textColor = Aurora.Text, accent = Aurora.Mint,
+                    )
+                    if (compact) Text(auroraHomeGreeting(displayName), color = Aurora.Muted, fontSize = 12.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.testTag("home-greeting"))
+                }
                 Surface(
                     onClick = onNotifications,
                     shape = CircleShape,
@@ -967,7 +992,7 @@ internal fun V2Home(
                 }
             }
             Spacer(Modifier.height(if (compact) 4.dp else 12.dp))
-            Text(auroraHomeGreeting(displayName), color = Aurora.Text,
+            if (!compact) Text(auroraHomeGreeting(displayName), color = Aurora.Text,
                 fontSize = if (compact) 20.sp else 23.sp, fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center, modifier = Modifier.testTag("home-greeting").semantics { heading() })
             Spacer(Modifier.height(if (compact) 2.dp else 8.dp))
@@ -1005,19 +1030,8 @@ internal fun V2Home(
                 }
             }
             Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
-            Surface(
-                onClick = onSettings, color = Aurora.Glass.copy(alpha = .93f), shape = RoundedCornerShape(18.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .55f)),
-                modifier = Modifier.fillMaxWidth().testTag("home-protection"),
-            ) {
-                Row(Modifier.heightIn(min = if (compact) 52.dp else 64.dp)
-                    .padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    AuroraHomeShield2026(stateColor, connected, Modifier.size(32.dp))
-                    Text(stateText, color = Aurora.Text, fontSize = 14.sp,
-                        modifier = Modifier.weight(1f).padding(start = 12.dp, end = 6.dp))
-                    Text("›", color = Aurora.Muted, fontSize = 24.sp)
-                }
-            }
+            if (!compact) Text(stateText, color = stateColor, fontSize = 13.sp,
+                textAlign = TextAlign.Center, modifier = Modifier.testTag("home-protection"))
             Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
             Surface(onClick = onCards, color = Color.Transparent, shape = RoundedCornerShape(18.dp),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFC5A7FF).copy(alpha = .55f)),
@@ -1035,11 +1049,12 @@ internal fun V2Home(
                 }
             }
             Spacer(Modifier.height(8.dp))
-            // Secondary diagnostics stay available below the main actions, with real values only.
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                V2HomePill("⌁", "Пинг", serverPingText(ping, pingMeasured), Modifier.weight(1f).testTag("home-ping"), if (ping != null) Aurora.Mint else Aurora.Muted, onServers)
-                V2HomePill("●", "DNS", dnsStatus, Modifier.weight(1f).testTag("home-dns"), if (connected) Aurora.Mint else Aurora.Muted, onSettings)
-                V2HomePill("≡", "Правила", routingLabel, Modifier.weight(1f).testTag("home-routing"), Aurora.Violet, onSettings)
+            // Details stay reachable without making the home a dashboard to scroll through.
+            TextButton(onClick = { detailsOpen = true }, modifier = Modifier.fillMaxWidth()
+                .heightIn(min = 48.dp).testTag("home-details")) {
+                Text(if (connected) "⌁ ${serverPingText(ping, pingMeasured)} · Детали соединения"
+                    else if (busy) stateText else "Не подключено · Детали соединения",
+                    color = stateColor, fontSize = 12.sp)
             }
             if (!hasProfile) {
                 Text("Загружаем встроенный список серверов…", color = Color(0xFF5CF5D0), fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))

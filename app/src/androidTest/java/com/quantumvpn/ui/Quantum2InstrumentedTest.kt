@@ -114,10 +114,45 @@ class Quantum2InstrumentedTest {
         compose.onAllNodesWithText("42 мс").assertCountEquals(0)
         compose.onAllNodesWithText("58 мс").assertCountEquals(0)
         compose.onAllNodesWithText("ГОТОВ").assertCountEquals(0)
-        compose.onNodeWithTag("home-ping").assertExists()
-        compose.onNodeWithTag("home-dns").assertExists()
-        compose.onNodeWithTag("home-routing").assertExists()
+        compose.onNodeWithTag("home-ping").assertDoesNotExist()
+        compose.onNodeWithTag("home-details").performScrollTo().performClick()
+        compose.onNodeWithTag("home-ping").assertTextEquals("Пинг: Проверка…")
+        compose.onNodeWithTag("home-dns").assertTextEquals("DNS: С VPN")
+        compose.onNodeWithTag("home-routing").assertTextEquals("Правила: —")
         compose.onAllNodes(hasText("Проверка…", substring = true)).assertCountEquals(1)
+    }
+
+    @Test fun compactHomeDetailsOpenOnlyOnRequestAndNavigateToStatistics() {
+        var statistics = 0
+        compose.setContent {
+            QuantumVpnTheme {
+                V2Home(ClientPolicy(), true, false, true, "Тестовый сервер", 70, true, 60,
+                    VpnSessionStats(samples = listOf(com.quantumvpn.vpn.TrafficSample(500_000, 1_000_000)), statusStreamActive = true),
+                    onConnect = {}, onServers = {}, onSettings = {}, onCards = {},
+                    reduceMotion = true, onNotifications = {}, onStatistics = { statistics++ })
+            }
+        }
+        compose.onNodeWithTag("home-dns").assertDoesNotExist()
+        compose.onNodeWithTag("home-details").performScrollTo().performClick()
+        compose.onNodeWithTag("home-ping").assertTextEquals("Пинг: 70 мс")
+        compose.onNodeWithText("↓ 8,0 Мбит/с · ↑ 4,0 Мбит/с").assertExists()
+        compose.onNode(hasText("Статистика") and hasClickAction()).performClick()
+        compose.runOnIdle { assertEquals(1, statistics) }
+        compose.onNodeWithTag("home-dns").assertDoesNotExist()
+    }
+
+    @Test fun pausedTrafficStreamDoesNotShowAnOldRateAsCurrent() {
+        compose.setContent {
+            QuantumVpnTheme {
+                V2Home(ClientPolicy(), true, false, true, "Тестовый сервер", null, true, 60,
+                    VpnSessionStats(samples = listOf(com.quantumvpn.vpn.TrafficSample(500_000, 1_000_000)), statusStreamActive = false),
+                    onConnect = {}, onServers = {}, onSettings = {}, onCards = {},
+                    reduceMotion = true, onNotifications = {})
+            }
+        }
+        compose.onNodeWithTag("home-details").performScrollTo().performClick()
+        compose.onNodeWithText("↓ Нет замера · ↑ Нет замера").assertExists()
+        compose.onAllNodes(hasText("8,0 Мбит/с", substring = true)).assertCountEquals(0)
     }
 
     @Test fun personalizedHomeRoutesPowerServerProtectionNotificationsAndGames() {
@@ -138,8 +173,9 @@ class Quantum2InstrumentedTest {
         compose.onNodeWithContentDescription("Открыть уведомления").performClick()
         compose.onNodeWithTag("home-connect").performClick()
         compose.onNodeWithTag("home-server").performScrollTo().performClick()
-        compose.onNodeWithTag("home-protection").performScrollTo().performClick()
         compose.onNodeWithTag("home-games").performScrollTo().performClick()
+        compose.onNodeWithTag("home-details").performScrollTo().performClick()
+        compose.onNodeWithText("Настройки соединения").performClick()
         compose.runOnIdle {
             assertEquals(1, connects)
             assertEquals(1, servers)

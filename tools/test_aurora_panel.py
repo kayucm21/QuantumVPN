@@ -94,6 +94,27 @@ class PanelHTML(HTMLParser):
 
 
 class AuroraPanelTests(unittest.TestCase):
+    def test_resource_percent_display_rejects_unknown_invalid_and_injected_values(self):
+        show = self.panel.resource_percent_text
+        for value in (None, "0", "<script>", True, -1, 101, float('nan'), float('inf'), 10 ** 400):
+            with self.subTest(value=str(value)[:20]):
+                self.assertEqual(show(value), "—")
+        self.assertEqual(show(0), "0%")
+        self.assertEqual(show(41.5), "41.5%")
+
+    def test_overview_missing_resources_are_unknown_and_explain_measurement_source(self):
+        with mock.patch.object(self.panel, "cached_service_status", return_value={}):
+            page = self.page("dashboard")
+        self.assertIn("CPU — · RAM — · диск —", page)
+        self.assertIn("Speedtest на VDS измеряет канал", page)
+        self.assertIn("не скорость загрузки", page)
+        document = PanelHTML(page)
+        secondary = [node for node in document.nodes if node['tag'] == 'details' and
+                     node['attrs'].get('class') == 'overview-secondary']
+        self.assertEqual(len(secondary), 1)
+        self.assertNotIn('open', secondary[0]['attrs'])
+        self.assertIn('Пользователи · игры · релизы · аудит', secondary[0]['text'])
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
@@ -153,11 +174,11 @@ class AuroraPanelTests(unittest.TestCase):
             return response.read().decode("utf-8")
 
     def test_build_and_tab_registry_cover_existing_routes(self):
-        self.assertEqual(self.panel.PANEL_BUILD, "4.0.0-foundation.1")
+        self.assertEqual(self.panel.PANEL_BUILD, "5.0.0-preview.1")
         self.assertEqual(set(self.panel.PAGE_TITLES), LEGACY_TABS | {"network", "roadmap"})
-        self.assertEqual(len(self.panel.AURORA_NAV_GROUPS), 5)
+        self.assertEqual(len(self.panel.AURORA_NAV_GROUPS), 6)
         self.assertEqual([group[1] for group in self.panel.AURORA_NAV_GROUPS],
-                         ["Обзор", "Сеть", "Клиенты", "Продукт", "Система"])
+                         ["Обзор", "Сеть", "Пользователи", "Релизы", "Игры", "Система"])
         members = [tab for group in self.panel.AURORA_NAV_GROUPS for tab in group[3]]
         self.assertEqual(len(members), len(set(members)))
         self.assertEqual(set(members), set(self.panel.PAGE_TITLES))
@@ -173,7 +194,7 @@ class AuroraPanelTests(unittest.TestCase):
                 primary_html, subnav_html = self.panel.aurora_navigation(tab, "owner")
                 primary = PanelHTML(primary_html).tab_links()
                 subnav = PanelHTML(subnav_html).tab_links()
-                self.assertEqual(len(primary), 5)
+                self.assertEqual(len(primary), 6)
                 self.assertEqual(sum(PanelHTML.active(node) for _, node in primary), 1)
                 current = [name for name, node in subnav if PanelHTML.active(node)]
                 if subnav:
@@ -195,7 +216,7 @@ class AuroraPanelTests(unittest.TestCase):
         with mock.patch.object(self.panel, "rospanel_users", side_effect=AssertionError("Roadmap must not query fleet")):
             with urlopen(Request(self.base + "/operator?tab=roadmap&q=%D0%BD%D0%B0%D0%B2%D0%B8%D0%B3%D0%B0%D1%86%D0%B8%D0%B8", headers=headers), timeout=10) as response:
                 page = response.read().decode("utf-8")
-        self.assertIn("Пять групп навигации", page)
+        self.assertIn("Шесть групп навигации", page)
         self.assertIn("Это план развития", page)
         document = PanelHTML(page)
         self.assertTrue(all(node["attrs"].get("method") == "get" for node in document.nodes if node["tag"] == "form"))

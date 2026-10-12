@@ -55,9 +55,9 @@ except ModuleNotFoundError:
     from tools import quantumvpn_resources as resources
 
 try:
-    from quantumvpn_aurora import aurora_css, aurora_script
+    from quantumvpn_aurora import aurora_css, aurora_script, resource_percent_text
 except ModuleNotFoundError:
-    from tools.quantumvpn_aurora import aurora_css, aurora_script
+    from tools.quantumvpn_aurora import aurora_css, aurora_script, resource_percent_text
 
 try:
     import quantumvpn_four_catalog as four_catalog
@@ -161,7 +161,7 @@ RESERVE_PROFILE_URI_FILE = os.environ.get(
     "QV_RESERVE_PROFILE_URI_FILE", "/etc/quantumvpn-reserve/trojan-uri"
 )
 REQUIRED_RELEASE_ABIS = ("arm64-v8a", "armeabi-v7a")
-PANEL_BUILD = "4.0.0-foundation.1"
+PANEL_BUILD = "5.0.0-preview.1"
 VERSION = "5.10.12"
 VERSION_CODE = 137
 DEFAULT_NOTE = "QuantumVPN 5.10.12: стабильный игровой стол, виртуальный банк Q-coins, черновики маршрутизации и публичная страница состояния."
@@ -212,8 +212,9 @@ PAGE_TITLES = {
 AURORA_NAV_GROUPS = (
     ("overview", "Обзор", "▦", ("dashboard", "fleet", "quality")),
     ("network", "Сеть", "⇄", ("network", "latency", "automation", "routing", "ai")),
-    ("clients", "Клиенты", "♧", ("users", "service", "devices", "support", "donations")),
-    ("product", "Продукт", "◇", ("release", "resources", "features", "branding", "cards", "roadmap")),
+    ("clients", "Пользователи", "♧", ("users", "service", "devices", "support", "donations")),
+    ("product", "Релизы", "◇", ("release", "resources", "features", "branding", "roadmap")),
+    ("games", "Игры", "♠", ("cards",)),
     ("system", "Система", "⚙", ("integrations", "incidents", "logs", "reports", "audit", "security", "admins")),
 )
 
@@ -4412,7 +4413,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
     return f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <meta name=referrer content=same-origin><title>{html.escape(page_title)} · Quantum Control</title><style>{css()}{control_reference_css()}{aurora_css()}{scan_dialog_css()}{catalog_dialog_css()}{proxy_links.links_css()}</style><body class=aurora-panel data-ui=Aurora2><main><div class=panel-shell>
       <aside class=sidebar>
-      <div class=sidebar-brand>Quantum Control<span>4.0 · FOUNDATION</span></div>
+      <div class=sidebar-brand>Quantum Control<span>5.0 · PREVIEW</span></div>
       {navigation}
       <a class=aurora-logout href="/operator/logout">Выход из панели</a>
       </aside>
@@ -4421,7 +4422,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
       <div class=hero-top><form class=control-search method=get action=/operator><input type=hidden name=tab value=users><input name=q aria-label="Поиск пользователей" placeholder="Поиск по пользователям…" value="{html.escape(q)}"><button>Найти</button></form><span id=system-pill class=system-pill>{'● Есть открытые инциденты' if report['open_incidents'] else '● Открытых инцидентов нет'}</span><span class=top-date>{time.strftime('%d.%m.%Y %H:%M', time.gmtime(time.time()+10800))}<br><small>МСК · {html.escape(actor_role)}</small></span></div>
     </section>
     {flash_html}
-    <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>4.0 · Foundation</small></header>
+    <header class=reference-heading><div><h1>{html.escape(page_title)}</h1><p>{html.escape(page_description)}</p></div><small>5.0 · Preview</small></header>
     {subnavigation}
     {quality_html}
     <section {show('quality')}>{next_quality_html}{next_history_html}</section>
@@ -4437,17 +4438,17 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
         <div class="card reference-kpi"><i>△</i><div><span>Открытые события</span><b>{report['open_incidents']}</b><small>Требуют внимания</small></div></div>
       </div>
       <div class=reference-top>
-        <section class=card><div class=section-head><h2>Карта нод и текущая нагрузка</h2><a href="/operator?tab=latency">Управлять нодами →</a></div>{reference_world_map(map_nodes) if section == 'dashboard' else ''}<div class=reference-map-note>Показаны {len(map_nodes)} нод из реестра · CPU {status.get('cpu_load_pct', 0)}% · RAM {status.get('memory_used_pct', 0)}% · диск {status.get('disk_used_pct', 0)}%. Пинг измеряется с VDS; это не пинг телефона пользователя.</div><div class=reference-node-strip>{''.join(f"<span>{html.escape(node['label'])}<b class={'ok' if node['state'] == 'ok' else 'off'}>{html.escape(node['measurement'])}</b></span>" for node in map_nodes) or reference_targets}</div></section>
+        <section class=card><div class=section-head><h2>Карта нод и текущая нагрузка</h2><a href="/operator?tab=latency">Управлять нодами →</a></div>{reference_world_map(map_nodes) if section == 'dashboard' else ''}<div class=reference-map-note>Показаны {len(map_nodes)} нод из реестра · CPU {resource_percent_text(status.get('cpu_load_pct'))} · RAM {resource_percent_text(status.get('memory_used_pct'))} · диск {resource_percent_text(status.get('disk_used_pct'))}. Пинг измеряется с VDS; это не пинг телефона пользователя.</div><div class=reference-node-strip>{''.join(f"<span>{html.escape(node['label'])}<b class={'ok' if node['state'] == 'ok' else 'off'}>{html.escape(node['measurement'])}</b></span>" for node in map_nodes) or reference_targets}</div><details class=measurement-help><summary>Откуда берутся цифры?</summary><p>Карта показывает зарегистрированные ноды. CPU, RAM и диск — ресурсы VDS. TCP‑пинг — время проверки с сервера, не скорость загрузки.</p><p>Speedtest на VDS измеряет канал до сервера тестирования. Он не проверяет VPN, Wi‑Fi, мобильную сеть или YouTube на телефоне. По нему нельзя объявлять протокол медленным или исправленным.</p><a href="/operator?tab=quality">Открыть контроль качества →</a></details></section>
         <section class=card><div class=section-head><h2>Последние события</h2><a href="/operator?tab=incidents">Все события →</a></div><div class=event-list>{event_timeline}</div></section>
       </div>
-      <div class=reference-bottom>
+      <details class=overview-secondary><summary>Пользователи · игры · релизы · аудит</summary><div class=reference-bottom>
         <section class=card><div class=section-head><h2>Пользователи</h2><a href="/operator?tab=users">Все пользователи →</a></div><div class=reference-table><table><thead><tr><th>Пользователь</th><th>Статус</th><th>Трафик</th><th>Активность</th></tr></thead><tbody>{reference_users}</tbody></table></div></section>
         <section class=card><div class=section-head><h2>Игровая активность</h2></div><div class=reference-game><strong>{sum(int(r[2] or 0) for r in (card_wallet_rows or [])):,} Q-coins</strong><p>Баланс {len(card_wallet_rows or [])} игроков в текущей выборке</p><p>Виртуальные очки · без вывода</p><a class=button href="/operator?tab=cards">Игры и награды →</a></div><div class=stat>Открытые столы<b>{len(card_rows or [])}</b></div><p class=muted>Управляйте доступом к игре и начисляйте награды игрокам.</p></section>
         <div class=reference-stack>
           <section class=card><div class=section-head><h2>Релизы</h2><a href="/operator?tab=release">Все →</a></div><p><span class="badge ok">Стабильный</span> <b>{html.escape(s.get('app_version', VERSION))}</b></p><p class=muted>Охват: {html.escape(s.get('rollout_percent','100'))}%</p><p><span class=pill>По расписанию</span> {html.escape(s.get('scheduled_app_version') or '—')}</p><a href="/operator?tab=release">Управлять публикацией →</a></section>
           <section class=card><div class=section-head><h2>Последние записи аудита</h2><a href="/operator?tab=audit">Все →</a></div>{reference_audit}</section>
         </div>
-      </div>
+      </div></details>
     </section>
 
     <section class=card {show('fleet')}>

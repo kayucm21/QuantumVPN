@@ -6,7 +6,8 @@ when the checkout path contains Cyrillic. Existing mappings are never reused.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$JavaHome,
-    [switch]$BuildApks
+    [switch]$BuildApks,
+    [ValidateRange(512,2048)][int]$JvmHeapMegabytes = 900
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -163,7 +164,7 @@ try {
     $env:PATH = (Join-Path $env:JAVA_HOME 'bin') + ';' + $priorPath
     Set-Location -LiteralPath $mappedRoot
     $common = @('--no-daemon', '--max-workers=1', '-Pkotlin.compiler.execution.strategy=in-process',
-        '-Dorg.gradle.jvmargs=-Xmx900m -Dfile.encoding=UTF-8 -XX:+UseSerialGC -Xss512k')
+        "-Dorg.gradle.jvmargs=-Xmx${JvmHeapMegabytes}m -Dfile.encoding=UTF-8 -XX:+UseSerialGC -Xss512k -XX:ActiveProcessorCount=2")
     & .\gradlew.bat @common ':app-updater:testDebugUnitTest' ':app:testDebugUnitTest' ':app:compileDebugAndroidTestKotlin'
     if ($LASTEXITCODE -ne 0) { throw 'Local verification failed; APKs were not built' }
     Assert-BuildContext -Drive $ownedDrive -Root $projectRoot -Commit $sourceCommit

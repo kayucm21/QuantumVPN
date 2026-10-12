@@ -5,6 +5,20 @@ Append ``aurora_css()`` after the panel's current CSS and include
 script element.  This module has no network, storage, routing, or policy logic.
 """
 
+import math
+
+
+def resource_percent_text(value) -> str:
+    """Missing/invalid server measurements are not a healthy zero percent."""
+    if type(value) not in (int, float):
+        return "—"
+    try:
+        if not math.isfinite(value) or not 0 <= value <= 100:
+            return "—"
+    except (ValueError, OverflowError):
+        return "—"
+    return f"{value:g}%"
+
 
 def aurora_css() -> str:
     """Return an opaque navy and mint theme for the existing panel markup."""
@@ -75,7 +89,7 @@ def aurora_css() -> str:
     .nav-group summary:before { color: #6bc9b7; }
     .nav-group a { padding: 8px 12px 8px 27px !important; font-size: 11px !important; }
     .aurora-group.active > a { color: #9cf7df; background: #14382f; border-color: #2b6b5c; box-shadow: inset 3px 0 #64e9cd; font-weight: 650; }
-    /* Five primary sections keep the rail short. Secondary destinations stay
+    /* Six primary sections keep the rail short. Secondary destinations stay
        in one local row, not a growing vertical stack on narrow displays. */
     .aurora-subnav { display: flex; flex-wrap: nowrap; gap: 7px; list-style: none; margin: -5px 0 20px; padding: 0 0 14px; border-bottom: 1px solid #26394d; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #37516c transparent; }
     .aurora-subnav a, .panel-content .aurora-subnav a { display: inline-flex; flex: 0 0 auto; align-items: center; min-height: 32px; padding: 6px 10px; color: #adc5d6; background: #112239; border: 1px solid #2b425a; border-radius: 5px; font-size: 11px; text-decoration: none; white-space: nowrap; }
@@ -146,6 +160,10 @@ def aurora_css() -> str:
     .reference-map { min-height: 245px; background: #0e1c2d; border-radius: 7px; }
     .reference-map svg { display: block; width: 100%; height: auto; max-height: 260px; }
     .reference-map-note { margin-top: 12px; color: #a0b4c9; font-size: 10px; line-height: 1.6; text-align: left; }
+    .measurement-help { margin-top: 7px; font-size: 11px; }
+    .measurement-help p { margin: 7px 0; color: var(--muted); }
+    .overview-secondary > summary { min-height: 44px; padding: 10px 13px; color: #bad8e9; background: #101e30; border: 1px solid var(--line); border-radius: 8px; }
+    .overview-secondary[open] > summary { margin-bottom: 12px; }
     .reference-node-strip { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
     .reference-node-strip span { padding: 5px 8px; background: #0b1929; border: 1px solid #294256; border-radius: 5px; color: #bfd2e1; font-size: 10px; }
     .reference-node-strip b { margin-left: 7px; color: var(--ok); }

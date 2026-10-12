@@ -1,0 +1,26 @@
+{
+  "version_name": "5.13.0",
+  "version_code": 501300099,
+  "git_commit": "aeb85812f58cd9ca8c807bf17ab5257e788bdf7a",
+  "dirty_at_build": false,
+  "core_commit": "e8f6936480b7fa9738911e3e7fc2ec0d8a634a88",
+  "local_build": true,
+  "physical_device_verification": "pending",
+  "ui_verification": "instrumented-compiled; device execution unavailable",
+  "publish_at_epoch": 1791814132,
+  "artifacts": [
+    {
+      "abi": "arm64-v8a",
+      "apk_file": "QuantumVPN-5.13.0-operator-debug-arm64-v8a.apk",
+      "apk_sha256": "4032c9f9fc759e452d97ce638bddcd7e9feb0482818410f16b4a40ac3f63d85e",
+      "apk_size": 140424180
+    },
+    {
+      "abi": "armeabi-v7a",
+      "apk_file": "QuantumVPN-5.13.0-operator-debug-armeabi-v7a.apk",
+      "apk_sha256": "231ad76e887d0cca57ad4e3f754d21f3e6b23a65d593a9e844ad25d411f495b8",
+      "apk_size": 130879488
+    }
+  ],
+  "publication_mode": "immediate"
+}

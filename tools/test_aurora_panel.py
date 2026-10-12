@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import threading
@@ -13,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -175,7 +176,7 @@ class AuroraPanelTests(unittest.TestCase):
 
     def test_build_and_tab_registry_cover_existing_routes(self):
         self.assertEqual(self.panel.PANEL_BUILD, "5.0.0-preview.1")
-        self.assertEqual(set(self.panel.PAGE_TITLES), LEGACY_TABS | {"network", "roadmap"})
+        self.assertEqual(set(self.panel.PAGE_TITLES), LEGACY_TABS | {"network", "roadmap", "server"})
         self.assertEqual(len(self.panel.AURORA_NAV_GROUPS), 6)
         self.assertEqual([group[1] for group in self.panel.AURORA_NAV_GROUPS],
                          ["Обзор", "Сеть", "Пользователи", "Релизы", "Игры", "Система"])
@@ -186,6 +187,48 @@ class AuroraPanelTests(unittest.TestCase):
             with self.subTest(tab=tab):
                 self.assertTrue(title[0])
                 self.assertNotEqual(title[0], "Quantum Control")
+
+    def test_node_console_has_live_routes_authentication_roles_and_csrf(self):
+        snapshot = {"schema": 1, "generated_at": int(time.time()), "public_address": "150.241.96.191",
+                    "resources": {"load_1m_pct": 12, "memory_used_pct": 24, "disk_used_pct": 30},
+                    "traffic": {"rx_mbps": None, "tx_mbps": None}, "tcp": {"congestion_control": "bbr",
+                    "qdisc": {"available": True, "kinds": ["fq"], "rate_caps_bps": []}}, "listener_count": 3,
+                    "ports": [], "config_available": False, "ports_truncated": False,
+                    "diagnostic": {"probed": True, "findings": ["xray_config_unavailable"]}}
+        with mock.patch.object(self.panel.node_console, "cached_snapshot", return_value=snapshot) as read, \
+                mock.patch.object(self.panel.node_console, "snapshot", return_value=snapshot) as probe:
+            with self.assertRaises(HTTPError) as denied:
+                urlopen(self.base + "/operator/server/status", timeout=10)
+            self.assertEqual(denied.exception.code, 401)
+            denied.exception.close()
+            read.assert_not_called()
+            with urlopen(Request(self.base + "/operator/server", headers=self.owner_headers), timeout=10) as response:
+                page = response.read().decode("utf-8")
+            self.assertIn('href="/operator?tab=service"', page)
+            token = re.search(r'csrf="([a-f0-9]{64})"', page).group(1)
+            headers = {**self.owner_headers, "Origin": self.panel.PUBLIC_BASE}
+            for body, origin in ((urlencode({"csrf": "bad"}), self.panel.PUBLIC_BASE),
+                                  (urlencode({"csrf": token}), "https://evil.invalid"),
+                                  (urlencode({"csrf": token, "command": "restart"}), self.panel.PUBLIC_BASE)):
+                with self.subTest(body=body), self.assertRaises(HTTPError) as rejected:
+                    urlopen(Request(self.base + "/operator/server/diagnostics", data=body.encode(),
+                                    headers={**headers, "Origin": origin}), timeout=10)
+                self.assertEqual(rejected.exception.code, 403)
+                rejected.exception.close()
+            probe.assert_not_called()
+            with urlopen(Request(self.base + "/operator/server/diagnostics", data=urlencode({"csrf": token}).encode(), headers=headers), timeout=10) as response:
+                self.assertEqual(json.load(response), snapshot)
+            probe.assert_called_once_with(probe=True)
+            viewer = {"Authorization": "Basic " + base64.b64encode(b"aurora-viewer:aurora-viewer-password").decode()}
+            with urlopen(Request(self.base + "/operator/server", headers=viewer), timeout=10) as response:
+                self.assertNotIn('<button id=node-diagnose>', response.read().decode("utf-8"))
+            with self.assertRaises(HTTPError) as rejected:
+                urlopen(Request(self.base + "/operator/server/diagnostics", data=b"csrf=x", headers=viewer), timeout=10)
+            self.assertEqual(rejected.exception.code, 403)
+            rejected.exception.close()
+        with closing(self.panel.conn()) as db:
+            audit = db.execute("select detail from audit where action='node:diagnostics' order by ts desc limit 1").fetchone()
+        self.assertEqual(json.loads(audit[0]), {"ports": 0, "findings": ["xray_config_unavailable"]})
 
     def test_navigation_preserves_all_routes_and_marks_selected_group(self):
         reachable = set()
@@ -202,7 +245,7 @@ class AuroraPanelTests(unittest.TestCase):
                 else:
                     self.assertIn((tab, True), [(name, PanelHTML.active(node)) for name, node in primary])
                 reachable.update(name for name, _ in primary + subnav)
-        self.assertEqual(reachable, LEGACY_TABS | {"network", "roadmap"})
+        self.assertEqual(reachable, LEGACY_TABS | {"network", "roadmap", "server"})
 
     def test_roadmap_is_authenticated_read_only_bounded_and_searchable(self):
         with urlopen(self.base + "/operator?tab=roadmap", timeout=10) as denied:

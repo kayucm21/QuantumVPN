@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-KNOWLEDGE_VERSION = "2026-10-09.1"
+KNOWLEDGE_VERSION = "2026-10-12.1"
 MAX_COMPACT_CHARS = 800
 MAX_HUMAN_CHARS = 1600
 STAGES = ("dns", "tcp", "tls")
@@ -76,6 +76,7 @@ def context(snapshot, *, now=None) -> dict:
     validation = _section(backup, "validation")
     automation = _section(snapshot, "automation")
     policy = _section(automation, "policy")
+    learning = _section(snapshot, "learning")
     mtproto = _section(snapshot, "mtproto")
     probe = _section(mtproto, "last_probe")
     stages = {}
@@ -122,6 +123,10 @@ def context(snapshot, *, now=None) -> dict:
             "reserve": {"fresh_reported_candidates": candidates, "authority": "independent_registered_node_guard"},
             "controls": {"enabled": _flag(automation.get("enabled")), "policy": controls,
                          "allowed_action_types": sorted(allowed)},
+            "learning": {**{key: _number(learning.get(key), 400, integer=True)
+                             for key in ("records_reviewed", "measured_changes", "verified_changes", "rollbacks", "manual_overrides")},
+                         "sample_limited": _flag(learning.get("sample_limited")),
+                         "authority": "historical_observation_only", "model_training_claimed": False},
             "mtproto": {"nonce_confirmed": probe.get("ok") is True and probe.get("telegram_nonce_confirmed") is True,
                         "account_login_proven": False, "client_direct_vpn_comparison": "not_provided"},
             "backup": {"exists": _flag(backup.get("exists")), "age_seconds": age,
@@ -190,3 +195,12 @@ def safe_human_text(snapshot, *, now=None) -> str:
                   "Автодействия — только allowlist, cooldown и CAS-откат. Shell, произвольное удаление и ротация каждые мс запрещены."])
     # All lines are fixed or use bounded numeric/enumerated fields only.
     return "\n".join(lines[:])[:MAX_HUMAN_CHARS]
+
+
+def performance_knowledge() -> str:
+    """Fixed guidance for diagnosing speed without treating RTT as throughput."""
+    return ("Скорость: сравни direct/VPN на одном устройстве и сети, по одному профилю. "
+            "VDS Speedtest не доказывает скорость протокола. Проверь tc-лимиты, CPU, MTU, "
+            "потери/retransmit и TCP/UDP путь; не меняй всё одновременно. "
+            "Журнал: applied не равно успеху; verified и rollback — отдельные измеренные исходы. "
+            "История помогает анализу, но не разрешает новые действия и не обучает веса модели.")

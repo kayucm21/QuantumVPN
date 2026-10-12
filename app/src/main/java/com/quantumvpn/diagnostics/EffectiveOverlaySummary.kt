@@ -12,6 +12,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 
 /** A structural view of the effective runtime overlay. It never copies endpoints or match values. */
@@ -88,6 +89,9 @@ object EffectiveOverlaySummary {
                 ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
                 .orEmpty()
         }
+        val transports = listOf("outbounds", "endpoints").flatMap { key ->
+            (root[key] as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
+        }.filter { it.string("type") !in NON_TRANSPORT_TYPES }
 
         return JsonConfig.format(
             buildJsonObject {
@@ -121,8 +125,36 @@ object EffectiveOverlaySummary {
                         put("operator_numeric", carrierNumeric.orEmpty())
                         put("tls_fragment_outbound_count", countTlsFragmentOutbounds(root))
                         put("route_tls_fragment", hasRouteTlsFragment(route))
+                        put("udp_fragment_outbound_count", transports.count { it.boolean("udp_fragment") == true })
                     },
                 )
+                // Configuration-only throughput evidence. No host, tag, credentials,
+                // routing match values or arbitrary transport options are copied.
+                put("performance", buildJsonObject {
+                    put("tun_stack", safeToken(tun?.string("stack")))
+                    put("route_total_rule_count", (route?.get("rules") as? JsonArray)?.size ?: 0)
+                    put("transports", buildJsonArray {
+                        transports.forEach { outbound ->
+                            add(buildJsonObject {
+                                put("type", safeToken(outbound.string("type")))
+                                put("transport", safeToken((outbound["transport"] as? JsonObject)?.string("type")))
+                                put("udp_fragment", outbound.boolean("udp_fragment") == true)
+                                put("tcp_fast_open", outbound.boolean("tcp_fast_open") == true)
+                                put("multiplex", (outbound["multiplex"] as? JsonObject)?.boolean("enabled") == true)
+                                val tls = outbound["tls"] as? JsonObject
+                                put("tls_fragment", tls?.boolean("fragment") == true)
+                                put("tls_record_fragment", tls?.boolean("record_fragment") == true)
+                                safeDelayMillis(tls?.string("fragment_fallback_delay"))?.let {
+                                    put("tls_fragment_fallback_delay_ms", it)
+                                }
+                                listOf("up_mbps", "down_mbps").forEach { name ->
+                                    (outbound[name] as? JsonPrimitive)?.intOrNull
+                                        ?.takeIf { it in 1..100_000 }?.let { put(name, it) }
+                                }
+                            })
+                        }
+                    })
+                })
                 put(
                     "dns_servers",
                     buildJsonArray {
@@ -287,6 +319,13 @@ object EffectiveOverlaySummary {
     private fun safeToken(value: String?): String =
         value?.takeIf { TOKEN.matches(it) }?.take(40) ?: "unknown"
 
+    private fun safeDelayMillis(value: String?): Long? {
+        val match = value?.let { DELAY.matchEntire(it) } ?: return null
+        val count = match.groupValues[1].toLongOrNull() ?: return null
+        val millis = if (match.groupValues[2] == "s") count * 1000 else count
+        return millis.takeIf { it in 0..60_000 }
+    }
+
     private val CLASH_LISTENER_FIELDS = setOf(
         "external_controller",
         "external_controller_tls",
@@ -295,6 +334,8 @@ object EffectiveOverlaySummary {
     )
 
     private val TOKEN = Regex("[a-zA-Z0-9_-]+")
+    private val DELAY = Regex("([0-9]{1,5})(ms|s)")
+    private val NON_TRANSPORT_TYPES = setOf("direct", "block", "dns", "selector", "urltest")
     private const val MANAGED_PREFIX = "zapret-"
     private const val BOOTSTRAP_TAG = "zapret-bootstrap-lkg"
     private const val ANDROID_DNS_TAG = "zapret-android-dns"

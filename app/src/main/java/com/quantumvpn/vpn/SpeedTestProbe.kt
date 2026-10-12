@@ -5,7 +5,10 @@ import java.net.URL
 import java.util.concurrent.ThreadLocalRandom
 import javax.net.ssl.HttpsURLConnection
 import kotlin.math.sqrt
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
@@ -32,7 +35,7 @@ object SpeedTestProbe {
             val vpnLabel = if (vpnActive) "VPN вкл" else "VPN выкл"
             val latencySamples = mutableListOf<Long>()
             repeat(3) {
-                runCatching { probeLatency() }.getOrNull()?.let(latencySamples::add)
+                attempt { probeLatency() }?.let(latencySamples::add)
             }
             val latency = latencySamples.minOrNull() ?: 0L
             val jitter = if (latencySamples.size >= 2) {
@@ -44,13 +47,12 @@ object SpeedTestProbe {
             var lastError: String? = null
             var download: Pair<Long, Long>? = null
             for (url in DOWNLOAD_URLS) {
-                download = runCatching { probeDownload(url) }.getOrElse {
+                download = attempt(onFailure = {
                     lastError = it.message ?: it.javaClass.simpleName
-                    null
-                }
+                }) { probeDownload(url) }
                 if (download != null) break
             }
-            val uploadKbps = runCatching { probeUpload() }.getOrDefault(0L)
+            val uploadKbps = attempt { probeUpload() } ?: 0L
             if (download == null) {
                 return@withTimeout SpeedTestResult(
                     downloadKbps = 0,
@@ -63,14 +65,14 @@ object SpeedTestProbe {
                 )
             }
             val (kbps, bytes) = download
-            val upPart = if (uploadKbps > 0) " · ↑ ${formatRate(uploadKbps)}" else ""
+            val upPart = if (uploadKbps > 0) " · ↑ ${formatRate(uploadKbps)}" else " · ↑ недоступно"
             val jitPart = if (jitter > 0) " · jitter ${jitter} ms" else ""
             SpeedTestResult(
                 downloadKbps = kbps,
                 uploadKbps = uploadKbps,
                 latencyMillis = latency,
                 jitterMillis = jitter,
-                ok = bytes > 8_000,
+                ok = bytes >= MIN_MEASUREMENT_BYTES,
                 detail = "$vpnLabel · ↓ ${formatRate(kbps)}$upPart · TTFB ${latency} ms$jitPart",
                 vpnActive = vpnActive,
                 downloadMbps = kbps / 1000.0,
@@ -88,7 +90,7 @@ object SpeedTestProbe {
             connection.instanceFollowRedirects = false
             connection.useCaches = false
             connection.requestMethod = "HEAD"
-            connection.setRequestProperty("User-Agent", "QuantumVPN-SpeedTest/5.4")
+            connection.setRequestProperty("User-Agent", USER_AGENT)
             val code = connection.responseCode
             if (code !in 200..399) error("HTTP $code")
             return (System.nanoTime() - started) / 1_000_000
@@ -97,39 +99,41 @@ object SpeedTestProbe {
         }
     }
 
-    private fun probeDownload(url: String): Pair<Long, Long> {
-        val started = System.nanoTime()
+    private suspend fun probeDownload(url: String): Pair<Long, Long> {
         val connection = URL(url).openConnection() as HttpsURLConnection
         try {
             connection.connectTimeout = 6_000
-            connection.readTimeout = 14_000
+            connection.readTimeout = 4_000
             connection.instanceFollowRedirects = true
             connection.useCaches = false
-            connection.setRequestProperty("User-Agent", "QuantumVPN-SpeedTest/5.4")
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            connection.setRequestProperty("Accept-Encoding", "identity")
             val code = connection.responseCode
             if (code !in 200..299) error("HTTP $code")
-            val bytes = connection.inputStream.use { input ->
+            // HTTP headers have arrived: DNS, TCP and TLS setup belong to TTFB,
+            // not to sustained transfer speed. Small files used to mix both.
+            val sample = connection.inputStream.use { input ->
+                val started = System.nanoTime()
                 var total = 0L
-                val buffer = ByteArray(32 * 1024)
-                val deadline = System.nanoTime() + READ_BUDGET_NS
+                val buffer = ByteArray(64 * 1024)
+                val deadline = started + READ_BUDGET_NS
                 while (System.nanoTime() < deadline) {
+                    coroutineContext.ensureActive()
                     val read = input.read(buffer)
                     if (read <= 0) break
                     total += read
                     if (total >= MAX_BYTES) break
                 }
-                total
+                SpeedTransferMeasurement(total, System.nanoTime() - started)
             }
-            val elapsedMs = ((System.nanoTime() - started) / 1_000_000).coerceAtLeast(1)
-            val kbps = (bytes * 8L) / elapsedMs
-            return kbps to bytes
+            require(sample.bytes >= MIN_MEASUREMENT_BYTES) { "Слишком короткий ответ для замера скорости" }
+            return sample.kbps to sample.bytes
         } finally {
             connection.disconnect()
         }
     }
 
-    private fun probeUpload(): Long {
-        val started = System.nanoTime()
+    private suspend fun probeUpload(): Long {
         val connection = URL(UPLOAD_URL).openConnection() as HttpsURLConnection
         try {
             connection.connectTimeout = 6_000
@@ -139,26 +143,27 @@ object SpeedTestProbe {
             connection.instanceFollowRedirects = false
             connection.useCaches = false
             connection.setRequestProperty("Content-Type", "application/octet-stream")
-            connection.setRequestProperty("User-Agent", "QuantumVPN-SpeedTest/5.4")
+            connection.setRequestProperty("User-Agent", USER_AGENT)
             connection.setFixedLengthStreamingMode(UPLOAD_BYTES.toInt())
-            connection.outputStream.use { out -> writeRandom(out, UPLOAD_BYTES) }
+            val payload = ByteArray(64 * 1024).also { ThreadLocalRandom.current().nextBytes(it) }
+            // Obtaining the stream completes connection setup before timing.
+            val output = connection.outputStream
+            val started = System.nanoTime()
+            output.use { out -> writePayload(out, UPLOAD_BYTES, payload) }
             val code = connection.responseCode
-            // Cloudflare may return 200 or 400; count bytes sent either way if connection held.
-            if (code !in 200..499) error("HTTP $code")
-            val elapsedMs = ((System.nanoTime() - started) / 1_000_000).coerceAtLeast(1)
-            return (UPLOAD_BYTES * 8L) / elapsedMs
+            // A rejection is not a completed upload and must not become a speed.
+            if (code !in 200..299) error("HTTP $code")
+            return SpeedTransferMeasurement(UPLOAD_BYTES, System.nanoTime() - started).kbps
         } finally {
             connection.disconnect()
         }
     }
 
-    private fun writeRandom(out: OutputStream, size: Long) {
-        val buffer = ByteArray(16 * 1024)
+    private suspend fun writePayload(out: OutputStream, size: Long, buffer: ByteArray) {
         var left = size
-        val rnd = ThreadLocalRandom.current()
         while (left > 0) {
+            coroutineContext.ensureActive()
             val n = minOf(left, buffer.size.toLong()).toInt()
-            rnd.nextBytes(buffer)
             out.write(buffer, 0, n)
             left -= n
         }
@@ -170,15 +175,33 @@ object SpeedTestProbe {
         else -> "$kbps kbps"
     }
 
+    private inline fun <T> attempt(onFailure: (Throwable) -> Unit = {}, block: () -> T): T? =
+        try {
+            block()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            onFailure(error)
+            null
+        }
+
     private val DOWNLOAD_URLS = listOf(
-        "https://speed.cloudflare.com/__down?bytes=2500000",
-        "https://proof.ovh.net/files/1Mb.dat",
-        "https://www.gstatic.com/generate_204",
+        "https://speed.cloudflare.com/__down?bytes=32000000",
+        "https://proof.ovh.net/files/10Mb.dat",
     )
     private const val LATENCY_URL = "https://www.gstatic.com/generate_204"
     private const val UPLOAD_URL = "https://speed.cloudflare.com/__up"
-    private const val UPLOAD_BYTES = 512L * 1024L
-    private const val MAX_BYTES = 4L * 1024L * 1024L
-    private const val TIMEOUT_MS = 28_000L
-    private const val READ_BUDGET_NS = 12_000_000_000L
+    private const val UPLOAD_BYTES = 4L * 1024L * 1024L
+    private const val MAX_BYTES = 32_000_000L
+    private const val MIN_MEASUREMENT_BYTES = 64L * 1024L
+    private const val TIMEOUT_MS = 45_000L
+    private const val READ_BUDGET_NS = 8_000_000_000L
+    private const val USER_AGENT = "QuantumVPN-SpeedTest/6"
+}
+
+/** Rate over body transfer time, retaining precision for fast subsecond samples. */
+internal data class SpeedTransferMeasurement(val bytes: Long, val elapsedNanos: Long) {
+    val kbps: Long
+        get() = if (bytes <= 0 || elapsedNanos <= 0) 0L else
+            (bytes.toDouble() * 8_000_000.0 / elapsedNanos).toLong()
 }

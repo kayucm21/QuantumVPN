@@ -48,6 +48,20 @@ class DeploymentGuardsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.deployer.build_config(self.args("--expected-old-quality-sha256", "b" * 64))
 
+    def test_node_console_upload_is_explicit_pinned_and_preserves_other_companions(self):
+        default, payloads = self.deployer.build_config(self.args())
+        self.assertFalse(default["with_node_console"])
+        self.assertNotIn(self.deployer.NODE_CONSOLE_MODULE, payloads)
+        self.assertIn(self.deployer.NODE_CONSOLE_MODULE, default["companions"])
+        config, payloads = self.deployer.build_config(self.args("--with-node-console", "--expected-old-node-console-sha256", "b" * 64))
+        self.assertTrue(config["with_node_console"])
+        self.assertEqual(config["files"][self.deployer.NODE_CONSOLE_MODULE]["old_sha256"], "b" * 64)
+        self.assertIn(self.deployer.NODE_CONSOLE_MODULE, payloads)
+        self.assertNotIn(self.deployer.NODE_CONSOLE_MODULE, config["companions"])
+        self.assertIn("quantumvpn_resources.py", config["companions"])
+        with self.assertRaisesRegex(ValueError, "requires --with-node-console"):
+            self.deployer.build_config(self.args("--expected-old-node-console-sha256", "b" * 64))
+
     def test_bot_operations_is_explicit_fixed_allowlist_and_volatile_ledger(self):
         config, payloads = self.deployer.build_config(self.args("--with-bot-operations", "--expected-old-ai-knowledge-sha256", "b" * 64))
         self.assertTrue(config["with_bot_operations"])

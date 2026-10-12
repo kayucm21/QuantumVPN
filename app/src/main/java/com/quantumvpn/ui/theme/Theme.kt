@@ -13,7 +13,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.sp
 import com.quantumvpn.ui.AccentColor
 
-/** Happ-inspired dark-first palette with selectable accents. */
+/** Quantum Horizon palette with selectable accents and system colour support. */
 private fun lightColors(primary: Color, primaryContainer: Color, onPrimaryContainer: Color) =
     lightColorScheme(
         primary = primary,
@@ -23,10 +23,10 @@ private fun lightColors(primary: Color, primaryContainer: Color, onPrimaryContai
         secondary = Color(0xFF3D8BFF),
         secondaryContainer = Color(0xFFD6E6FF),
         tertiary = Color(0xFF6B7C93),
-        background = Color(0xFFF4F6F8),
-        surface = Color(0xFFF4F6F8),
-        surfaceVariant = Color(0xFFE6EBEF),
-        outline = Color(0xFF9AA5B1),
+        background = Color(0xFFF2F6F7),
+        surface = Color(0xFFF9FCFD),
+        surfaceVariant = Color(0xFFE8F0F3),
+        outline = Color(0xFF7A919F),
     )
 
 private fun darkColors(primary: Color, onPrimary: Color, primaryContainer: Color, onPrimaryContainer: Color) =
@@ -38,23 +38,23 @@ private fun darkColors(primary: Color, onPrimary: Color, primaryContainer: Color
         secondary = Color(0xFF5BA0FF),
         secondaryContainer = Color(0xFF1A3A66),
         tertiary = Color(0xFFA8B4C4),
-        background = Color(0xFF040B16),
-        surface = Color(0xFF0B1E33),
-        surfaceVariant = Color(0xFF132D46),
-        surfaceContainerHighest = Color(0xFF163056),
-        outline = Color(0xFF5C6673),
+        background = Color(0xFF07121C),
+        surface = Color(0xFF122734),
+        surfaceVariant = Color(0xFF1A3443),
+        surfaceContainerHighest = Color(0xFF23404F),
+        outline = Color(0xFF6A8596),
         error = Color(0xFFFF6B7A),
     )
 
 private fun accentTriplet(accent: AccentColor): Triple<Color, Color, Color> = when (accent) {
-    AccentColor.Green -> Triple(Color(0xFF1FAF6B), Color(0xFFD5F5E5), Color(0xFF05301C))
+    AccentColor.Green -> Triple(Color(0xFF087A4B), Color(0xFFD5F5E5), Color(0xFF05301C))
     AccentColor.Blue -> Triple(Color(0xFF2F6FED), Color(0xFFD6E4FF), Color(0xFF0A1F4A))
-    AccentColor.Teal -> Triple(Color(0xFF0F9E9A), Color(0xFFCCF5F3), Color(0xFF043533))
-    AccentColor.Amber -> Triple(Color(0xFFC98500), Color(0xFFFFE8B8), Color(0xFF3A2700))
-    AccentColor.Purple -> Triple(Color(0xFF8B5CF6), Color(0xFFEDE7FF), Color(0xFF2D1B69))
-    AccentColor.Rose -> Triple(Color(0xFFF43F5E), Color(0xFFFFE4E8), Color(0xFF4C0519))
-    AccentColor.Orange -> Triple(Color(0xFFF97316), Color(0xFFFFEDD5), Color(0xFF431407))
-    AccentColor.Mint -> Triple(Color(0xFF14B8A6), Color(0xFFCCFBF1), Color(0xFF042F2E))
+    AccentColor.Teal -> Triple(Color(0xFF087C79), Color(0xFFCCF5F3), Color(0xFF043533))
+    AccentColor.Amber -> Triple(Color(0xFF966100), Color(0xFFFFE8B8), Color(0xFF3A2700))
+    AccentColor.Purple -> Triple(Color(0xFF7040CE), Color(0xFFEDE7FF), Color(0xFF2D1B69))
+    AccentColor.Rose -> Triple(Color(0xFFCC2146), Color(0xFFFFE4E8), Color(0xFF4C0519))
+    AccentColor.Orange -> Triple(Color(0xFFB94804), Color(0xFFFFEDD5), Color(0xFF431407))
+    AccentColor.Mint -> Triple(Color(0xFF087A70), Color(0xFFCCFBF1), Color(0xFF042F2E))
 }
 
 private fun darkAccent(accent: AccentColor): Triple<Color, Color, Color> = when (accent) {

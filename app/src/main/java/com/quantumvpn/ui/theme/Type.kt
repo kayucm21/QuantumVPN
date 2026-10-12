@@ -7,10 +7,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 /**
- * Distinctive type scale: serif display for brand moments, geometric sans for UI.
- * Avoids generic Inter/Roboto-default look without shipping binary font assets.
+ * A single readable family keeps connection status and settings coherent.
+ * Native font fallback respects system language and accessibility settings.
  */
-private val DisplayFamily = FontFamily.Serif
+private val DisplayFamily = FontFamily.SansSerif
 private val TextFamily = FontFamily.SansSerif
 
 val QuantumVpnTypography = Typography(

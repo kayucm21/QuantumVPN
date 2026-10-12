@@ -45,9 +45,9 @@ except ModuleNotFoundError:
     from tools import quantumvpn_community as community
 
 try:  # Script deployment keeps both modules in the same directory.
-    from quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, render_routing_conflict_preview, routing_conflict_preview, subscription_evidence, validate_backup
+    from quantumvpn_control_quality import client_quality_summary, dependency_evidence, explain_route, quality_snapshot, render_quality, render_routing_conflict_preview, routing_conflict_preview, subscription_evidence, validate_backup
 except ModuleNotFoundError:
-    from tools.quantumvpn_control_quality import dependency_evidence, explain_route, quality_snapshot, render_quality, render_routing_conflict_preview, routing_conflict_preview, subscription_evidence, validate_backup
+    from tools.quantumvpn_control_quality import client_quality_summary, dependency_evidence, explain_route, quality_snapshot, render_quality, render_routing_conflict_preview, routing_conflict_preview, subscription_evidence, validate_backup
 
 try:
     import quantumvpn_resources as resources
@@ -117,6 +117,7 @@ try:
     import quantumvpn_mtproto_tls as mtproto_tls
     import quantumvpn_webproxy as webproxy
     import quantumvpn_proxy_links as proxy_links
+    import quantumvpn_node_console as node_console
 except ModuleNotFoundError:
     from tools import quantumvpn_network_center as network_center
     from tools import quantumvpn_ai_journal as ai_journal
@@ -124,6 +125,7 @@ except ModuleNotFoundError:
     from tools import quantumvpn_mtproto_tls as mtproto_tls
     from tools import quantumvpn_webproxy as webproxy
     from tools import quantumvpn_proxy_links as proxy_links
+    from tools import quantumvpn_node_console as node_console
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -183,6 +185,7 @@ _ALERT_STATE = {"confirmation": {}, "lock": threading.Lock()}
 # return_tab values remain unchanged; grouping is a presentation-only change.
 PAGE_TITLES = {
     "network": ("Сеть · Quantum Pulse", "Ноды, DNS, маршруты, контролируемый ИИ и Telegram-прокси"),
+    "server": ("Сервер · Quantum Node", "Протоколы, порты и измеренная пропускная способность VDS"),
     "dashboard": ("Командный центр", "Состояние VPN-инфраструктуры и приоритетные события"),
     "fleet": ("Центр флота", "Приложения, подписки и доступность VDS"),
     "quality": ("КОНТРОЛЬ КАЧЕСТВА", "Подписка, маршруты и доказательства восстановления"),
@@ -211,7 +214,7 @@ PAGE_TITLES = {
 }
 AURORA_NAV_GROUPS = (
     ("overview", "Обзор", "▦", ("dashboard", "fleet", "quality")),
-    ("network", "Сеть", "⇄", ("network", "latency", "automation", "routing", "ai")),
+    ("network", "Сеть", "⇄", ("network", "server", "latency", "automation", "routing", "ai")),
     ("clients", "Пользователи", "♧", ("users", "service", "devices", "support", "donations")),
     ("product", "Релизы", "◇", ("release", "resources", "features", "branding", "roadmap")),
     ("games", "Игры", "♠", ("cards",)),
@@ -3352,6 +3355,7 @@ def ai_operations_snapshot(db, s: dict) -> dict:
             "latency_spread_ms": guard_nodes.get(target, {}).get("latency_spread_ms"),
             "reserve_candidate": guard_nodes.get(target, {}).get("status") == "healthy" and int(time.time()) - int(row[0]) <= 300,
         })
+    quality = client_quality_summary(db)
     return {
         "generated_at": int(time.time()),
         "services": {
@@ -3388,6 +3392,10 @@ def ai_operations_snapshot(db, s: dict) -> dict:
                                    "checked_at": proxy_state.get("checked_at")}},
         "nodes": nodes,
         "network_guard": network_guard.model_network_snapshot(network_guard_snapshot(db)),
+        "learning": ai_journal.learning_summary(db, now=int(time.time())),
+        "client_quality": {"available": quality.get("available"), "devices": quality.get("devices"),
+                           "groups": [{"devices": row.get("devices")} for row in quality.get("groups", [])[:400]],
+                           "limit_reached": quality.get("limit_reached")},
     }
 
 
@@ -3406,7 +3414,7 @@ def ai_prompt(snapshot: dict) -> str:
         "при ухудшении. Не давай shell-команды и не меняй порты или подписки. "
         "Ответь по-русски, максимум 900 символов, в трёх коротких частях: "
         "«Статус», «Риски», «Следующий ручной шаг». Если всё в норме, так и скажи.\n\n"
-        + ai_knowledge.compact_context(snapshot, now=int(time.time())) + "\n\n"
+        + ai_knowledge.compact_context(snapshot, now=int(time.time())) + "\n" + ai_knowledge.performance_knowledge() + "\n\n"
         + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
     )
 
@@ -3415,6 +3423,18 @@ def clean_ai_advice(value) -> str:
     text = " ".join(str(value or "").split())
     text = "".join(char for char in text if char >= " " or char in "\n\t")
     return (text or "Модель вернула пустой ответ.")[:1800]
+
+
+def ai_learning_html(db):
+    summary = ai_journal.learning_summary(db, now=int(time.time()))
+    return ("<section class=network-card><h2>Память измеренных результатов</h2><p>За 7 дней в последних 100 записях: "
+            + str(summary["measured_changes"]) + " применённых изменений · " + str(summary["verified_changes"])
+            + " подтверждений · " + str(summary["rollbacks"]) + " откатов · " + str(summary["manual_overrides"])
+            + " ручных отмен.</p><p class=muted>История передаётся ИИ только как агрегированные счётчики. "
+            "Применение не считается успехом до повторной проверки. Новое действие всегда требует свежих замеров; "
+            "эта память не обучает веса модели.</p>"
+            + ("<p class=muted>Достигнут лимит 100 записей; сводка может не охватывать все 7 дней.</p>" if summary["sample_limited"] else "")
+            + "</section>")
 
 
 def autopilot_status_snapshot(db, s):
@@ -3913,6 +3933,7 @@ def render_network_pulse(s, csrf, actor_role, view="overview", target="", source
             notice = "<p class=notice>" + html.escape(str(error)) + "</p>"
     with closing(conn()) as db:
         journal = ai_journal.read_entries(db, 12)
+        learning_html = ai_learning_html(db)
         history = [dict(zip(("revision", "actor", "state", "note"), row)) for row in db.execute(
             "select revision,actor,state,note from routing_revisions order by id desc limit 12")]
         plan = autopilot.plan_actions(network_guard_snapshot(db), parse_node_map_config(s.get("node_map_config", "")),
@@ -3935,7 +3956,7 @@ def render_network_pulse(s, csrf, actor_role, view="overview", target="", source
       <p class=network-hint>Qwen: {esc(s.get('ai_engine','ollama'))}; анализ модели — отдельно, каждые {esc(s.get('ai_interval_seconds','900'))} с. Наблюдение не зависит от ответа модели.</p>
       <a class=network-link href="/operator?tab=ai">Модель и подробные настройки →</a></section>
       <section class=network-card><h2>План по текущим замерам</h2><pre style='white-space:pre-wrap;overflow-wrap:anywhere'>{esc(ai_journal.render_entry(plan.get('journal') or {}))}</pre>
-      <p class=network-hint>Этот просмотр не применяет изменения. Без исправного резерва автопилот не выдумывает новую ноду.</p></section></div>{journal_html}'''
+      <p class=network-hint>Этот просмотр не применяет изменения. Без исправного резерва автопилот не выдумывает новую ноду.</p></section></div>{learning_html}{journal_html}'''
     proxy = mtproto.snapshot() if view == "mtproto" else {}
     proxy_status = {"active": "Работает", "inactive": "Остановлен", "not_installed": "Не установлен",
                     "configuration_unavailable": "Конфигурация недоступна"}.get(proxy.get("status"), proxy.get("status", "Нет данных"))
@@ -4012,10 +4033,13 @@ def render_network_pulse(s, csrf, actor_role, view="overview", target="", source
 def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_rows, flash="", section="dashboard", q="", device=None, donation_rows=None, donation_totals=None, admin_rows=None, actor_role="owner", card_rows=None, card_wallet_rows=None, actor_user="", control_csrf="", network_view="overview", network_target="", policy_source="production"):
     checked = lambda key: "checked" if s.get(key) == "1" else ""
     network_guard_html = ""
+    learning_html = ""
     if section in {"ai", "latency"}:
         guard_db = conn()
         try:
             network_guard_html = render_network_guard_report(network_guard_snapshot(guard_db))
+            if section == "ai":
+                learning_html = ai_learning_html(guard_db)
         finally:
             guard_db.close()
     next_quality_html = next_history_html = passkey_html = ""
@@ -4692,6 +4716,7 @@ def render_panel(s, rows, users, protocols, summary, status, audit_rows, device_
           <button class=secondary name=action value=check_ai_model>Проверить модель</button>
         </form>
         <p class=muted style="margin-top:12px">В Telegram приходят фактические проблемы и результаты действий. Повторные формулировки модели не создают новые уведомления.</p>
+        {learning_html}
       </section>
     </section>
 
@@ -5810,6 +5835,18 @@ class App(BaseHTTPRequestHandler):
         db = self.connection_db()
         s = settings(db)
 
+        if path in {"/operator/server", "/operator/server/status"}:
+            adm = self.admin(require_login_page=path == "/operator/server")
+            if not adm:
+                return
+            if rate_limited("node-read:" + adm["user"] + ":" + adm["ip"], 60):
+                return self.reply(429, '{"error":"rate_limited"}')
+            measured = node_console.cached_snapshot()
+            if path.endswith("/status"):
+                return self.reply(200, json.dumps(measured, ensure_ascii=False))
+            return self.reply(200, node_console.render(measured, csrf=self.control_csrf(adm), embedded=True,
+                                                     can_probe=role_at_least(adm.get("role", "viewer"), "operator")), "text/html; charset=utf-8")
+
         if path == "/status":
             # A public, registration-free page. It intentionally bypasses the
             # operator session path and includes no control-plane information.
@@ -6226,6 +6263,9 @@ class App(BaseHTTPRequestHandler):
             if not adm:
                 return
             tab = query.get("tab", ["dashboard"])[0]
+            if tab == "server":
+                return self.reply(200, node_console.render(node_console.cached_snapshot(), csrf=self.control_csrf(adm), embedded=True,
+                                                         can_probe=role_at_least(adm.get("role", "viewer"), "operator")), "text/html; charset=utf-8")
             q = query.get("q", [""])[0]
             flash = query.get("flash", [""])[0]
             if tab == "admins" and not role_at_least(adm.get("role", "viewer"), "owner"):
@@ -6784,6 +6824,27 @@ class App(BaseHTTPRequestHandler):
                 return self.redirect_operator("support", "Обращение не изменено. Проверьте сообщение и статус.")
         if not self.require_role(adm, "operator"):
             return
+
+        if path == "/operator/server/diagnostics":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 1024:
+                    self.close_connection = True
+                    return self.reply(413, '{"error":"request_size"}')
+                form = parse_qs(self.rfile.read(length).decode("utf-8"), max_num_fields=2)
+                expected_origin, _ = control_next.public_origin(PUBLIC_BASE)
+                if (self.headers.get("Origin", "") != expected_origin or set(form) != {"csrf"} or len(form["csrf"]) != 1
+                        or self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}
+                        or not hmac.compare_digest(self.control_csrf(adm), form["csrf"][0])):
+                    return self.reply(403, '{"error":"invalid_confirmation"}')
+                if rate_limited("node-probe:" + actor + ":" + ip, 6):
+                    return self.reply(429, '{"error":"rate_limited"}')
+                measured = node_console.snapshot(probe=True)
+                audit(db, actor, ip, "node:diagnostics", {"ports": len(measured["ports"]), "findings": measured["diagnostic"]["findings"]})
+                db.commit()
+                return self.reply(200, json.dumps(measured, ensure_ascii=False))
+            except (ValueError, UnicodeError):
+                return self.reply(400, '{"error":"invalid_request"}')
 
         if path == "/operator/routing/catalog/import":
             try:

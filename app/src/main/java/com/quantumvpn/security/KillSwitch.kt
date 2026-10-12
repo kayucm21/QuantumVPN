@@ -59,8 +59,8 @@ class KillSwitch(
                     connectivityManager.bindProcessToNetwork(null)
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (_: Exception) {
+            // Binding remains best-effort; do not expose platform details in Logcat.
         }
     }
 
@@ -70,8 +70,8 @@ class KillSwitch(
     fun unblockTraffic() {
         try {
             connectivityManager.bindProcessToNetwork(null)
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (_: Exception) {
+            // Binding remains best-effort; do not expose platform details in Logcat.
         }
     }
 }

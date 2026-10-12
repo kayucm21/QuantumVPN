@@ -244,6 +244,28 @@ class Quantum2InstrumentedTest {
         compose.onNodeWithText("↓ Загрузка · Неделя").assertExists()
     }
 
+    @Test fun statisticsDoNotShowAStoppedMeasurementAsLiveTraffic() {
+        var stats by mutableStateOf(VpnSessionStats(
+            samples = listOf(com.quantumvpn.vpn.TrafficSample(500_000, 1_000_000)),
+            statusStreamActive = true,
+        ))
+        var connected by mutableStateOf(true)
+        compose.setContent {
+            QuantumVpnTheme {
+                V2Statistics(stats, connected, emptyList(), emptyList(), DiagnosticState(), 0, false)
+            }
+        }
+        compose.onNodeWithTag("statistics-download-rate").assertTextEquals("8,0 Мбит/с")
+        compose.onNodeWithTag("statistics-upload-rate").assertTextEquals("4,0 Мбит/с")
+        compose.runOnIdle { stats = stats.copy(statusStreamActive = false) }
+        compose.onNodeWithTag("statistics-download-rate").assertTextEquals("Нет замера")
+        compose.onNodeWithTag("statistics-upload-rate").assertTextEquals("Нет замера")
+        compose.onNodeWithText("Последние замеры").assertExists()
+        compose.runOnIdle { connected = false }
+        compose.onNodeWithTag("statistics-download-rate").assertTextEquals("—")
+        compose.onNodeWithTag("statistics-upload-rate").assertTextEquals("—")
+    }
+
     @Test fun settingsHaveFourCompactGroupsAndWorkingSubpages() {
         var updateChecks = 0
         compose.setContent {

@@ -13,6 +13,47 @@ import org.junit.Test
 
 class EffectiveOverlaySummaryTest {
     @Test
+    fun `throughput summary exposes caps and fragmentation without transport secrets`() {
+        val runtime = """
+            {
+              "inbounds":[{"type":"tun","stack":"mixed","mtu":1500}],
+              "route":{"rules":[{"action":"route-options","tls_record_fragment":true}]},
+              "outbounds":[
+                {"type":"selector","tag":"private-choice","outbounds":["secret-node"]},
+                {"type":"direct"},
+                {"type":"hysteria2","tag":"secret-node","server":"private.example","password":"never-copy",
+                 "up_mbps":5,"down_mbps":10,"udp_fragment":true,
+                 "tls":{"enabled":true,"fragment":true,"record_fragment":true,"fragment_fallback_delay":"800ms"}},
+                {"type":"vless","uuid":"secret-uuid","tcp_fast_open":true,
+                 "transport":{"type":"ws","path":"/private/path","headers":{"Host":"private.example"}},
+                 "multiplex":{"enabled":true},"up_mbps":"private-cap"},
+                {"type":"trojan","tls":{"fragment_fallback_delay":"password"}}
+              ]
+            }
+        """.trimIndent()
+        val text = EffectiveOverlaySummary.create(runtime, DnsMode.Automatic)
+        val summary = JsonConfig.parse(text) as JsonObject
+        val performance = summary["performance"] as JsonObject
+        val transports = performance["transports"] as JsonArray
+        assertEquals(3, transports.size)
+        val hysteria = transports[0] as JsonObject
+        assertEquals("5", (hysteria["up_mbps"] as JsonPrimitive).content)
+        assertEquals("10", (hysteria["down_mbps"] as JsonPrimitive).content)
+        assertEquals("800", (hysteria["tls_fragment_fallback_delay_ms"] as JsonPrimitive).content)
+        assertTrue((hysteria["udp_fragment"] as JsonPrimitive).boolean)
+        val vless = transports[1] as JsonObject
+        assertEquals("ws", (vless["transport"] as JsonPrimitive).content)
+        assertTrue((vless["multiplex"] as JsonPrimitive).boolean)
+        assertTrue((vless["tcp_fast_open"] as JsonPrimitive).boolean)
+        assertFalse("up_mbps" in vless)
+        assertFalse("tls_fragment_fallback_delay_ms" in (transports[2] as JsonObject))
+        assertEquals("mixed", (performance["tun_stack"] as JsonPrimitive).content)
+        assertEquals("1", ((summary["carrier_bypass"] as JsonObject)["udp_fragment_outbound_count"] as JsonPrimitive).content)
+        listOf("private.example", "never-copy", "secret-node", "secret-uuid", "/private/path", "private-cap", "password")
+            .forEach { assertFalse("Unexpected secret: $it", it in text) }
+    }
+
+    @Test
     fun `summary contains managed structure but no endpoints matches or credentials`() {
         val runtime = """
             {

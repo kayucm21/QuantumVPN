@@ -68,8 +68,8 @@ if [[ "$(grep -l 'com.android.application' "$PROJECT_ROOT"/*/build.gradle.kts | 
     exit 1
 fi
 
-if grep -Eq 'WAKE_LOCK|REQUEST_IGNORE_BATTERY_OPTIMIZATIONS|android:process=' "$MANIFEST"; then
-    echo "Manifest contains a forbidden permission/process" >&2
+if grep -Eq 'android:process=' "$MANIFEST"; then
+    echo "Manifest must keep a single Android process" >&2
     exit 1
 fi
 
@@ -78,46 +78,14 @@ if grep -R -E 'import android\.util\.Log|\bLog\.[vdiewtf]\(|printStackTrace\(|Sy
     echo "Production source must not write credentials or runtime details to Logcat/stdout" >&2
     exit 1
 fi
-if grep -R -E 'addPrimaryClipChangedListener|setPrimaryClip\(' \
+if grep -R -F 'addPrimaryClipChangedListener' \
     "$PROJECT_ROOT/app/src/main/java" "$PROJECT_ROOT/app-updater/src/main/java"; then
-    echo "Application clipboard history/listeners are forbidden; clipboard import is read-on-action only" >&2
+    echo "Application clipboard listeners/history are forbidden; approved explicit copies are checked separately" >&2
     exit 1
 fi
-if grep -R -E 'android\.os\.PowerManager|android\.app\.AlarmManager|android\.app\.job\.JobScheduler|androidx\.work|ScheduledExecutorService|scheduleAtFixedRate|scheduleWithFixedDelay' \
-    "$PROJECT_ROOT/app/src/main/java" "$PROJECT_ROOT/app-updater/src/main/java"; then
-    echo "Production source contains an app-owned wake/alarm/job/periodic scheduler" >&2
-    exit 1
-fi
-if grep -R -F 'CommandConnections' "$PROJECT_ROOT/app/src/main/java"; then
-    echo "Production runtime must not subscribe to per-connection polling" >&2
-    exit 1
-fi
-
-python3 - "$PROJECT_ROOT" <<'PY'
-from pathlib import Path
-import sys
-
-root = Path(sys.argv[1])
-delays = []
-for source in (
-    root / "app/src/main/java",
-    root / "app-updater/src/main/java",
-    root / "network-bootstrap/src/main/java",
-):
-    for path in source.rglob("*.kt"):
-        count = path.read_text().count("delay(")
-        if count:
-            delays.append((str(path.relative_to(root)), count))
-delays.sort()
-expected = [
-    ("app/src/main/java/io/github/zapretkvn/android/ui/HomeScreen.kt", 1),
-    ("app/src/main/java/io/github/zapretkvn/android/vpn/QuantumVpnService.kt", 1),
-    ("network-bootstrap/src/main/java/io/github/zapretkvn/networkbootstrap/UnderlyingNetworkMonitor.kt", 1),
-]
-if delays != expected:
-    raise SystemExit(f"Unexpected production timer/retry surface: {delays!r}")
-print("Production delay calls are limited to visible session time, network debounce and bootstrap settle.")
-PY
+# Extended-product owners are explicit; new owners/calls still fail review.
+python3 "$PROJECT_ROOT/scripts/verify-runtime-surfaces.py" "$PROJECT_ROOT"
+python3 "$PROJECT_ROOT/scripts/test_verify_runtime_surfaces.py"
 
 python3 - "$MANIFEST" "$PROJECT_ROOT/app/src/main/res/xml/diagnostic_file_paths.xml" <<'PY'
 from pathlib import Path
@@ -134,12 +102,24 @@ if application.get(android + "usesCleartextTraffic") != "false":
     raise SystemExit("Application must explicitly reject platform cleartext traffic")
 source_permissions = {node.get(android + "name") for node in root.findall("uses-permission")}
 expected_source_permissions = {
+    "android.permission.WAKE_LOCK",
+    "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
     "android.permission.INTERNET",
     "android.permission.ACCESS_NETWORK_STATE",
+    "android.permission.ACCESS_WIFI_STATE",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.NEARBY_WIFI_DEVICES",
     "android.permission.FOREGROUND_SERVICE",
     "android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED",
     "android.permission.POST_NOTIFICATIONS",
     "android.permission.REQUEST_INSTALL_PACKAGES",
+    "android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION",
+    "android.permission.RECEIVE_BOOT_COMPLETED",
+    "android.permission.USE_BIOMETRIC",
+    "android.permission.SCHEDULE_EXACT_ALARM",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
     "android.permission.CAMERA",
     "android.permission.QUERY_ALL_PACKAGES",
 }
@@ -165,8 +145,26 @@ always_on_metadata = [
     node for node in vpn_service.findall("meta-data")
     if node.get(android + "name") == "android.net.VpnService.SUPPORTS_ALWAYS_ON"
 ]
-if len(always_on_metadata) != 1 or always_on_metadata[0].get(android + "value") != "false":
-    raise SystemExit("VPN service must explicitly opt out of Always-on")
+if len(always_on_metadata) != 1 or always_on_metadata[0].get(android + "value") != "true":
+    raise SystemExit("Current VPN service must explicitly declare its reviewed Always-on capability")
+
+# The manifest capability is not a claim of Lockdown/per-app compatibility.
+# Current system-policy checks must remain in the connection preflight.
+source_root = manifest_path.parents[2] / "src/main/java/com/quantumvpn"
+system_policy = (source_root / "vpn/VpnSystemPolicy.kt").read_text(encoding="utf-8")
+vpn_source = (source_root / "vpn/QuantumVpnService.kt").read_text(encoding="utf-8")
+if not all(value in system_policy for value in ("lockdown ->", "alwaysOn ->", "blockingMessage")) or "blockingMessage" not in vpn_source:
+    raise SystemExit("Always-on/Lockdown must retain the explicit unsupported-policy preflight")
+
+private_receivers = {
+    ".vpn.VpnScheduleAlarmReceiver", ".vpn.SubscriptionRefreshReceiver",
+    ".vpn.UpdateCheckReceiver", ".vpn.SubscriptionRefreshBootReceiver",
+    ".vpn.VpnCommandReceiver", ".updates.UpdateInstallResultReceiver",
+}
+for name in private_receivers:
+    nodes = [node for node in application.findall("receiver") if node.get(android + "name") == name]
+    if len(nodes) != 1 or nodes[0].get(android + "exported") != "false":
+        raise SystemExit(f"Internal schedule/update/command receiver must not be exported: {name}")
 
 providers = [
     node for node in application.findall("provider")
@@ -193,8 +191,11 @@ entries = {(child.tag, child.get("name"), child.get("path")) for child in childr
 expected_paths = {
     ("cache-path", "diagnostics", "diagnostics/"),
     ("cache-path", "updates", "updates/"),
+    ("cache-path", "updates-system", "updates-system/"),
+    ("cache-path", "backups", "backups/"),
+    ("external-files-path", "external_downloads", "Download/"),
 }
-if entries != expected_paths:
+if entries != expected_paths or len(children) != len(expected_paths):
     raise SystemExit(f"FileProvider paths differ from bounded cache paths: {entries!r}")
 PY
 
@@ -216,25 +217,25 @@ docs = [root / name for name in (
     "GATE8_RESULTS.md",
     "THIRD_PARTY_NOTICES.md",
 )]
-all_text = "\n".join(path.read_text() for path in docs)
+all_text = "\n".join(path.read_text(encoding="utf-8") for path in docs)
 fixture_root = root / "testdata"
 manifest = {}
-for line in (fixture_root / "SHA256SUMS").read_text().splitlines():
+for line in (fixture_root / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
     digest, relative = line.split(maxsplit=1)
     manifest[relative] = digest
 fixtures = sorted(fixture_root.rglob("*.json"))
-fixture_names = {str(path.relative_to(fixture_root)) for path in fixtures}
+fixture_names = {path.relative_to(fixture_root).as_posix() for path in fixtures}
 if fixture_names != set(manifest):
     raise SystemExit("Fixture set differs from testdata/SHA256SUMS")
 for fixture in fixtures:
     digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
-    relative = str(fixture.relative_to(fixture_root))
+    relative = fixture.relative_to(fixture_root).as_posix()
     if manifest[relative] != digest:
         raise SystemExit(f"Fixture hash mismatch: {fixture}: {digest}")
     if digest not in all_text:
         raise SystemExit(f"Fixture hash is not documented: {fixture}: {digest}")
 for doc in docs:
-    text = doc.read_text()
+    text = doc.read_text(encoding="utf-8")
     if len(re.findall(r"^```", text, re.MULTILINE)) % 2:
         raise SystemExit(f"Unbalanced Markdown fences: {doc}")
     for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
@@ -252,9 +253,8 @@ import sys
 
 root = Path(sys.argv[1])
 surfaces = {
-    "README": (root / "README.md").read_text(),
-    "UI": (root / "app/src/main/java/io/github/zapretkvn/android/ui/SettingsScreen.kt").read_text(),
-    "release notes generator": (root / "scripts/create-release-bundle.sh").read_text(),
+    "README": (root / "README.md").read_text(encoding="utf-8"),
+    "release notes generator": (root / "scripts/create-release-bundle.sh").read_text(encoding="utf-8"),
 }
 required = (
     "Известные ограничения MVP",
@@ -273,7 +273,23 @@ for surface, text in surfaces.items():
     missing = [value for value in required if value not in text]
     if missing:
         raise SystemExit(f"{surface} omits known limitations: {missing!r}")
-print("Known limitations are synchronized across UI, README and release notes.")
+ui_root = root / "app/src/main/java/com/quantumvpn/ui"
+settings = (ui_root / "SettingsScreen.kt").read_text(encoding="utf-8")
+current_ui = (ui_root / "QuantumVpnAppV2.kt").read_text(encoding="utf-8")
+disclosures = {
+    "legacy settings": (settings, ("Always-on/Lockdown:", "LocalFaq.items", "LocalThreatModel.paragraphs")),
+    "current settings/home": (current_ui, (
+        "Аварийная защита", "может ограничить доступ к сети",
+        "системный Private DNS Android не изменяется",
+        "Пароли, ссылки подписок и содержимое трафика не отправляются",
+        "Это текущий трафик приложения, не предел скорости VPN",
+    )),
+}
+for surface, (text, values) in disclosures.items():
+    missing = [value for value in values if value not in text]
+    if missing:
+        raise SystemExit(f"{surface} omits current risk disclosures: {missing!r}")
+print("Release-document limitations and current UI risk disclosures verified.")
 PY
 
 python3 - "$PROJECT_ROOT" "$CORE_COMMIT" <<'PY'
@@ -284,7 +300,7 @@ import sys
 
 root = Path(sys.argv[1])
 asset_root = root / "app/src/main/assets/rule-sets"
-manifest = json.loads((asset_root / "manifest.json").read_text())
+manifest = json.loads((asset_root / "manifest.json").read_text(encoding="utf-8"))
 if manifest.get("generated_with_core") != sys.argv[2]:
     raise SystemExit("Rule-set manifest core revision mismatch")
 expected = {"zapret-ru-domains", "zapret-ru-ip"}
@@ -299,8 +315,11 @@ for entry in entries:
 print("Packaged rule-set manifest and hashes are valid.")
 PY
 
-PERFORMANCE_POLICY="$PROJECT_ROOT/scripts/gate8-performance-summary.jq"
+# Native Windows jq cannot open a non-ASCII absolute filter path reliably.
+# Resolve the ASCII relative filter inside the already-validated project root.
+PERFORMANCE_POLICY="scripts/gate8-performance-summary.jq"
 POLICY_RESULT="$(
+    cd "$PROJECT_ROOT"
     printf '%s\n' \
         '{"scenario":"stack_current_mixed","cpu_ticks":100,"elapsed_nanos":1000000000,"pss_kb":100,"rss_kb":100,"tun_bytes":100,"throughput_mbps":100}' \
         '{"scenario":"stack_system","cpu_ticks":104,"elapsed_nanos":1040000000,"pss_kb":104,"rss_kb":104,"tun_bytes":104,"throughput_mbps":104}' \

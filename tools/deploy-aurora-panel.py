@@ -22,7 +22,8 @@ import paramiko
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_ROOT = "/opt/quantumvpn-operator"
 FOUR_SOURCES = ("quantumvpn_four_catalog.py", "quantumvpn_four_ui.py")
-COMPANIONS = ("quantumvpn_control_quality.py", "quantumvpn_resources.py", *FOUR_SOURCES)
+NODE_CONSOLE_MODULE = "quantumvpn_node_console.py"
+COMPANIONS = ("quantumvpn_control_quality.py", "quantumvpn_resources.py", NODE_CONSOLE_MODULE, *FOUR_SOURCES)
 COMMUNITY_MODULES = ("quantumvpn_durak.py", "quantumvpn_community.py", "quantumvpn_control_next.py")
 BOT_STATUS_MODULE = "quantumvpn_bot_status.py"
 BOT_OPERATIONS_MODULES = ("quantumvpn_bot_operations.py", "quantumvpn_ai_knowledge.py", "quantumvpn_proxy_monitor.py")
@@ -44,6 +45,7 @@ sys.dont_write_bytecode = True
 ROOT = Path('/opt/quantumvpn-operator')
 SERVICE = 'quantumvpn-operator'
 BASE_SOURCES = {'app.py', 'quantumvpn_aurora.py', 'assets/quantumvpn-world.svg'}
+NODE_CONSOLE_SOURCES = {'quantumvpn_node_console.py'}
 COMMUNITY_SOURCES = {'quantumvpn_durak.py', 'quantumvpn_community.py', 'quantumvpn_control_next.py'}
 BOT_STATUS_SOURCES = {'quantumvpn_bot_status.py'}
 BOT_OPERATIONS_SOURCES = {'quantumvpn_bot_operations.py', 'quantumvpn_ai_knowledge.py', 'quantumvpn_proxy_monitor.py'}
@@ -156,7 +158,8 @@ def preflight(config):
     data = Path(env.get('QV_DATA_DIR', '/var/lib/quantumvpn-operator'))
     require(data.is_absolute() and data.is_dir(), 'data_root')
     require(command(['systemctl', 'is-active', SERVICE]).strip() == b'active', 'service_inactive')
-    allowed = (BASE_SOURCES | (COMMUNITY_SOURCES if config.get('with_community') else set())
+    allowed = (BASE_SOURCES | (NODE_CONSOLE_SOURCES if config.get('with_node_console') else set())
+               | (COMMUNITY_SOURCES if config.get('with_community') else set())
                | (BOT_STATUS_SOURCES if config.get('with_bot_status') else set())
                | (BOT_OPERATIONS_SOURCES if config.get('with_bot_operations') else set())
                | (QUALITY_SOURCES if config.get('with_quality') else set())
@@ -167,6 +170,7 @@ def preflight(config):
                | (FOUR_SOURCES if config.get('with_four_source') else set()))
     require(set(config['files']) <= allowed and {'app.py', 'quantumvpn_aurora.py'} <= set(config['files']), 'source_allowlist')
     require(not config.get('with_community') or COMMUNITY_SOURCES <= set(config['files']), 'community_sources_missing')
+    require(not config.get('with_node_console') or NODE_CONSOLE_SOURCES <= set(config['files']), 'node_console_source_missing')
     require(not config.get('with_bot_status') or BOT_STATUS_SOURCES <= set(config['files']), 'bot_status_source_missing')
     require(not config.get('with_bot_operations') or BOT_OPERATIONS_SOURCES <= set(config['files']), 'bot_operations_sources_missing')
     require(not config.get('with_quality') or QUALITY_SOURCES <= set(config['files']), 'quality_source_missing')
@@ -451,6 +455,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-old-app-sha256", required=True, type=sha256)
     result.add_argument("--expected-old-aurora-sha256", type=sha256,
                         help="Required when quantumvpn_aurora.py already exists remotely; otherwise expect absence")
+    result.add_argument("--expected-old-node-console-sha256", type=sha256,
+                        help="Required when quantumvpn_node_console.py already exists remotely; otherwise expect absence")
+    result.add_argument("--with-node-console", action="store_true",
+                        help="Deploy the exact measured VDS console helper; preserve live protocols, ports and settings")
     result.add_argument("--expected-old-world-sha256", type=sha256,
                         help="Required when the optional world SVG already exists remotely; otherwise expect absence")
     result.add_argument("--login-marker", default="Aurora2")
@@ -499,6 +507,11 @@ def parser() -> argparse.ArgumentParser:
 def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
     local = {"app.py": ROOT / "tools" / "quantumvpn_operator_panel.py",
              "quantumvpn_aurora.py": ROOT / "tools" / "quantumvpn_aurora.py"}
+    with_node_console = getattr(args, "with_node_console", False)
+    if with_node_console:
+        local[NODE_CONSOLE_MODULE] = ROOT / "tools" / NODE_CONSOLE_MODULE
+    elif getattr(args, "expected_old_node_console_sha256", None):
+        raise ValueError("Node console old hash requires --with-node-console")
     world = ROOT / "tools" / "assets" / "quantumvpn-world.svg"
     if world.is_file():
         local["assets/quantumvpn-world.svg"] = world
@@ -572,6 +585,8 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
     old = {"app.py": args.expected_old_app_sha256,
            "quantumvpn_aurora.py": args.expected_old_aurora_sha256,
            "assets/quantumvpn-world.svg": args.expected_old_world_sha256}
+    if with_node_console:
+        old[NODE_CONSOLE_MODULE] = getattr(args, "expected_old_node_console_sha256", None)
     if with_community:
         old.update({"quantumvpn_durak.py": getattr(args, "expected_old_durak_sha256", None),
                     "quantumvpn_community.py": getattr(args, "expected_old_community_sha256", None),
@@ -615,6 +630,7 @@ def build_config(args: argparse.Namespace) -> tuple[dict, dict[str, bytes]]:
     return {"apply": args.apply, "upload": upload, "files": files,
             "companions": companions, "panel_build": builds[0],
             "with_community": with_community,
+            "with_node_console": with_node_console,
             "with_bot_status": with_bot_status,
             "with_bot_operations": with_bot_operations,
             "with_quality": with_quality,

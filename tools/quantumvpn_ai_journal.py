@@ -217,3 +217,52 @@ def read_entries(db, limit=20):
         if isinstance(entry, dict) and entry.get("schema") == 1:
             result.append(sanitize_entry(entry))
     return result
+
+
+def learning_summary(db, *, now):
+    """Bounded historical outcomes, not training or authority for new actions.
+
+    Count distinct measured decisions in the most recent 100 journal records.
+    An applied proposal is not a success: verification and rollback are shown
+    separately. Old, future, malformed and unevidenced records are excluded.
+    Only aggregate counts leave the local journal, never node aliases/prose.
+    """
+    now = _integer(now)
+    summary = {"schema": 1, "window_seconds": 7 * 86400, "records_reviewed": 0,
+               "measured_changes": 0, "verified_changes": 0, "rollbacks": 0,
+               "manual_overrides": 0, "sample_limited": False,
+               "authority": "historical_observation_only"}
+    if now is None:
+        return summary
+    entries = read_entries(db, 100)
+    count = db.execute("select count(*) from (select 1 from events where kind='ai_autopilot_decision' limit 101)").fetchone()[0]
+    summary["sample_limited"] = count > 100
+    seen = set()
+    for entry in entries:
+        stamp = entry["at"]
+        if stamp is None or not 0 <= now - stamp <= summary["window_seconds"]:
+            continue
+        summary["records_reviewed"] += 1
+        required = entry["policy"]["required_checks"]
+        for action in entry["actions"]:
+            identity = (stamp, action["kind"], action["node_id"])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            kind = action["kind"]
+            if kind == "manual_override" and entry["reason"] == "manual_override":
+                summary["manual_overrides"] += 1
+                continue
+            measured = [row for row in entry["evidence"] if row["node_id"] == action["node_id"]
+                        and row["checked_at"] is not None and 0 <= stamp - row["checked_at"] <= 300
+                        and row["consecutive_checks"] is not None and row["consecutive_checks"] >= required]
+            if not measured:
+                continue
+            if kind in {"select_reserve", "quarantine_node", "recover_node"} and entry["phase"] == "applied":
+                summary["measured_changes"] += 1
+            elif (kind == "verified" and entry["status"] == "verified" and entry["reason"] == "post_change_checks_passed"
+                  and any(row["status"] == "healthy" for row in measured)):
+                summary["verified_changes"] += 1
+            elif kind == "rollback" and entry["phase"] == "applied" and entry["reason"] == "reserve_regressed":
+                summary["rollbacks"] += 1
+    return summary

@@ -55,7 +55,11 @@ object WhySlowDiagnoser {
         }
         if (killSwitch) points += "Kill switch включён — при обрыве VPN интернет будет нулевым."
         if (powerModeName == "Battery") {
-            points += "Режим батареи (MTU нормализован) — для скорости выберите «Скорость»."
+            points += "Режим «Стабильность» сам по себе не задаёт лимит скорости. MTU и параметры протокола видны в экспорте диагностики."
+        }
+        if (vpnState is VpnConnectionState.Connected) {
+            points += "Сравните спидтест на этом телефоне с VPN и без VPN в одной сети. Спидтест VPS не измеряет путь телефона до VPN-сервера."
+            points += "Если видео тормозит, экспортируйте диагностику сразу после сбоя и сохраните системный ADB logcat из той же сессии."
         }
         stats.exitLocation?.let { points += "Выход: ${it.displayLabel}." }
 

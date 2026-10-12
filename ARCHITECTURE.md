@@ -12,6 +12,19 @@
 | Точный commit | `e8f6936480b7fa9738911e3e7fc2ec0d8a634a88` |
 | Текущий workspace | Android app + изолированные `app-updater`/`network-bootstrap`/import libraries, один VPN service, pinned libbox и packaged `.srs` |
 
+## Расширенный клиент: фактическое состояние на 12 октября 2026 года
+
+Ниже сохранён исходный план MVP. Его запрет всех фоновых задач уже не описывает текущий расширенный клиент. Для перечисленных здесь возможностей применяется это уточнение; границы одного Android process, одного VPN service/TUN, проверки APK и отсутствия секретов в Logcat сохраняются.
+
+- `QuantumVpnService` владеет одним session `PARTIAL_WAKE_LOCK` с timeout шесть часов; остановка, ошибка и revoke освобождают его. `VpnBatteryExemption` только проверяет статус и открывает системный запрос. Это не подтверждение экономичности на устройстве.
+- `SubscriptionRefreshAlarms`, `UpdateCheckAlarms` и `VpnScheduleAlarms` — единственные владельцы `AlarmManager`. Подписки используют inexact интервал от одного до 24 часов; проверка обновлений планируется через 120 секунд после предыдущей, без автоматической загрузки APK; три расписания VPN используют inexact суточные alarms только при включённой настройке. В manifest есть `SCHEDULE_EXACT_ALARM`, однако текущие владельцы не вызывают exact alarm API. Внутренние receivers не экспортируются, PendingIntent immutable и адресован своему приложению.
+- Проверка политики панели, локальные расписания, обновление подписок, восстановление сети и работа открытых экранов имеют ограниченный набор coroutine timers. Их владельцы и количество call sites явно перечислены в [scripts/verify-runtime-surfaces.py](scripts/verify-runtime-surfaces.py); новый owner или timer требует обновления проверяемой политики. `JobScheduler`, `WorkManager`, fixed-rate executors и exact alarms по-прежнему не разрешены.
+- Один session command client подписан на `CommandStatus` и `CommandConnections` с интервалом одна секунда для реального трафика уведомления и счётчика блокировок. Он существует во время активной сессии, включая фон; поколение соединения проверяется, закрытие session отключает client. Старое описание «только видимая главная / никогда CommandConnections» относится к исходному MVP.
+- Manifest объявляет `SUPPORTS_ALWAYS_ON=true`, но `VpnSystemPolicy` по-прежнему блокирует запуск при Always-on/Lockdown. Декларация не означает проверенную совместимость этих режимов; соответствующая preflight-проверка обязательна.
+- `FileProvider` остаётся non-exported с read grants. Точный allowlist: `cache/diagnostics`, `cache/updates`, `cache/updates-system`, `cache/backups` и app-owned external files `Download/`; корень cache, shared storage и root-path не открываются.
+
+`verify-project.sh` проверяет эти текущие поверхности, а также pinned зависимости, структуру проекта, permissions, cache paths и диагностические раскрытия UI. Прохождение статического verifier не заменяет физические VPN, DNS, throughput и battery gates. Для расширенного клиента измеряют стоимость перечисленной фоновой работы, а не утверждают её отсутствие.
+
 ## Порядок доверия
 
 Если документы кажутся противоречивыми:

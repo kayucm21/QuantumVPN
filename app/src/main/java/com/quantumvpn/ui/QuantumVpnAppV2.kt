@@ -84,9 +84,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -100,6 +102,9 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.activity.compose.BackHandler
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -140,15 +145,26 @@ import com.quantumvpn.vpn.UnderlyingServerPing
 import com.quantumvpn.vpn.ServerSwitchEvent
 import com.quantumvpn.policy.ClientPolicy
 
+private val StatisticsNavigationIcon = ImageVector.Builder(
+    name = "SessionStatistics", defaultWidth = 24.dp, defaultHeight = 24.dp,
+    viewportWidth = 24f, viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(4f, 13f); lineTo(8f, 13f); lineTo(8f, 21f); lineTo(4f, 21f); close()
+        moveTo(10f, 3f); lineTo(14f, 3f); lineTo(14f, 21f); lineTo(10f, 21f); close()
+        moveTo(16f, 8f); lineTo(20f, 8f); lineTo(20f, 21f); lineTo(16f, 21f); close()
+    }
+}.build()
+
 internal enum class V2Tab(val title: String, val icon: ImageVector) {
     Home("Главная", Icons.Default.Home),
     Servers("Серверы", Icons.AutoMirrored.Filled.List),
-    Statistics("Статистика", Icons.Default.Menu),
+    Statistics("Статистика", StatisticsNavigationIcon),
     Settings("Настройки", Icons.Default.Settings),
     Cards("Карты", Icons.Default.CheckCircle),
 }
 
-/** Liquid Glass Orbit — cyan/blue glassmorphism matching the design mockup. */
+/** Quantum Horizon — calm navy surfaces, clear hierarchy and measured status. */
 private val LocalAuroraDark = staticCompositionLocalOf { true }
 private val LocalAuroraAccent = staticCompositionLocalOf { Color(0xFF3DE7FF) }
 private val LocalAuroraBackgroundStyle = staticCompositionLocalOf { AppBackgroundStyle.Aurora }
@@ -160,25 +176,24 @@ private val LocalAuroraBackdropDrawn = staticCompositionLocalOf { false }
 private val LocalAuroraHaptics = staticCompositionLocalOf { true }
 private data class AuroraTapBubble(val id: Long, val origin: Offset)
 private object Aurora {
-    val Night: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF040B16) else Color(0xFFF3F7FB)
-    val VioletNight: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF071526) else Color(0xFFE8F1FA)
+    val Night: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF07121C) else Color(0xFFF2F6F7)
+    val VioletNight: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF0C1C29) else Color(0xFFE8F0F3)
     val Glass: Color @Composable get() = if (LocalAuroraDark.current) {
-        if (LocalAuroraContrast.current) Color(0xFF0B1E33) else Color(0xEE0B1E33)
+        if (LocalAuroraContrast.current) Color(0xFF122734) else Color(0xF2122734)
     } else Color(0xF5FFFFFF)
-    val Mint: Color @Composable get() = if (LocalAuroraDark.current) LocalAuroraAccent.current else Color(0xFF0087A8)
-    val Violet: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFF9B6DFF) else Color(0xFF7055D9)
-    val Text: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFFF4FBFF) else Color(0xFF0B1A2A)
+    val Mint: Color @Composable get() = if (LocalAuroraDark.current) LocalAuroraAccent.current else Color(0xFF006B82)
+    val Violet: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFFA6AFFA) else Color(0xFF535DB5)
+    val Text: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFFF0F7FB) else Color(0xFF122633)
     val Muted: Color @Composable get() = if (LocalAuroraDark.current) {
-        if (LocalAuroraContrast.current) Color(0xFFE2EEF7) else Color(0xFFABC0D4)
-    } else Color(0xFF41556A)
-    val Border: Color @Composable get() = if (LocalAuroraContrast.current) Aurora.Muted else if (LocalAuroraDark.current) Color(0xFF24516D) else Color(0xFFB7CDDE)
-    val Danger: Color @Composable get() = Color(0xFFFF7A93)
+        if (LocalAuroraContrast.current) Color(0xFFE2EEF7) else Color(0xFFA6BAC8)
+    } else Color(0xFF4A606F)
+    val Border: Color @Composable get() = if (LocalAuroraContrast.current) Aurora.Muted else if (LocalAuroraDark.current) Color(0xFF2C4453) else Color(0xFFC3D3DD)
+    val Danger: Color @Composable get() = if (LocalAuroraDark.current) Color(0xFFFF7A93) else Color(0xFFB42349)
 }
 
 /**
- * Aurora Glass is intentionally scoped to the non-home tabs.  It gives the
- * dense lists and settings pages the same depth as the new startup/home art
- * without changing any VPN, update, or server-selection behaviour.
+ * A shared, static background keeps all pages coherent without a frame-clock
+ * observer. User-selected photos and styles retain priority.
  */
 @Composable
 private fun V2AuroraBackdrop(
@@ -205,8 +220,8 @@ private fun V2AuroraBackdrop(
     }
     val touchBubbles = LocalAuroraTouchBubbles.current && !LocalAuroraReduceMotion.current
     val context = LocalContext.current
-    val violetBloom = if (dark) Color(0xFF8B5CF6) else Color(0xFF6D4AFF)
-    val tealBloom = if (dark) Color(0xFF2EE5C8) else Color(0xFF00A58B)
+    val violetBloom = if (dark) Color(0xFF7788C8) else Color(0xFF7987C3)
+    val tealBloom = if (dark) Color(0xFF5CCFB8) else Color(0xFF008E7A)
     val customBitmap by produceState<android.graphics.Bitmap?>(
         initialValue = null,
         key1 = backgroundStyle,
@@ -269,16 +284,17 @@ private fun V2AuroraBackdrop(
         }
         if (backgroundStyle == AppBackgroundStyle.Aurora && dark && customBitmap == null) {
             AuroraGlassBackdrop(Modifier.fillMaxSize(), motionEnabled = false)
+            Box(Modifier.fillMaxSize().background(Aurora.Night.copy(alpha = .68f)))
         }
         Canvas(Modifier.fillMaxSize()) {
             val span = maxOf(size.width, size.height)
             drawCircle(
-                color = violetBloom.copy(alpha = if (dark) .17f else .09f),
+                color = violetBloom.copy(alpha = if (dark) .09f else .05f),
                 radius = span * .58f,
                 center = Offset(size.width * .94f, -span * .08f),
             )
             drawCircle(
-                color = tealBloom.copy(alpha = if (dark) .12f else .07f),
+                color = tealBloom.copy(alpha = if (dark) .07f else .045f),
                 radius = span * .48f,
                 center = Offset(-span * .10f, size.height * .42f),
             )
@@ -338,8 +354,8 @@ private fun V2GlassPanel(
     Surface(
         color = Color.Transparent,
         contentColor = Aurora.Text,
-        border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .86f)),
-        shape = RoundedCornerShape(22.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border),
+        shape = RoundedCornerShape(24.dp),
         shadowElevation = 0.dp,
         modifier = modifier,
     ) {
@@ -347,15 +363,27 @@ private fun V2GlassPanel(
             Modifier.background(
                 Brush.verticalGradient(
                     listOf(
-                        Aurora.Glass.copy(alpha = .96f),
-                        Aurora.VioletNight.copy(alpha = .74f),
-                        accent.copy(alpha = .055f),
+                        Aurora.Glass,
+                        Aurora.VioletNight.copy(alpha = .96f),
+                        accent.copy(alpha = .045f),
                     ),
                 ),
             ),
         ) {
             content()
         }
+    }
+}
+
+@Composable
+private fun V2PageHeading(title: String, subtitle: String, action: (@Composable () -> Unit)? = null) {
+    Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(title, color = Aurora.Text, fontSize = 28.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.semantics { heading() })
+            Text(subtitle, color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp))
+        }
+        action?.invoke()
     }
 }
 
@@ -924,8 +952,8 @@ internal fun V2Home(
         else -> "Соединение не защищено"
     }
     val stateColor = when {
-        busy -> Color(0xFFC395FF)
-        connected -> Color(0xFF54F4CF)
+        busy -> Aurora.Violet
+        connected -> if (LocalAuroraDark.current) Color(0xFF54F4CF) else Color(0xFF006E5A)
         else -> Aurora.Muted
     }
     val actionLabel = when {
@@ -1011,18 +1039,18 @@ internal fun V2Home(
             )
             Spacer(Modifier.height(if (compact) 4.dp else 12.dp))
             Surface(
-                onClick = onServers, color = Aurora.Glass.copy(alpha = .93f),
-                shape = RoundedCornerShape(18.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .55f)),
+                onClick = onServers, color = Aurora.Glass,
+                shape = RoundedCornerShape(22.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border),
                 modifier = Modifier.fillMaxWidth().testTag("home-server").semantics { contentDescription = "Выбрать сервер" },
             ) {
                 Row(Modifier.heightIn(min = if (compact) 56.dp else 70.dp)
                     .padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Surface(shape = CircleShape, color = Aurora.Muted.copy(alpha = .1f), modifier = Modifier.size(36.dp)) {
-                        AuroraHomeGlobe2026(Aurora.Muted, Modifier.padding(5.dp))
+                    Surface(shape = RoundedCornerShape(12.dp), color = Aurora.Mint.copy(alpha = .10f), modifier = Modifier.size(40.dp)) {
+                        AuroraHomeGlobe2026(Aurora.Mint, Modifier.padding(8.dp))
                     }
                     Column(Modifier.weight(1f).padding(start = 12.dp, end = 7.dp)) {
-                        Text("Сервер", color = Aurora.Muted, fontSize = 11.sp)
+                        Text("ВАШ СЕРВЕР", color = Aurora.Muted, fontSize = 10.sp, letterSpacing = .9.sp)
                         Text(server, color = Aurora.Text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
                             maxLines = if (largeText) 2 else 1, overflow = TextOverflow.Ellipsis)
                     }
@@ -1030,8 +1058,10 @@ internal fun V2Home(
                 }
             }
             Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
-            if (!compact) Text(stateText, color = stateColor, fontSize = 13.sp,
-                textAlign = TextAlign.Center, modifier = Modifier.testTag("home-protection"))
+            if (!compact) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag("home-protection")) {
+                AuroraHomeShield2026(stateColor, connected, Modifier.size(20.dp))
+                Text(stateText, color = stateColor, fontSize = 13.sp, modifier = Modifier.padding(start = 6.dp))
+            }
             Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
             Surface(onClick = onCards, color = Color.Transparent, shape = RoundedCornerShape(18.dp),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFC5A7FF).copy(alpha = .55f)),
@@ -1049,12 +1079,16 @@ internal fun V2Home(
                 }
             }
             Spacer(Modifier.height(8.dp))
-            // Details stay reachable without making the home a dashboard to scroll through.
-            TextButton(onClick = { detailsOpen = true }, modifier = Modifier.fillMaxWidth()
-                .heightIn(min = 48.dp).testTag("home-details")) {
-                Text(if (connected) "⌁ ${serverPingText(ping, pingMeasured)} · Детали соединения"
-                    else if (busy) stateText else "Не подключено · Детали соединения",
-                    color = stateColor, fontSize = 12.sp)
+            Surface(onClick = { detailsOpen = true }, color = Color.Transparent,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("home-details")) {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AuroraHomeShield2026(stateColor, connected, Modifier.size(22.dp))
+                    Text(if (connected) "${serverPingText(ping, pingMeasured)} · Детали соединения"
+                        else if (busy) stateText else "Не подключено · Детали соединения",
+                        color = stateColor, fontSize = 12.sp, modifier = Modifier.weight(1f).padding(start = 9.dp, end = 6.dp))
+                    Text("›", color = Aurora.Muted, fontSize = 21.sp)
+                }
             }
             if (!hasProfile) {
                 Text("Загружаем встроенный список серверов…", color = Color(0xFF5CF5D0), fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
@@ -1671,7 +1705,6 @@ internal fun V2Servers(
     connected: Boolean = false, connectionBusy: Boolean = false,
     pingMeasured: Boolean = false, onConnect: () -> Unit = {},
 ) {
-    var allServersOpen by rememberSaveable { mutableStateOf(false) }
     var search by rememberSaveable { mutableStateOf("") }
     var protocol by rememberSaveable { mutableStateOf("") }
     var category by rememberSaveable { mutableStateOf("Все") }
@@ -1705,16 +1738,22 @@ internal fun V2Servers(
         Surface(
             onClick = { if (group.selectable) onSelect(group.tag, item.tag) },
             enabled = group.selectable,
-            color = if (selectedServer) Aurora.Mint.copy(alpha = .12f) else Aurora.Glass.copy(alpha = .84f),
-            border = androidx.compose.foundation.BorderStroke(1.dp, if (selectedServer) Aurora.Mint else Aurora.Border),
-            shape = RoundedCornerShape(15.dp),
-            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp).semantics { contentDescription = "Сервер ${item.tag}${if (selectedServer) ", выбран" else ""}" },
+            color = if (selectedServer) Aurora.Mint.copy(alpha = .12f) else Aurora.Glass,
+            border = androidx.compose.foundation.BorderStroke(1.dp, if (selectedServer) Aurora.Mint.copy(alpha = .75f) else Aurora.Border),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).heightIn(min = 72.dp).semantics {
+                contentDescription = "Сервер ${item.tag}${if (selectedServer) ", выбран" else ""}"
+                this.selected = selectedServer
+            },
         ) {
             Row(Modifier.padding(start = 10.dp, end = 8.dp, top = 5.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(serverFlag(item.tag), fontSize = 22.sp)
+                Surface(color = Aurora.VioletNight, shape = RoundedCornerShape(12.dp), modifier = Modifier.size(40.dp)) {
+                    Box(contentAlignment = Alignment.Center) { Text(serverFlag(item.tag), fontSize = 23.sp) }
+                }
                 Column(Modifier.weight(1f).padding(start = 9.dp, end = 4.dp)) {
-                    Text(item.tag, color = Aurora.Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(item.type.uppercase() + if (groups.size > 1) " · ${group.tag}" else "", color = Aurora.Muted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(item.tag, color = Aurora.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(item.type.uppercase() + if (groups.size > 1) " · ${group.tag}" else "", color = Aurora.Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 3.dp))
                 }
                 TextButton(
                     onClick = { onFavorite(group.tag, item.tag) }, enabled = profileId != null,
@@ -1726,33 +1765,22 @@ internal fun V2Servers(
                     shape = RoundedCornerShape(99.dp),
                 ) {
                     Text(serverPingText(ping, pingMeasured), color = if (ping != null) Aurora.Mint else Aurora.Muted, fontWeight = FontWeight.Bold,
-                        fontSize = 10.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                        fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp))
                 }
                 Text(if (selectedServer) "✓" else "›", color = if (selectedServer) Aurora.Mint else Aurora.Muted, fontSize = 18.sp, modifier = Modifier.padding(start = 7.dp))
             }
         }
     }
-    if (allServersOpen) {
-        AlertDialog(
-            onDismissRequest = { allServersOpen = false },
-            title = { Text("Серверы · ${filtered.size}") },
-            text = {
-                LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                    items(filtered, key = { (group, item) -> "${group.tag}|${item.tag}" }) { (group, item) -> ServerRow(group, item) }
-                }
-            },
-            confirmButton = { TextButton(onClick = { allServersOpen = false }) { Text("Готово") } },
-        )
-    }
     V2AuroraBackdrop(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 10.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Серверы", color = Aurora.Text, fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).semantics { heading() })
-                TextButton(onClick = onRefresh, enabled = !busy) { Text(if (busy) "…" else "Обновить", color = Aurora.Mint, fontSize = 11.sp) }
+            V2PageHeading("Серверы", "Выберите маршрут · ${entries.size} в списке") {
+                TextButton(onClick = onRefresh, enabled = !busy) {
+                    Text(if (busy) "Обновление…" else "Обновить", color = Aurora.Mint, fontSize = 12.sp)
+                }
             }
             OutlinedTextField(search, { search = it.take(80) }, placeholder = { Text("Поиск страны или сервера…", fontSize = 12.sp) },
                 colors = quantum2TextFieldColors(),
-                singleLine = true, shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth().testTag("server-search"))
+                singleLine = true, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth().testTag("server-search"))
             Row(Modifier.fillMaxWidth().padding(top = 7.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf("Все", "Избранные", "Резерв").forEach { label ->
                     Surface(onClick = { category = label }, shape = RoundedCornerShape(99.dp),
@@ -1778,17 +1806,14 @@ internal fun V2Servers(
                         color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(14.dp))
                 }
             } else {
-                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(top = 3.dp)) {
-                    filtered.take(5).forEach { (group, item) -> ServerRow(group, item) }
-                    if (filtered.size > 5) TextButton(onClick = { allServersOpen = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Все серверы (${filtered.size})", color = Aurora.Mint, fontSize = 11.sp)
-                    }
+                LazyColumn(Modifier.weight(1f).padding(top = 5.dp)) {
+                    items(filtered, key = { (group, item) -> "${group.tag}|${item.tag}" }) { (group, item) -> ServerRow(group, item) }
                 }
             }
             Spacer(Modifier.height(2.dp))
             Text(if (updated == null) "Пинг измеряется и без VPN · каждые 20 секунд" else "Обновлено $updated · пинг каждые 20 секунд",
-                color = Aurora.Muted, fontSize = 9.sp, modifier = Modifier.padding(vertical = 6.dp))
-            Button(onClick = onConnect, enabled = !connectionBusy, shape = RoundedCornerShape(15.dp),
+                color = Aurora.Muted, fontSize = 10.sp, modifier = Modifier.padding(vertical = 8.dp))
+            Button(onClick = onConnect, enabled = !connectionBusy, shape = RoundedCornerShape(18.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Aurora.Mint, contentColor = Aurora.Night),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp).testTag("servers-connect")) {
                 Text(if (connectionBusy) "Подключение…" else if (connected) "Отключить" else "Подключиться", fontWeight = FontWeight.Bold)
@@ -1841,8 +1866,8 @@ internal fun V2Statistics(
     }
     V2AuroraBackdrop(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 10.dp)) {
-            Text("Статистика", color = Aurora.Text, fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.semantics { heading() })
-            Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            V2PageHeading("Статистика", "Ваш трафик и качество соединения")
+            Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("Сегодня", "Неделя").forEach { label ->
                     Surface(onClick = { period = label }, shape = RoundedCornerShape(12.dp),
                         color = if (period == label) Aurora.Mint else Aurora.Glass,
@@ -1852,8 +1877,8 @@ internal fun V2Statistics(
                     }
                 }
             }
-            TrafficChart(stats, compact = true)
-            Text("График текущей сессии · измеренная скорость", color = Aurora.Muted, fontSize = 10.sp, modifier = Modifier.padding(bottom = 8.dp))
+            TrafficChart(stats, connected = connected, compact = true)
+            Text("Текущий трафик, не тест предельной скорости VPN", color = Aurora.Muted, fontSize = 11.sp, modifier = Modifier.padding(bottom = 12.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 V2Metric("↓ Загрузка · $period", formatBytes(download), Modifier.weight(1f))
                 V2Metric("↑ Отдача · $period", formatBytes(upload), Modifier.weight(1f))
@@ -2030,8 +2055,8 @@ internal fun V2Settings(
                 Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp).padding(bottom = 22.dp),
             ) {
             TextButton(onClick = { aboutOpen = false }) { Text("← Назад", color = Aurora.Mint) }
-            V2AuroraHeader("О приложении", "QuantumVPN ${BuildConfig.VERSION_NAME}", "ПРОВЕРЕНО", true)
-            Text("Aurora Glass · защита соединения", color = Aurora.Muted, modifier = Modifier.padding(top = 12.dp))
+            V2AuroraHeader("О приложении", "QuantumVPN ${BuildConfig.VERSION_NAME}")
+            Text("Quantum Horizon · защита соединения", color = Aurora.Muted, modifier = Modifier.padding(top = 12.dp))
             if (policy.features.changelog) {
                 Spacer(Modifier.height(22.dp))
                 Text("Что нового", color = Aurora.Text, fontWeight = FontWeight.Bold)
@@ -2075,7 +2100,7 @@ internal fun V2Settings(
                 TextButton(onClick = { selectedGroup = null }) { Text("← Настройки", color = Aurora.Mint) }
                 Text(selectedGroup!!, color = Aurora.Text, fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.semantics { heading() })
             } else {
-                Text("Настройки", color = Aurora.Text, fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 7.dp).semantics { heading() })
+                V2PageHeading("Настройки", "Управляйте соединением и вашим пространством")
             }
             when (selectedGroup) {
                 "Подключение" -> {
@@ -2128,9 +2153,9 @@ internal fun V2Settings(
                     Spacer(Modifier.height(13.dp))
                     Row(Modifier.align(Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {
                         AuroraBrandMark(connected = vpnConnected, modifier = Modifier.size(30.dp))
-                        Text("QuantumVPN 2.0", color = Aurora.Text, fontSize = 13.sp, modifier = Modifier.padding(start = 7.dp))
+                        Text("QuantumVPN ${BuildConfig.VERSION_NAME}", color = Aurora.Text, fontSize = 13.sp, modifier = Modifier.padding(start = 7.dp))
                     }
-                    Text("Стабильность. Свобода. Ближе к вам.", color = Aurora.Muted, fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                    Text("Ваше соединение. Ваш выбор.", color = Aurora.Muted, fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                 }
             }
         }
@@ -2139,14 +2164,16 @@ internal fun V2Settings(
 
 @Composable
 private fun V2SettingsHubRow(icon: String, title: String, subtitle: String, tag: String, onClick: () -> Unit) {
-    Surface(onClick = onClick, color = Aurora.Glass.copy(alpha = .88f), shape = RoundedCornerShape(18.dp),
+    Surface(onClick = onClick, color = Aurora.Glass, shape = RoundedCornerShape(22.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border),
         modifier = Modifier.fillMaxWidth().heightIn(min = 76.dp).testTag(tag)) {
         Row(Modifier.padding(horizontal = 15.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(icon, color = Aurora.Mint, fontSize = 29.sp, modifier = Modifier.width(38.dp))
+            Surface(color = Aurora.Mint.copy(alpha = .10f), shape = RoundedCornerShape(13.dp), modifier = Modifier.size(42.dp)) {
+                Box(contentAlignment = Alignment.Center) { Text(icon, color = Aurora.Mint, fontSize = 25.sp) }
+            }
             Column(Modifier.weight(1f).padding(start = 7.dp, end = 6.dp)) {
                 Text(title, color = Aurora.Text, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                Text(subtitle, color = Aurora.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp))
+                Text(subtitle, color = Aurora.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp))
             }
             Text("›", color = Aurora.Muted, fontSize = 26.sp)
         }
@@ -2628,12 +2655,12 @@ internal fun V2BottomBar(tab: V2Tab, onTab: (V2Tab) -> Unit) {
     // Honour the real Android gesture/three-button bar; bound broken OEM reports.
     val bottomClearance = with(density) { WindowInsets.navigationBars.getBottom(this).toDp() }.coerceIn(0.dp, 72.dp) + 12.dp
     Surface(
-    color = Aurora.Night.copy(alpha = .97f),
-    border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border.copy(alpha = .74f)),
-    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-    shadowElevation = 14.dp,
+    color = Aurora.Glass,
+    border = androidx.compose.foundation.BorderStroke(1.dp, Aurora.Border),
+    shape = RoundedCornerShape(26.dp),
+    shadowElevation = 0.dp,
     // Include the measured system bar once, with a bound for broken OEM insets.
-    modifier = Modifier.fillMaxWidth().testTag("bottom-navigation").padding(bottom = bottomClearance),
+    modifier = Modifier.fillMaxWidth().testTag("bottom-navigation").padding(horizontal = 12.dp).padding(bottom = bottomClearance),
 ) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 7.dp, vertical = 7.dp),
@@ -2644,25 +2671,29 @@ internal fun V2BottomBar(tab: V2Tab, onTab: (V2Tab) -> Unit) {
         // Cards is opened from the compact home shortcut. Keeping four fixed
         // bottom actions preserves tap targets on small Android screens.
         V2Tab.entries.filter { it != V2Tab.Cards }.forEach { item ->
-            val selected = item == tab
+            val isSelected = item == tab
             Surface(
                 onClick = { navHaptic(Haptics.Click); onTab(item) },
-                color = if (selected) Aurora.Mint.copy(alpha = .14f) else Color.Transparent,
-                shape = RoundedCornerShape(16.dp),
+                color = if (isSelected) Aurora.Mint.copy(alpha = .13f) else Color.Transparent,
+                shape = RoundedCornerShape(19.dp),
                 // The previous minimum-only height let fillMaxSize() in the
                 // child Column consume the whole free screen height on some
                 // devices.  That turned the selected tab into a tall stripe,
                 // pushed the bar upward, and hid the page content.  A fixed
                 // tab height keeps the complete bottom bar compact.
-                modifier = Modifier.weight(1f).height((56f + (fontScale - 1f).coerceAtLeast(0f) * 16f).coerceAtMost(80f).dp).padding(horizontal = 2.dp).semantics { contentDescription = item.title },
+                modifier = Modifier.weight(1f).height((56f + (fontScale - 1f).coerceAtLeast(0f) * 16f).coerceAtMost(80f).dp).padding(horizontal = 2.dp).semantics {
+                    contentDescription = item.title
+                    role = Role.Tab
+                    this.selected = isSelected
+                },
             ) {
                 Column(
                     Modifier.fillMaxSize().padding(vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    Icon(item.icon, contentDescription = item.title, tint = if (selected) Aurora.Mint else Aurora.Muted, modifier = Modifier.size(22.dp))
-                    Text(item.title, color = if (selected) Aurora.Mint else Aurora.Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                    Icon(item.icon, contentDescription = null, tint = if (isSelected) Aurora.Mint else Aurora.Muted, modifier = Modifier.size(22.dp))
+                    Text(item.title, color = if (isSelected) Aurora.Mint else Aurora.Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal)
                 }
             }
         }
@@ -2683,15 +2714,31 @@ private fun V2BrandHeader(subtitle: String) {
     }
 }
 @Composable
-private fun TrafficChart(stats: VpnSessionStats, compact: Boolean = false) {
+private fun TrafficChart(stats: VpnSessionStats, connected: Boolean, compact: Boolean = false) {
     val samples = stats.samples.takeLast(60)
     val mint = Aurora.Mint
     val violet = Aurora.Violet
     val border = Aurora.Border
+    val current = samples.lastOrNull()?.takeIf { connected && stats.statusStreamActive }
     V2GlassPanel(modifier = Modifier.fillMaxWidth().padding(bottom = if (compact) 8.dp else 14.dp), accent = Aurora.Violet) {
         Column(Modifier.padding(if (compact) 10.dp else 16.dp)) {
-            Text("Трафик", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = if (compact) 12.sp else 14.sp)
-            Text("Загрузка · Отдача", color = Aurora.Muted, fontSize = if (compact) 10.sp else 12.sp)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Трафик сессии", color = Aurora.Text, fontWeight = FontWeight.Bold, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                Text(if (current != null) "Сейчас" else if (samples.isNotEmpty()) "Последние замеры" else "Нет замера",
+                    color = Aurora.Muted, fontSize = 10.sp)
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("↓ Загрузка", color = mint, fontSize = 11.sp)
+                    Text(liveTrafficRateText(current?.downloadBytesPerSecond, connected), color = Aurora.Text,
+                        fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag("statistics-download-rate"))
+                }
+                Column(Modifier.weight(1f)) {
+                    Text("↑ Отдача", color = violet, fontSize = 11.sp)
+                    Text(liveTrafficRateText(current?.uploadBytesPerSecond, connected), color = Aurora.Text,
+                        fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag("statistics-upload-rate"))
+                }
+            }
             if (samples.size < 2) Text("График появится после получения данных", color = Aurora.Muted, fontSize = if (compact) 10.sp else 12.sp, modifier = Modifier.padding(vertical = if (compact) 10.dp else 24.dp))
             else Canvas(Modifier.fillMaxWidth().height(if (compact) 76.dp else 130.dp).padding(top = if (compact) 8.dp else 16.dp)) {
                 val peak = samples.maxOf { maxOf(it.downloadBytesPerSecond, it.uploadBytesPerSecond) }.coerceAtLeast(1).toFloat()

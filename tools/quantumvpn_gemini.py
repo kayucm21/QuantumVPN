@@ -9,8 +9,14 @@ import json
 import math
 import os
 import re
+import time
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+try:
+    from quantumvpn_ai_knowledge import context as knowledge_context, performance_knowledge
+except ImportError:
+    from tools.quantumvpn_ai_knowledge import context as knowledge_context, performance_knowledge
 
 MODEL = 'gemini-3.8-flash'
 ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/' + MODEL + ':generateContent'
@@ -105,6 +111,7 @@ def cloud_snapshot(snapshot):
     coverage = guard.get('coverage') if isinstance(guard.get('coverage'), dict) else {}
     output['network_guard'] = {'cause': 'unconfirmed', 'throughput': 'not_measured',
                                'coverage': {kind: number(coverage.get(kind), 24) for kind in ('dns', 'tcp', 'tls')}}
+    output['learning'] = knowledge_context(snapshot, now=int(time.time()))['learning']
     return output
 
 
@@ -142,7 +149,7 @@ def analyze(snapshot):
             'node_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['observe', 'inspect', 'reserve_candidate']}},
             'required': ['node_id', 'action']}}},
         'required': ['status', 'summary', 'risk', 'next_step', 'recommendations']}
-    body = json.dumps({'systemInstruction': {'parts': [{'text': SYSTEM_INSTRUCTION}]},
+    body = json.dumps({'systemInstruction': {'parts': [{'text': SYSTEM_INSTRUCTION + '\n' + performance_knowledge()}]},
                        'contents': [{'role': 'user', 'parts': [{'text': json.dumps(aggregate, ensure_ascii=False)}]}],
                        'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 1200,
                                             'responseMimeType': 'application/json', 'responseSchema': schema},

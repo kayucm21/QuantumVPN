@@ -97,7 +97,7 @@ internal fun AuroraQMark2026(
     }
 }
 
-/** Static light rings: no frame observer, decorative timer, blur, or rotation. */
+/** Static connection dial: no frame observer, decorative timer, blur, or rotation. */
 @Composable
 internal fun AuroraHomePower2026(
     actionLabel: String,
@@ -114,19 +114,26 @@ internal fun AuroraHomePower2026(
             val center = Offset(size.width / 2f, size.height / 2f)
             drawCircle(
                 brush = Brush.radialGradient(
-                    listOf(accent.copy(alpha = .22f), accent.copy(alpha = .10f), Color.Transparent),
+                    listOf(accent.copy(alpha = .12f), accent.copy(alpha = .045f), Color.Transparent),
                     center = center, radius = radius * 1.14f,
                 ),
                 radius = radius * 1.14f, center = center,
             )
-            drawCircle(accent.copy(alpha = .28f), radius, center, style = Stroke(1.dp.toPx()))
-            drawCircle(accent.copy(alpha = .13f), radius * .96f, center, style = Stroke(10.dp.toPx()))
-            drawCircle(accent, radius * .94f, center, style = Stroke(4.dp.toPx()))
+            drawCircle(accent.copy(alpha = .20f), radius, center, style = Stroke(1.dp.toPx()))
+            // The segmented frame is decorative, never presented as connection progress.
+            repeat(4) { segment ->
+                drawArc(accent.copy(alpha = if (busy) .4f else .8f),
+                    startAngle = -84f + segment * 90f, sweepAngle = 78f, useCenter = false,
+                    topLeft = Offset(center.x - radius * .94f, center.y - radius * .94f),
+                    size = Size(radius * 1.88f, radius * 1.88f),
+                    style = Stroke(3.dp.toPx(), cap = StrokeCap.Round))
+            }
         }
         Surface(
             onClick = onClick,
             enabled = !busy,
-            color = Color.Transparent,
+            color = if (dark) Color(0xFF102D37) else Color(0xFFE4F7F7),
+            border = BorderStroke(1.dp, accent.copy(alpha = .28f)),
             shape = CircleShape,
             modifier = Modifier.size(diameter * .82f).testTag("home-connect")
                 .semantics { contentDescription = actionLabel; role = Role.Button },
@@ -134,8 +141,8 @@ internal fun AuroraHomePower2026(
             Box(
                 Modifier.fillMaxSize().background(
                     Brush.radialGradient(
-                        if (dark) listOf(Color(0xFF083843), Color(0xFF04131C))
-                        else listOf(Color(0xFFE1FFFF), Color(0xFFF3FBFF)),
+                        if (dark) listOf(Color(0xFF153B45), Color(0xFF0C202B))
+                        else listOf(Color(0xFFDDF7F4), Color(0xFFF3FBFF)),
                     ),
                 ),
                 contentAlignment = Alignment.Center,

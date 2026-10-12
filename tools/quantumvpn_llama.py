@@ -13,11 +13,11 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 try:
     from quantumvpn_gemini import cloud_snapshot
     from quantumvpn_network_guard import configured_node_targets
-    from quantumvpn_ai_knowledge import compact_context
+    from quantumvpn_ai_knowledge import compact_context, performance_knowledge
 except ImportError:
     from tools.quantumvpn_gemini import cloud_snapshot
     from tools.quantumvpn_network_guard import configured_node_targets
-    from tools.quantumvpn_ai_knowledge import compact_context
+    from tools.quantumvpn_ai_knowledge import compact_context, performance_knowledge
 
 MODEL = 'quantum-qwen3-0.6b'
 MODEL_LABEL = 'Qwen3 0.6B · llama.cpp'
@@ -181,7 +181,7 @@ def analyze(snapshot, *, allowed_actions=None):
         body = json.dumps({'model': MODEL, 'stream': False, 'temperature': 0.1,
                            'max_tokens': 400, 'cache_prompt': False, 'reasoning_effort': 'none',
                            'chat_template_kwargs': {'enable_thinking': False},
-                           'messages': [{'role': 'system', 'content': SYSTEM_INSTRUCTION + '\n' + compact_context(snapshot, now=int(time.time()))},
+                           'messages': [{'role': 'system', 'content': SYSTEM_INSTRUCTION + '\n' + compact_context(snapshot, now=int(time.time())) + '\n' + performance_knowledge()},
                                         {'role': 'user', 'content': json.dumps(aggregate, ensure_ascii=False, separators=(',', ':'))}],
                            'response_format': {'type': 'json_object', 'schema': schema}}, ensure_ascii=False).encode('utf-8')
         if len(body) > MAX_BODY:

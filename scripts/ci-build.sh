@@ -56,10 +56,15 @@ RELEASE_APK="$RELEASE_MATRIX_DIR/app-arm64-v8a-release.apk"
 
 mkdir -p app/build
 "$AAPT2" dump permissions "$RELEASE_APK" > app/build/permissions.txt
-if grep -Eq 'WAKE_LOCK|REQUEST_IGNORE_BATTERY_OPTIMIZATIONS' app/build/permissions.txt; then
-    echo "Release APK contains a forbidden battery permission" >&2
-    exit 1
-fi
+# The extended client has an explicitly bounded VPN session wake lock and a
+# user-requested battery exemption. verify-project.sh checks their owners and
+# cleanup; verify-release-candidate.sh checks the complete merged allowlist.
+for permission in android.permission.WAKE_LOCK android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS; do
+    if [[ "$(grep -Fc "name='$permission'" app/build/permissions.txt || true)" -ne 1 ]]; then
+        echo "Release APK must declare exactly one reviewed permission: $permission" >&2
+        exit 1
+    fi
+done
 if ! grep -Fq 'android.permission.REQUEST_INSTALL_PACKAGES' app/build/permissions.txt; then
     echo "Release APK is missing the manual updater installer permission" >&2
     exit 1
@@ -88,8 +93,8 @@ if (( VPN_SERVICE_COUNT != 1 )); then
 fi
 
 ALWAYS_ON_COUNT="$(grep -Fc 'android.net.VpnService.SUPPORTS_ALWAYS_ON' app/build/manifest-tree.txt || true)"
-if (( ALWAYS_ON_COUNT != 1 )) || ! grep -F -A1 'android.net.VpnService.SUPPORTS_ALWAYS_ON' app/build/manifest-tree.txt | grep -Fq '=false'; then
-    echo "Release APK must explicitly opt its VPN service out of Always-on" >&2
+if (( ALWAYS_ON_COUNT != 1 )) || ! grep -F -A1 'android.net.VpnService.SUPPORTS_ALWAYS_ON' app/build/manifest-tree.txt | grep -Fq '=true'; then
+    echo "Release APK must retain its reviewed Always-on declaration and source policy preflight" >&2
     exit 1
 fi
 

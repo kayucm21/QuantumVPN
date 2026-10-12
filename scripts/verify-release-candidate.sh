@@ -39,25 +39,39 @@ root = ET.parse(sys.argv[1]).getroot()
 if root.get("package") != "com.quantumvpn":
     raise SystemExit("Release package name mismatch")
 sdk = root.find("uses-sdk")
-if sdk is None or sdk.get(android + "minSdkVersion") != "26" or sdk.get(android + "targetSdkVersion") != "36":
+if sdk is None or sdk.get(android + "minSdkVersion") != "26" or sdk.get(android + "targetSdkVersion") != "37":
     raise SystemExit("Release SDK contract mismatch")
 
 expected_permissions = {
+    "android.permission.WAKE_LOCK",
+    "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
     "android.permission.INTERNET",
     "android.permission.ACCESS_NETWORK_STATE",
+    "android.permission.ACCESS_WIFI_STATE",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.NEARBY_WIFI_DEVICES",
     "android.permission.FOREGROUND_SERVICE",
     "android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED",
     "android.permission.POST_NOTIFICATIONS",
     "android.permission.REQUEST_INSTALL_PACKAGES",
+    "android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION",
+    "android.permission.RECEIVE_BOOT_COMPLETED",
+    "android.permission.USE_BIOMETRIC",
+    # Merged by AndroidX Biometric for older devices.
+    "android.permission.USE_FINGERPRINT",
+    "android.permission.SCHEDULE_EXACT_ALARM",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
     "android.permission.CAMERA",
     "android.permission.QUERY_ALL_PACKAGES",
     "com.quantumvpn.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
 }
-permissions = {node.get(android + "name") for node in root.findall("uses-permission")}
+permissions = {node.get(android + "name") for kind in ("uses-permission", "uses-permission-sdk-23") for node in root.findall(kind)}
 if permissions != expected_permissions:
     raise SystemExit(f"Release permission allowlist mismatch: {sorted(permissions ^ expected_permissions)}")
 declared = root.findall("permission")
-if len(declared) != 1 or declared[0].get(android + "name") != "com.quantumvpn.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" or declared[0].get(android + "protectionLevel") != "0x2":
+if len(declared) != 1 or declared[0].get(android + "name") != "com.quantumvpn.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" or declared[0].get(android + "protectionLevel") not in ("0x2", "signature"):
     raise SystemExit("AndroidX dynamic receiver permission is not signature-protected")
 
 application = root.find("application")
@@ -83,12 +97,17 @@ for kind in ("activity", "activity-alias", "service", "provider", "receiver"):
         exported = node.get(android + "exported")
         if exported not in ("true", "false"):
             raise SystemExit(f"Component has implicit exported state: {kind} {name}")
+        if node.get(android + "process") is not None:
+            raise SystemExit(f"Component declares a second process: {kind} {name}")
         components.append((kind, name, exported, node.get(android + "permission")))
 
 exported = {(kind, name, permission) for kind, name, value, permission in components if value == "true"}
 expected_exported = {
     ("activity", "com.quantumvpn.MainActivity", None),
     ("receiver", "androidx.profileinstaller.ProfileInstallReceiver", "android.permission.DUMP"),
+    ("receiver", "com.quantumvpn.widget.VpnToggleWidget", None),
+    ("receiver", "com.quantumvpn.widget.VpnWideWidget", None),
+    ("service", "com.quantumvpn.tile.VpnToggleTileService", "android.permission.BIND_QUICK_SETTINGS_TILE"),
 }
 if exported != expected_exported:
     raise SystemExit(f"Unexpected exported components: {sorted(exported ^ expected_exported, key=str)}")
@@ -96,9 +115,50 @@ if exported != expected_exported:
 vpn = [item for item in components if item[0] == "service" and item[3] == "android.permission.BIND_VPN_SERVICE"]
 if len(vpn) != 1 or vpn[0][1] != "com.quantumvpn.vpn.QuantumVpnService" or vpn[0][2] != "false":
     raise SystemExit("Release VPN service contract mismatch")
+vpn_service = next(node for node in application.findall("service") if node.get(android + "name") == vpn[0][1])
+if vpn_service.get(android + "foregroundServiceType") not in ("0x400", "systemExempted"):
+    raise SystemExit("VPN foreground service must use only systemExempted")
+always_on = [node for node in vpn_service.findall("meta-data") if node.get(android + "name") == "android.net.VpnService.SUPPORTS_ALWAYS_ON"]
+if len(always_on) != 1 or always_on[0].get(android + "value") != "true":
+    raise SystemExit("Release VPN must explicitly declare its reviewed Always-on capability")
+
+private_receivers = {
+    "com.quantumvpn.vpn.VpnScheduleAlarmReceiver",
+    "com.quantumvpn.vpn.SubscriptionRefreshReceiver",
+    "com.quantumvpn.vpn.UpdateCheckReceiver",
+    "com.quantumvpn.vpn.SubscriptionRefreshBootReceiver",
+    "com.quantumvpn.vpn.VpnCommandReceiver",
+    "com.quantumvpn.updates.UpdateInstallResultReceiver",
+}
+for name in private_receivers:
+    nodes = [node for node in application.findall("receiver") if node.get(android + "name") == name]
+    if len(nodes) != 1 or nodes[0].get(android + "exported") != "false":
+        raise SystemExit(f"Internal schedule/update/command receiver must be unique and non-exported: {name}")
+
+for name in ("com.quantumvpn.widget.VpnToggleWidget", "com.quantumvpn.widget.VpnWideWidget"):
+    nodes = [node for node in application.findall("receiver") if node.get(android + "name") == name]
+    if len(nodes) != 1:
+        raise SystemExit(f"Widget receiver must be unique: {name}")
+    actions = [action.get(android + "name") for intent in nodes[0].findall("intent-filter") for action in intent.findall("action")]
+    metadata = [node for node in nodes[0].findall("meta-data") if node.get(android + "name") == "android.appwidget.provider"]
+    if actions != ["android.appwidget.action.APPWIDGET_UPDATE"] or len(metadata) != 1 or not metadata[0].get(android + "resource"):
+        raise SystemExit(f"Widget receiver must expose only its appwidget update action and provider metadata: {name}")
+
+tiles = [node for node in application.findall("service") if node.get(android + "name") == "com.quantumvpn.tile.VpnToggleTileService"]
+if len(tiles) != 1:
+    raise SystemExit("Quick Settings tile service must be unique")
+tile_actions = [action.get(android + "name") for intent in tiles[0].findall("intent-filter") for action in intent.findall("action")]
+if tile_actions != ["android.service.quicksettings.action.QS_TILE"]:
+    raise SystemExit("Quick Settings tile service action mismatch")
 providers = [item for item in components if item[0] == "provider" and item[1] == "androidx.core.content.FileProvider"]
 if len(providers) != 1 or providers[0][2] != "false":
     raise SystemExit("FileProvider must be unique and non-exported")
+provider = next(node for node in application.findall("provider") if node.get(android + "name") == "androidx.core.content.FileProvider")
+if provider.get(android + "authorities") != "com.quantumvpn.fileprovider" or provider.get(android + "grantUriPermissions") != "true":
+    raise SystemExit("FileProvider release authority or URI grant contract mismatch")
+provider_metadata = provider.findall("meta-data")
+if len(provider_metadata) != 1 or provider_metadata[0].get(android + "name") != "android.support.FILE_PROVIDER_PATHS" or not provider_metadata[0].get(android + "resource"):
+    raise SystemExit("FileProvider must reference only its reviewed paths resource")
 print(f"Merged release manifest verified: {len(components)} components, {len(exported)} exported.")
 PY
 
